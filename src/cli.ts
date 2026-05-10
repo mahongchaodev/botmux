@@ -1670,10 +1670,9 @@ import { buildCardBodyElements, hasMarkdown } from './im/lark/md-card.js';
 /**
  * Decide who the reply card should @ in its footer.
  *
- * Non-oncall chats: `发送给: @<owner>` as before, no cc.
- * Oncall chats: `发送给: @<last caller>` (falls back to owner if unknown);
- *   if caller differs from the owners list, `cc` the owners so they stay
- *   notified. Caller is deduped out of cc to avoid double-@.
+ * Non-oncall chats: `发送给: @<owner>`.
+ * Oncall chats: `发送给: @<last caller>` (falls back to owner if unknown) —
+ *   permission is governed by allowedUsers, so there's no per-chat list to cc.
  */
 function buildFooterAddressing(
   s: { ownerOpenId?: string; lastCallerOpenId?: string },
@@ -1681,9 +1680,6 @@ function buildFooterAddressing(
 ): { sendTo: string | undefined; cc: string[] } {
   const owner = s.ownerOpenId;
   const caller = s.lastCallerOpenId ?? owner;
-  // Oncall: address whoever triggered the turn (may not be the session owner).
-  // Non-oncall: address the session owner. Either way, no `cc` — there's no
-  // longer a per-chat owners list to fan out to.
   if (!oncall) return { sendTo: owner, cc: [] };
   return { sendTo: caller, cc: [] };
 }
@@ -1908,8 +1904,7 @@ async function cmdSend(rest: string[]): Promise<void> {
       // Footer: de-emphasized markdown (v2 dropped the `note` tag). Use small
       // text size + grey font tag so it reads like a footnote below the hr.
       // Oncall groups: `发送给` targets whoever triggered this turn (may not
-      // be the session owner), plus a `cc` line listing oncall owners so they
-      // stay informed. Non-oncall: keep owner-only behaviour.
+      // be the session owner). Non-oncall: keep owner-only behaviour.
       const footerParts = ['[botmux](https://github.com/deepcoldy/botmux)'];
       // Top-level publish has no specific recipient — drop "发送给/cc" addressing
       // so the message doesn't @ the session owner who isn't even in the target chat.
@@ -1963,9 +1958,8 @@ async function cmdSend(rest: string[]): Promise<void> {
       }
 
       // Footer: mirror the card layout — a blank paragraph separates the body
-      // from the addressing line(s). `发送给: @<caller>` always; oncall groups
-      // additionally get `cc: @<owners>` on the next line. Top-level publish
-      // has no specific recipient — skip addressing entirely.
+      // from the addressing line(s). `发送给: @<caller>` always. Top-level
+      // publish has no specific recipient — skip addressing entirely.
       const addressing = sendTopLevel
         ? { sendTo: undefined as string | undefined, cc: [] as string[] }
         : buildFooterAddressing(s, oncallEntry);

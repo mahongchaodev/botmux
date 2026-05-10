@@ -45,11 +45,12 @@ export function bindOncall(
   const idx = findEntryIndex(raw, larkAppId);
   if (idx < 0) return { ok: false, reason: 'bot_not_in_config' };
 
-  const cur: OncallChat[] = Array.isArray(raw[idx].oncallChats) ? raw[idx].oncallChats : [];
-  const curIdx = cur.findIndex((c: OncallChat) => c.chatId === chatId);
+  const cur: any[] = Array.isArray(raw[idx].oncallChats) ? raw[idx].oncallChats : [];
+  const curIdx = cur.findIndex((c: any) => c?.chatId === chatId);
   if (curIdx >= 0) {
-    // Preserve any unknown keys the user might have added by hand.
-    cur[curIdx] = { ...cur[curIdx], ...next };
+    // Replace wholesale — strips legacy fields (e.g. `owners`) so bots.json
+    // converges on the current schema rather than carrying dead keys.
+    cur[curIdx] = next;
   } else {
     cur.push(next);
   }

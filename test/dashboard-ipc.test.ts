@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { startIpcServer, setLarkAppId, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
 import * as groupsStore from '../src/services/groups-store.js';
+import * as oncallStore from '../src/services/oncall-store.js';
 
 let handle: IpcServerHandle | null = null;
 
@@ -193,6 +194,59 @@ describe('PUT/DELETE /api/oncall/:chatId', () => {
     handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
     const res = await fetch(`http://127.0.0.1:${handle.port}/api/oncall/oc_1`, { method: 'DELETE' });
     expect(res.status).toBe(503);
+  });
+
+  it('PUT happy path forwards to bindOncall and echoes resolvedPath', async () => {
+    setLarkAppId('test-app');
+    const spy = vi.spyOn(oncallStore, 'bindOncall').mockReturnValue({
+      ok: true,
+      entry: { chatId: 'oc_1', workingDir: '/tmp' },
+      created: true,
+    });
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/oncall/oc_1`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workingDir: '/tmp' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.created).toBe(true);
+    expect(body.entry).toEqual({ chatId: 'oc_1', workingDir: '/tmp' });
+    expect(body.resolvedPath).toBe('/tmp');
+    expect(spy).toHaveBeenCalledWith('test-app', 'oc_1', '/tmp');
+    spy.mockRestore();
+  });
+
+  it('DELETE happy path forwards to unbindOncall', async () => {
+    setLarkAppId('test-app');
+    const spy = vi.spyOn(oncallStore, 'unbindOncall').mockReturnValue({ ok: true });
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/oncall/oc_1`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(spy).toHaveBeenCalledWith('test-app', 'oc_1');
+    spy.mockRestore();
+  });
+
+  it('DELETE returns 404 when chat is not bound', async () => {
+    setLarkAppId('test-app');
+    const spy = vi.spyOn(oncallStore, 'unbindOncall').mockReturnValue({
+      ok: false,
+      reason: 'not_bound',
+    });
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/oncall/oc_1`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.reason).toBe('not_bound');
+    spy.mockRestore();
   });
 });
 

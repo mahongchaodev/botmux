@@ -385,8 +385,9 @@ export async function renderGroupsPage(root: HTMLElement) {
               ? `✓ 已绑定 → ${body.resolvedPath ?? wd}`
               : '✓ 已解绑';
             statusEl.classList.add('hint-ok');
-            // Refresh cache so reopening the drawer reflects new state
-            void loadGroups().catch(() => { /* tolerate */ });
+            // Refresh aggregator cache + matrix; drawer state stays as-is
+            // (current row reflects the just-saved values).
+            try { await loadGroups(); rerender(); } catch { /* tolerate */ }
           } else {
             statusEl.textContent = `✗ ${body.error ?? r.status}`;
             statusEl.classList.add('hint-warn-inline');
