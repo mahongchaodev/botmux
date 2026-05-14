@@ -635,7 +635,15 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // (their own thread replies). With chat-scope sessions a bot can also
         // post top-level (its first reply in a chat-scope group), so we still
         // route them through `decideRouting` rather than gating on root_id.
-        if (sender?.sender_type === 'app') {
+        //
+        // 飞书在跨 bot 卡片消息场景实测会把发送方标成 sender_type='bot'（不是
+        // 文档里写的 'app'），所以这里两个值都接受，否则那条路径会落到下面的
+        // user-message 通用分支，绕开 /close self-message 特判、foreign-bot
+        // chat-scope gate（isKnownPeerBot）和"Bot-to-bot @mention detected"
+        // 日志。
+        const senderType = sender?.sender_type;
+        const isBotSenderType = senderType === 'app' || senderType === 'bot';
+        if (isBotSenderType) {
           const senderOpenId = sender.sender_id?.open_id;
           const isSelfMessage = senderOpenId === getBot(larkAppId).botOpenId;
           // Self messages: only echoed `/close` commands matter.

@@ -119,6 +119,9 @@ function makeBotMessageEvent(opts: {
   chatType?: string;
   messageId?: string;
   mentions?: Array<{ key: string; name: string; id: { open_id: string } }>;
+  /** Override `sender.sender_type`. Defaults to `'app'`. Use `'bot'` to model
+   *  飞书在跨 bot 卡片消息场景实测投递的值。 */
+  senderType?: string;
 }) {
   const rootId = opts.rootId ?? 'root-001';
   const threadId = opts.threadId === null ? undefined : (opts.threadId ?? rootId);
@@ -133,7 +136,7 @@ function makeBotMessageEvent(opts: {
       mentions: opts.mentions,
     },
     sender: {
-      sender_type: 'app',
+      sender_type: opts.senderType ?? 'app',
       sender_id: { open_id: opts.senderOpenId },
     },
   };
@@ -336,6 +339,60 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       anchor: 'chat-001',
       larkAppId: MY_APP_ID,
     }));
+  });
+
+  it('treats sender_type="bot" same as "app" in chat-scope (known peer routes through)', async () => {
+    // Lark 实测：跨 bot 卡片消息到接收方时 sender_type 是 'bot'，不是文档里
+    // 写的 'app'。dispatcher 必须把两个值等价对待，否则会绕开 foreign-bot
+    // 分支，落到下面的 user-message 通用分支去（绕过 chat-scope gate /
+    // /close self-message 特判 / "Bot-to-bot @mention detected" 日志）。
+    mockGetChatMode.mockResolvedValueOnce('group');
+    mockReadFileSync.mockReturnValue(JSON.stringify({ 'BotB': OTHER_BOT_OPEN_ID }));
+    const event = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      senderType: 'bot',
+      content: JSON.stringify({
+        zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }]] },
+      }),
+      rootId: undefined,
+    });
+    event.message.root_id = undefined as any;
+    handlers.isSessionOwner.mockReturnValue(false);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-001',
+      larkAppId: MY_APP_ID,
+    }));
+    // 必须没有同时再走 user-message 分支去开新 topic — 即 chat-scope gate
+    // 只能命中一次，handleNewTopic 不应被 trigger。
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('still enforces chat-scope known-peer gate when sender_type="bot" + unknown peer', async () => {
+    // sender_type='bot' 不应该绕开 isKnownPeerBot gate。Lark 随机第三方 bot
+    // 给我们发卡片 @mention，sender_type 即使是 'bot'，cross-ref 里没有 →
+    // 应该跟 'app' 走 unknown-peer 分支一样被 drop，不能 fall through 到
+    // user-message 路径开 chat-scope session。
+    mockGetChatMode.mockResolvedValueOnce('group');
+    mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
+    const event = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      senderType: 'bot',
+      content: JSON.stringify({
+        zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }]] },
+      }),
+      rootId: undefined,
+    });
+    event.message.root_id = undefined as any;
+    handlers.isSessionOwner.mockReturnValue(false);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 
   it('treats oncall as chat-level: relaxes canTalk even when THIS bot is not the one bound', async () => {
