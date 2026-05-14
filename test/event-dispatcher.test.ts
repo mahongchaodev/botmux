@@ -74,7 +74,6 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 // ─── Imports (must be after mocks) ──────────────────────────────────────────
 
 import { isBotMentioned, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
-import { _resetForTest as _resetBotMentionDedup } from '../src/utils/bot-mention-dedup.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -228,7 +227,6 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     capturedHandlers = {};
     setupBotState();
     handlers = makeHandlers();
-    _resetBotMentionDedup();
     mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
   });
@@ -401,66 +399,6 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       anchor: 'chat-known-peer',
       larkAppId: MY_APP_ID,
     }));
-    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
-  });
-
-  it('dedups bot-to-bot @mention if signal-file path already handled this messageId', async () => {
-    // Pre-mark messageId as handled (signal-file watcher fired first).
-    const { markBotMentionMessageHandled } = await import('../src/utils/bot-mention-dedup.js');
-    markBotMentionMessageHandled('msg-dedup-1');
-
-    const event = makeBotMessageEvent({
-      senderOpenId: OTHER_BOT_OPEN_ID,
-      messageId: 'msg-dedup-1',
-      content: JSON.stringify({ text: '@BotA hi' }),
-      rootId: 'root-dedup',
-      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
-    });
-
-    await capturedHandlers['im.message.receive_v1'](event);
-
-    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
-  });
-
-  it('dedups when signal-file path claims DURING the WS path\'s decideRouting await (race)', async () => {
-    // Reproducer for the "@mention 触发两次" bug. The WS path's original
-    // sequence was:
-    //   1) isBotMentionMessageHandled(id) → false
-    //   2) await decideRouting(...)            ← yields the event loop
-    //   3) markBotMentionMessageHandled(id)
-    //   4) handleThreadReply(...)
-    // If the signal-file watcher's processBotMentionSignal runs during step
-    // 2's yield, it passes its own check, marks the id, and enqueues. The WS
-    // path then resumes at step 3 (no-op mark) and enqueues AGAIN at step 4
-    // → the same prompt hits the worker twice → bot replies twice.
-    //
-    // The fix: re-claim atomically after the await; if signal-file already
-    // claimed, the WS path bails. This test pins that behavior.
-    const { markBotMentionMessageHandled } = await import('../src/utils/bot-mention-dedup.js');
-
-    // Make decideRouting's getChatMode resolve asynchronously so the WS path
-    // yields between its initial check and the post-await claim. During that
-    // yield we simulate the signal-file watcher claiming the messageId.
-    mockGetChatMode.mockImplementationOnce(async () => {
-      // Defer to a later microtask so the WS handler actually yields here.
-      await Promise.resolve();
-      markBotMentionMessageHandled('msg-race-1');
-      return 'topic';
-    });
-
-    const event = makeBotMessageEvent({
-      senderOpenId: OTHER_BOT_OPEN_ID,
-      messageId: 'msg-race-1',
-      content: JSON.stringify({ text: '@BotA hi' }),
-      // No rootId+threadId → decideRouting falls through to getChatMode.
-      rootId: undefined,
-      threadId: null,
-      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
-    });
-    event.message.root_id = undefined as any;
-
-    await capturedHandlers['im.message.receive_v1'](event);
-
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
@@ -677,7 +615,6 @@ describe('im.message.receive_v1 — stale chat-scope detection (group → topic 
     capturedHandlers = {};
     setupBotState();
     handlers = makeHandlers();
-    _resetBotMentionDedup();
     mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
@@ -779,7 +716,6 @@ describe('im.message.receive_v1 — stale topic detection (topic → group conve
     capturedHandlers = {};
     setupBotState();
     handlers = makeHandlers();
-    _resetBotMentionDedup();
     mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
     mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
@@ -906,7 +842,6 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
     capturedHandlers = {};
     setupBotState();
     handlers = makeHandlers();
-    _resetBotMentionDedup();
     mockGetChatMode.mockResolvedValue('group'); // 普通群
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
   });

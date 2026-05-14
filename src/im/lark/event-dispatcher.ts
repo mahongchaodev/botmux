@@ -10,7 +10,6 @@ import { getBot, getAllBots, isChatOncallBoundForAnyBot } from '../../bot-regist
 import { config } from '../../config.js';
 import { getChatInfo, getChatMode, listChatBotMembers, replyMessage } from './client.js';
 import { logger } from '../../utils/logger.js';
-import { isBotMentionMessageHandled, tryClaimBotMentionMessage } from '../../utils/bot-mention-dedup.js';
 import { parseForceTopicInvocation } from '../../core/command-handler.js';
 import { stripLeadingMentions } from './message-parser.js';
 
@@ -527,15 +526,6 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           }
           // Foreign bot: only route on @mention of us.
           if (!isBotMentioned(larkAppId, message, undefined)) return;
-          // Cross-path dedup: signal-file watcher may have already enqueued
-          // this turn (Bot A's `botmux send --mention` writes both a Lark
-          // message and a signal file; whichever path lands first wins).
-          // Fast-path check before the async decideRouting (saves the await
-          // when the signal-file path was first).
-          if (isBotMentionMessageHandled(messageId)) {
-            logger.debug(`[bot-mention] WS path skipping ${messageId.substring(0, 12)}: already handled by signal-file watcher (pre-await)`);
-            return;
-          }
           const ctx = await decideRouting(larkAppId, message);
           // Chat-scope foreign-bot @mention without an existing session: gate to
           // vetted botmux peers (registered in our bot-openids cross-ref). This
@@ -547,15 +537,6 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             if (!ownsSession && !isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) {
               return;
             }
-          }
-          // Atomic claim AFTER the await — the yield above gave the
-          // signal-file watcher (50ms setTimeout) a chance to slip in and
-          // enqueue this same messageId. Without the re-claim, both paths
-          // pass their initial check and both call into the worker, which is
-          // exactly the "@mention 触发两次" bug.
-          if (!tryClaimBotMentionMessage(messageId)) {
-            logger.debug(`[bot-mention] WS path skipping ${messageId.substring(0, 12)}: signal-file watcher claimed during decideRouting yield`);
-            return;
           }
           logger.info(`Bot-to-bot @mention detected (scope=${ctx.scope}): routing to handleThreadReply`);
           handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId })

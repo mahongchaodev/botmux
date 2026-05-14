@@ -25,7 +25,6 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
-import { loadOncallChatsByApp, pickBotEntryByName } from './utils/bot-routing.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { logger } from './utils/logger.js';
 
@@ -1939,13 +1938,12 @@ async function cmdSend(rest: string[]): Promise<void> {
     // "@Claude" in text only triggers IPC routing but Lark UI shows it as
     // plain text — confusing the user who thinks the @ didn't fire.
     //
-    // bot-to-bot @mention 实际有两条触发路径，最终都会落到下方的 mentions 数组、
-    // 进而写出 bot-mention signal 文件：
-    //   1) 显式 `botmux send --mention <open_id>`：mentionArgs 直接进 mentions。
-    //   2) 正文里出现 `@BotName`（注册过的 bot 名 + 大小写不敏感 + 严格边界）：
-    //      下面这段扫描命中后，从 cross-ref 拿到 sender-scoped open_id 注入 mentions。
-    // 两条路径殊途同归，daemon 端 processBotMentionSignal 不区分来源；同名歧义
-    // 由 utils/bot-routing.ts 的 pickBotEntryByName 在两条路径上统一兜底。
+    // bot-to-bot @mention 两条触发入口（显式 --mention / 正文 `@BotName`）都
+    // 落到下方的 mentions 数组，单 source of truth：让 Lark 在消息里渲染
+    // 真正的 @at 元素。对方 bot 的 daemon 通过 WSClient 原生事件接到（依赖
+    // "获取群组中其他机器人和用户@当前机器人的消息"权限），不再走任何本地
+    // 转发——botmux 历史上为绕过 Lark 不投递跨 bot 事件搞过 signal-file，
+    // 那套已经在该权限上线后整体下线。
     try {
       const dataDir = resolveDataDir();
       const botInfoPath = join(dataDir, 'bots-info.json');
@@ -2149,78 +2147,11 @@ async function cmdSend(rest: string[]): Promise<void> {
       fileIds.push(fid);
     }
 
-    // Bot-to-bot mention signals
-    const dataDir = resolveDataDir();
-    const botInfoPath = join(dataDir, 'bots-info.json');
-    type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; cliId: string };
-    let botEntries: BotInfoEntry[] = [];
-    try { if (existsSync(botInfoPath)) botEntries = JSON.parse(readFileSync(botInfoPath, 'utf-8')); } catch { /* */ }
-    // Disambiguate same-named bots by oncall binding to the outbound chat.
-    // Without this, Array.find on botName silently routes to whichever
-    // bots-info.json entry sorts first — typically the wrong one when a
-    // deployment runs two apps under the same display name (e.g. two CoCo
-    // bots, only one bound to this chat).
-    const oncallChatsByApp = loadOncallChatsByApp();
-
-    const openIdToAppId = new Map<string, string>();
-    for (const e of botEntries) if (e.botOpenId) openIdToAppId.set(e.botOpenId, e.larkAppId);
-    try {
-      for (const file of readdirSync(dataDir)) {
-        if (!file.startsWith('bot-openids-') || !file.endsWith('.json')) continue;
-        try {
-          const crossRef: Record<string, string> = JSON.parse(readFileSync(join(dataDir, file), 'utf-8'));
-          for (const [botName, crossOpenId] of Object.entries(crossRef)) {
-            const entry = pickBotEntryByName(botEntries, botName, targetChatId, oncallChatsByApp);
-            if (entry) openIdToAppId.set(crossOpenId, entry.larkAppId);
-          }
-        } catch { /* */ }
-      }
-    } catch { /* */ }
-
-    const targetAppIds = new Set<string>();
-    for (const m of mentions) {
-      const ta = openIdToAppId.get(m.open_id);
-      if (ta && ta !== appId) targetAppIds.add(ta);
-    }
-    if (text && botEntries.length > 0) {
-      for (const entry of botEntries) {
-        if (!entry.botOpenId || entry.larkAppId === appId) continue;
-        const names = [entry.botName, entry.cliId].filter(Boolean) as string[];
-        for (const name of names) {
-          if (new RegExp(`@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)) {
-            targetAppIds.add(entry.larkAppId); break;
-          }
-        }
-      }
-    }
-    if (targetAppIds.size > 0) {
-      const signalDir = join(dataDir, 'bot-mentions');
-      if (!existsSync(signalDir)) mkdirSync(signalDir, { recursive: true });
-      // Routing scope of the OUTBOUND message (not the sender's session):
-      //   - --top-level / --chat-id forced the message into chat-container
-      //     addressing → receivers should target their chat-scope session at
-      //     `effectiveChatId`, NOT the sender's thread root.
-      //   - otherwise inherit the sender's session scope, since the message
-      //     was a normal in-thread reply (or a chat-scope continuation).
-      const effectiveScope: 'thread' | 'chat' = (sendTopLevel || overrideChatId || isChatScope)
-        ? 'chat'
-        : (s.scope ?? 'thread');
-      const effectiveChatId = targetChatId;
-      for (const targetApp of targetAppIds) {
-        const te = botEntries.find(e => e.larkAppId === targetApp);
-        const signal = {
-          // Carry both addresses; receivers pick by `scope` but legacy fields
-          // remain for back-compat with older daemons.
-          rootMessageId: s.rootMessageId,
-          chatId: effectiveChatId,
-          chatType: s.chatType,
-          scope: effectiveScope,
-          senderAppId: appId, targetBotOpenId: te?.botOpenId ?? targetApp,
-          content: text, messageId, timestamp: Date.now(),
-        };
-        writeFileSync(join(signalDir, `${Date.now()}-${(te?.botOpenId ?? targetApp).slice(-8)}.json`), JSON.stringify(signal));
-      }
-    }
+    // Bot-to-bot 转发依赖飞书"获取群组中其他机器人和用户@当前机器人的消息"权限：
+    // 目标 bot 的 daemon 现在能从 WSClient 原生收到 sender_type='app' 的事件，
+    // 不需要 botmux 自己再写本地 signal 文件做转发。outgoing 消息里 @BotName /
+    // --mention 的 open_id 解析（在上方 mentions 数组里完成）仍然必要，它让
+    // Lark 在消息里渲染真正的 @at 元素，从而触发对方 bot 的 WS 事件投递。
 
     console.log(JSON.stringify({ success: true, messageId, sessionId: sid }));
   } catch (err: any) {
