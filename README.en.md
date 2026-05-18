@@ -125,7 +125,7 @@ cat ~/.botmux/lark-scopes.json | xclip -selection clipboard
 cat ~/.botmux/lark-scopes.json | wl-copy
 ```
 
-> Apps created via the scan flow (PersonalAgent type) **already have** `im.message.receive_v1` + `card.action.trigger` subscribed and the bot capability enabled. The old "configure event subscription" and "enable bot capability" steps are no longer required.
+> Scan-created PersonalAgent apps have `im.message.receive_v1` + `card.action.trigger` subscribed and the bot capability enabled out of the box, per botmux maintainer testing. Lark hasn't documented this as stable behavior, so **if the bot receives no messages at all after setup**, see "Step 7: Troubleshoot — bot not receiving messages" below for a manual fallback.
 
 ### Step 5: Add Redirect URL (optional)
 
@@ -151,7 +151,16 @@ Go to "Version Management & Release", click "Create Version" and publish. Set av
 
 ![Add bot to group](docs/setup/add-bot-to-group.png)
 
-### Step 8: Enable Boot-time Autostart (recommended)
+### Step 8: Troubleshoot — bot not receiving messages (fallback)
+
+PersonalAgent apps come with event subscriptions and bot capability pre-configured; in normal cases you don't touch this. If the bot **receives no messages at all** after setup (not even DMs), verify these two settings:
+
+- **Event subscription**: Open Platform → your app → Events & Callbacks → should be subscribed to `im.message.receive_v1` + `card.action.trigger`. If missing, add them manually. Subscription mode must be "Receive via persistent connection" (WebSocket), and the botmux daemon must be running.
+- **Bot capability**: Open Platform → your app → Features → Bot should be enabled (it is by default). Adjust name/avatar if needed.
+
+After verifying, restart: `botmux restart`.
+
+### Step 9: Enable Boot-time Autostart (recommended)
 
 Once the bot is sending and receiving messages cleanly, run:
 

@@ -202,11 +202,15 @@ function printCopyHint(filePath: string): void {
 }
 
 function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
-  // 跟 README 列表对齐, 数据源是 src/setup/lark-scopes.json (来自飞书内部
-  // wiki UBOXwH01CixfxfkqxUpcKgvQnsg "[Botmux] 5分钟创建一个真正好用的飞书助理"
-  // 的"权限申请"段). 扫码建出来的 PersonalAgent 应用已经预订阅好
-  // im.message.receive_v1 / card.action.trigger 事件, bot 能力也已开通, 所以
-  // 这两步已经不需要用户手动操作了.
+  // 数据源: 飞书内部 wiki UBOXwH01CixfxfkqxUpcKgvQnsg "[Botmux] 5分钟创建一个
+  // 真正好用的飞书助理" 的"权限申请"段, 加 botmux 维护者实测确认 PersonalAgent
+  // 应用扫码建出来时已经默认订阅 im.message.receive_v1 / card.action.trigger
+  // 事件并开通 bot 能力. 但 lark-channel-bridge README 当前仍要求用户手动补
+  // 事件订阅, 跟我们结论不一致 — 不排除飞书最近升级了 PersonalAgent 预配 (那个
+  // README 是旧版), 也不排除存在租户/版本差异让某些用户的 PersonalAgent 没预配.
+  //
+  // 折中: 主线流程只列"必须手动"的两步 (权限 + 重定向 URL), 末尾再给"如果
+  // bot 收不到消息" 的兜底 fallback 链接, 让用户能自查事件订阅 / bot 能力.
   const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
   const home = `https://${host}/app/${appId}`;
   let scopesJsonPath = '';
@@ -217,7 +221,7 @@ function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
     console.log(`\n⚠️  写权限 JSON 失败 (${(err as Error).message}), 请手动从仓库源码 src/setup/lark-scopes.json 拷.`);
   }
 
-  console.log('\n⚠️  扫码/粘贴完成了"建应用 + 拿凭证 + 事件订阅 + bot 能力" (PersonalAgent 默认配好). 还差两步:\n');
+  console.log('\n⚠️  扫码 / 粘贴只完成了"建应用 + 拿凭证". 还有这些步骤要在开放平台浏览器里点:\n');
 
   console.log('  1. 申请权限 (一次性导入完整 JSON 提交审批)');
   console.log(`     深链: ${home}/auth → 进入「权限管理」→「批量导入/导出权限」→ 粘贴 → 提交`);
@@ -234,6 +238,15 @@ function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
 
   console.log('  完成后 `botmux start` (或 `botmux restart`)，启动检查不会卡住，');
   console.log('  缺权限只 WARN，去开放平台补齐后 daemon 自动恢复。\n');
+
+  // Fallback 自查清单 — 维护者实测 PersonalAgent 默认配好下面两项, 但飞书
+  // 没承诺过这是稳定行为. 收不到消息时让用户能自查.
+  console.log('  ─── 如果机器人配置好后收不到消息, 自查下面两点 ───');
+  console.log('  a. 事件订阅: PersonalAgent 默认订阅 im.message.receive_v1 + card.action.trigger,');
+  console.log(`     如缺失, 请到 ${home}/dev-config/event-sub 手动添加`);
+  console.log('  b. 机器人能力: PersonalAgent 默认已开通,');
+  console.log(`     如缺失, 请到 ${home}/feature/bot 启用 (应用功能 → 机器人)`);
+  console.log('');
 }
 
 /**

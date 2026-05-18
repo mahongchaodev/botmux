@@ -226,7 +226,7 @@ cat ~/.botmux/lark-scopes.json | xclip -selection clipboard
 cat ~/.botmux/lark-scopes.json | wl-copy
 ```
 
-> 扫码建出来的应用（PersonalAgent 类型）**已经默认订阅** `im.message.receive_v1` + `card.action.trigger`，**也已开通 bot 能力**，所以早期版本里的"事件订阅"和"开通机器人能力"两步已经不需要手动做了。
+> 扫码建出来的 PersonalAgent 应用，botmux 维护者实测默认已订阅 `im.message.receive_v1` + `card.action.trigger` 并开通 bot 能力，所以主线流程不再要求手动配。但飞书没在公开文档里承诺这是稳定行为，**如果配好后机器人完全收不到消息**，参见下方「Step 7: 机器人收不到消息时的自查」。
 
 ### Step 5: 添加重定向 URL（按需）
 
@@ -252,7 +252,16 @@ http://127.0.0.1:9768/callback
 
 ![添加机器人到群](docs/setup/add-bot-to-group.png)
 
-### Step 8: 开机自启（推荐）
+### Step 8: 机器人收不到消息时的自查（fallback）
+
+PersonalAgent 默认配好事件订阅 + bot 能力，正常情况下不用动。如果按上面步骤走完 bot **完全收不到任何消息**（连私聊都不回），分别确认这两项：
+
+- **事件订阅**：开放平台 → 你的应用 → 事件与回调 → 应当订阅 `im.message.receive_v1` + `card.action.trigger`（默认已订阅，如缺失就手动添加）。订阅方式必须是「使用长连接接收事件」(WebSocket)，且 botmux daemon 已经在跑。
+- **机器人能力**：开放平台 → 你的应用 → 应用功能 → 机器人 应当已开通（默认开通），名字/头像可以改。
+
+确认后重启 daemon：`botmux restart`。
+
+### Step 9: 开机自启（推荐）
 
 确认机器人能正常收发消息之后，跑一次：
 
