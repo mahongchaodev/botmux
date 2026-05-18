@@ -2443,6 +2443,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     initialPrompt: cfg.prompt || undefined,
     botName: cfg.botName,
     botOpenId: cfg.botOpenId,
+    locale: cfg.locale,
   });
 
   // Extra args from env (CLI_DISABLE_DEFAULT_ARGS is removed — adapters own their defaults)
@@ -2998,6 +2999,13 @@ process.on('message', async (raw: unknown) => {
       lastInitConfig = msg;
       sessionId = msg.sessionId;
       if (msg.ownerOpenId) process.env.__OWNER_OPEN_ID = msg.ownerOpenId;
+      // Pin this worker's i18n locale early so every t() call below resolves
+      // against the bot's chosen language without each callsite needing to
+      // re-thread it.
+      if (msg.locale === 'zh' || msg.locale === 'en') {
+        const { setDefaultLocale } = await import('./i18n/index.js');
+        setDefaultLocale(msg.locale);
+      }
       // Scope session store to this bot's per-bot file
       if (msg.larkAppId) sessionStore.init(msg.larkAppId);
       // Capture credentials for direct image upload from worker

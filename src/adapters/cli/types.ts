@@ -39,6 +39,8 @@ export interface CliAdapter {
     initialPrompt?: string;
     botName?: string;
     botOpenId?: string;
+    /** UI / response language for prompts injected into the CLI (e.g. zh / en). */
+    locale?: import('../../i18n/index.js').Locale;
   }): string[];
 
   /** When true, the adapter passes the initial prompt via CLI args (e.g. -i).
