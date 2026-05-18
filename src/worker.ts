@@ -3233,4 +3233,27 @@ process.on('SIGINT', () => { stopScreenshotLoop(); killCli(); cleanup(); process
 // If parent daemon dies, IPC channel closes — clean up
 process.on('disconnect', () => { log('Daemon disconnected'); stopScreenshotLoop(); killCli(); cleanup(); process.exit(0); });
 
+// Watchdog: belt-and-braces parent-death detection. SIGTERM and 'disconnect'
+// should both reach us when the daemon dies, but if main thread is stuck in
+// a sync path V8 silently buffers the signal and we end up as a ppid=1
+// orphan forever (we accumulated 841 such orphans before this guard, eating
+// ~65GB of RAM). setInterval itself depends on the event loop, so a
+// permanently-stuck thread would still orphan — but real-world stuck
+// patterns are periodic (e.g. the v2.9.2 bridge scan was 1s-on / 0.x-off),
+// so the 30s tick gets many landing windows. `unref()` keeps the timer
+// from preventing a normal exit. `getppid()` is the read fd from /proc/self
+// — cheap, sync, no allocation. The daemon-side SIGKILL grace window
+// (SHUTDOWN_GRACE_MS in daemon.ts) is the harder backstop.
+const ORIGINAL_PARENT_PID = process.ppid;
+setInterval(() => {
+  const currentPpid = process.ppid;
+  if (currentPpid !== ORIGINAL_PARENT_PID || currentPpid === 1) {
+    log(`Watchdog: parent pid changed (${ORIGINAL_PARENT_PID} → ${currentPpid}) — daemon died, exiting`);
+    stopScreenshotLoop();
+    try { killCli(); } catch { /* best-effort */ }
+    try { cleanup(); } catch { /* best-effort */ }
+    process.exit(0);
+  }
+}, 30_000).unref();
+
 log('Worker started, waiting for init...');

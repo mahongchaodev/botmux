@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync, watch, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -1141,23 +1141,45 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   scheduler.setOwnerFilter(cfg.larkAppId, idx === 0);
   scheduler.startScheduler();
 
-  // Graceful shutdown
-  const shutdown = () => {
+  // Graceful shutdown. Sends SIGTERM (or `{type:'close'}` IPC via killWorker)
+  // to every worker, then waits up to SHUTDOWN_GRACE_MS for them to exit
+  // before sending SIGKILL to stragglers. Without the wait, daemon
+  // `process.exit(0)` races worker signal delivery — and any worker whose
+  // main thread is in a sync code path (e.g. the bridge fingerprint scan
+  // bug fixed in v2.9.2) loses the signal and survives as a ppid=1 orphan
+  // forever (we'd accumulated 841 such orphans across daemon restarts,
+  // consuming ~65 GB of RAM until manually SIGKILL'd).
+  const SHUTDOWN_GRACE_MS = 3000;
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info(`Daemon shutting down... (active: ${getActiveCount()})`);
     scheduler.stopScheduler();
     clearInterval(descriptorHeartbeat);
     removeDaemonDescriptor(cfg.larkAppId);
     ipcHandle.close().catch(() => { /* swallow */ });
+
+    const pendingExits: Array<Promise<void>> = [];
+    const survivors: ChildProcess[] = [];
     for (const [, ds] of activeSessions) {
       if (ds.worker && !ds.worker.killed) {
         logger.info(`Shutting down worker for session ${ds.session.sessionId}`);
+        const w = ds.worker;
+        // Capture the exit promise BEFORE killWorker nulls ds.worker.
+        if (w.exitCode === null && w.signalCode === null) {
+          pendingExits.push(new Promise<void>(resolve => {
+            w.once('exit', () => resolve());
+          }));
+          survivors.push(w);
+        }
         const backendType = ds.larkAppId
           ? (getBot(ds.larkAppId).config.backendType ?? config.daemon.backendType)
           : config.daemon.backendType;
         if (backendType === 'tmux') {
           // Tmux mode: just kill the worker process — tmux session survives for re-attach.
           // Worker's SIGTERM handler calls backend.kill() which only detaches.
-          try { ds.worker.kill('SIGTERM'); } catch { /* ignore */ }
+          try { w.kill('SIGTERM'); } catch { /* ignore */ }
           ds.worker = null;
           ds.workerPort = null;
           ds.workerToken = null;
@@ -1166,12 +1188,28 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         }
       }
     }
+
+    if (pendingExits.length > 0) {
+      const timeout = new Promise<void>(resolve => setTimeout(resolve, SHUTDOWN_GRACE_MS));
+      await Promise.race([Promise.all(pendingExits), timeout]);
+      let stragglers = 0;
+      for (const w of survivors) {
+        if (w.exitCode === null && w.signalCode === null) {
+          stragglers++;
+          try { w.kill('SIGKILL'); } catch { /* already dead */ }
+        }
+      }
+      if (stragglers > 0) {
+        logger.warn(`${stragglers}/${survivors.length} worker(s) didn't exit within ${SHUTDOWN_GRACE_MS}ms — SIGKILL'd to prevent ppid=1 orphans.`);
+      }
+    }
+
     removePidFile();
     process.exit(0);
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => { shutdown().catch(err => { logger.error(`shutdown failed: ${err?.message ?? err}`); process.exit(1); }); });
+  process.on('SIGINT', () => { shutdown().catch(err => { logger.error(`shutdown failed: ${err?.message ?? err}`); process.exit(1); }); });
   // Best-effort cleanup on plain `exit` (e.g. uncaught fatal). No worker
   // shutdown here since the process is already on its way out — just remove
   // the descriptor so the dashboard doesn't see a phantom daemon.
