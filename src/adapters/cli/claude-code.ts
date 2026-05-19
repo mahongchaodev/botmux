@@ -243,6 +243,14 @@ function findJsonlAcrossProjectsRoot(
 
 const COMPLETION_RE = /\u2733\s*(?:Worked|Crunched|Cogitated|Cooked|Churned|Saut[eé]ed|Baked|Brewed) for \d+[smh]/;
 
+/** PTYs that have already received at least one writeInput. The first write
+ *  lands while Ink is still doing its startup render pass (banner, model
+ *  line, ❯ arrow) — keystrokes batched into that frame trip Claude Code's
+ *  paste-burst detector and `\` + Enter soft-newlines stick as literal
+ *  characters in the input box. Tracked by identity so the same pty handle
+ *  across multiple adapter instances shares the warmup state. */
+const claudeFirstWriteSeen = new WeakSet<PtyHandle>();
+
 export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
   const bin = resolveCommand(pathOverride ?? 'claude');
   return {
@@ -328,12 +336,23 @@ export function createClaudeCodeAdapter(pathOverride?: string): CliAdapter {
       // subsequent `\` + Enter pairs are kept as literal `\\\r` in the
       // submitted content instead of being consumed as soft-newline markers.
       //
+      // The first writeInput after spawn lands before Ink's startup render
+      // pass has fully drained, so even short messages trip paste-burst —
+      // wait briefly to let the queue settle and use a larger throttle for
+      // that call only. Subsequent writes hit a quiescent TUI and can stay
+      // on the lighter throttle.
+      //
       // Trailing Enter is still subject to Claude Code's paste-burst heuristic
       // (rapid input followed by Enter can be coalesced as paste), so we keep
       // the JSONL retry loop below as the source of truth for "did it submit".
       const hasImagePath = /\.(jpe?g|png|gif|webp|svg|bmp)\b/i.test(content);
       const submitDelay = hasImagePath ? 800 : 500;
-      const TYPING_THROTTLE_MS = 30;
+      const isFirstWrite = !claudeFirstWriteSeen.has(pty);
+      if (isFirstWrite) {
+        claudeFirstWriteSeen.add(pty);
+        await new Promise(r => setTimeout(r, 200));
+      }
+      const TYPING_THROTTLE_MS = isFirstWrite ? 80 : 30;
 
       const tick = () => new Promise<void>(r => setTimeout(r, TYPING_THROTTLE_MS));
 
