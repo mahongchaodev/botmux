@@ -52,6 +52,10 @@ export interface DaemonSession {
   pendingPrompt?: string;        // original user message to send after repo is selected
   pendingAttachments?: LarkAttachment[];
   pendingMentions?: LarkMention[];    // @mentions from initial message, used when building prompt after repo selection
+  /** Sender (open_id + type + resolved name) of the initial message — stashed
+   *  so the deferred spawn after repo-selection still injects a <sender> tag
+   *  matching the original caller, not the user who clicked the card. */
+  pendingSender?: import('../im/lark/identity-cache.js').ResolvedSender;
   pendingFollowUps?: string[];         // buffered follow-up messages (enriched) sent while waiting for repo selection
   ownerOpenId?: string;          // topic creator's open_id — receives write-enabled terminal link via DM
   streamCardId?: string;         // message_id of the streaming card in group (PATCHed with live output)

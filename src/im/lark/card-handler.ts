@@ -647,10 +647,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           ds.pendingFollowUps,
           { name: selfBot.botName, openId: selfBot.botOpenId },
           locDs,
+          ds.pendingSender,
         );
         ds.pendingPrompt = undefined;
         ds.pendingAttachments = undefined;
         ds.pendingMentions = undefined;
+        ds.pendingSender = undefined;
         ds.pendingFollowUps = undefined;
         forkWorker(ds, prompt);
         const cwd = getSessionWorkingDir(ds);
@@ -745,10 +747,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       targetDs.pendingFollowUps,
       { name: selfBot.botName, openId: selfBot.botOpenId },
       locTarget,
+      targetDs.pendingSender,
     );
     targetDs.pendingPrompt = undefined;
     targetDs.pendingAttachments = undefined;
     targetDs.pendingMentions = undefined;
+    targetDs.pendingSender = undefined;
     targetDs.pendingFollowUps = undefined;
     forkWorker(targetDs, prompt);
     await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: displayName }, locTarget));

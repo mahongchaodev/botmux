@@ -20,6 +20,7 @@ import type { CliId } from '../adapters/cli/types.js';
 import { validateAdoptTarget } from './session-discovery.js';
 import type { LarkAttachment, LarkMention, ScheduledTask } from '../types.js';
 import type { MessageResource } from '../im/lark/message-parser.js';
+import type { ResolvedSender } from '../im/lark/identity-cache.js';
 import { sessionKey, sessionAnchorId } from './types.js';
 import type { DaemonSession } from './types.js';
 import { markSessionActivity } from './session-activity.js';
@@ -153,6 +154,19 @@ function xmlEscape(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/**
+ * Render a `<sender>` tag for prompt injection. Caller resolves the sender
+ * (open_id + type + optional name) via `resolveSender(...)` in identity-cache.
+ * Returns empty string when no sender data is available so the prompt stays
+ * clean for synthetic flows (scheduled tasks, no-op spawns).
+ */
+export function renderSenderTag(sender?: ResolvedSender): string {
+  if (!sender || !sender.openId) return '';
+  const attrs: string[] = [`type="${xmlEscape(sender.type)}"`, `open_id="${xmlEscape(sender.openId)}"`];
+  if (sender.name) attrs.push(`name="${xmlEscape(sender.name)}"`);
+  return `<sender ${attrs.join(' ')} />`;
+}
+
 export function formatAttachmentsHint(attachments?: LarkAttachment[], locale?: Locale): string {
   if (!attachments || attachments.length === 0) return '';
   let imgN = 0, fileN = 0;
@@ -175,6 +189,7 @@ export function buildNewTopicPrompt(
   followUps?: string[],
   botIdentity?: { name?: string; openId?: string },
   locale?: Locale,
+  sender?: ResolvedSender,
 ): string {
   const adapter = createCliAdapterSync(cliId, cliPathOverride);
   // Non-Claude CLIs receive the botmux routing hints inline via the prompt
@@ -223,6 +238,9 @@ export function buildNewTopicPrompt(
   const userBlock = `<user_message>\n${userMessage}\n</user_message>`;
   const parts: string[] = [userBlock];
 
+  const senderBlock = renderSenderTag(sender);
+  if (senderBlock) parts.push(senderBlock);
+
   if (followUps && followUps.length > 0) {
     for (const fu of followUps) {
       parts.push(`<follow_up_message>\n${fu}\n</follow_up_message>`);
@@ -253,9 +271,12 @@ export function buildNewTopicPrompt(
 export function buildFollowUpContent(
   content: string,
   sessionId: string,
-  opts?: { attachments?: LarkAttachment[]; mentions?: LarkMention[]; isAdoptMode?: boolean; cliId?: CliId; cliPathOverride?: string; locale?: Locale },
+  opts?: { attachments?: LarkAttachment[]; mentions?: LarkMention[]; isAdoptMode?: boolean; cliId?: CliId; cliPathOverride?: string; locale?: Locale; sender?: ResolvedSender },
 ): string {
   const parts: string[] = [`<user_message>\n${content}\n</user_message>`];
+
+  const senderBlock = renderSenderTag(opts?.sender);
+  if (senderBlock) parts.push(senderBlock);
 
   const attachHint = opts?.attachments && opts.attachments.length > 0
     ? formatAttachmentsHint(opts.attachments, opts.locale)
@@ -395,6 +416,7 @@ export function buildReforkPrompt(
     cliPathOverride?: string;
     selfMention?: { name?: string | null; openId?: string | null };
     locale?: Locale;
+    sender?: ResolvedSender;
   },
 ): string {
   const locale = opts?.locale ?? localeForBot(ds.larkAppId);
@@ -413,6 +435,7 @@ export function buildReforkPrompt(
     cliId: opts?.cliId,
     cliPathOverride: opts?.cliPathOverride,
     locale,
+    sender: opts?.sender,
   });
 }
 

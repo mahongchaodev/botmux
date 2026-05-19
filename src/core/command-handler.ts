@@ -401,10 +401,12 @@ export async function handleCommand(
               ds.pendingFollowUps,
               { name: selfBot.botName, openId: selfBot.botOpenId },
               loc,
+              ds.pendingSender,
             );
             ds.pendingPrompt = undefined;
             ds.pendingAttachments = undefined;
             ds.pendingMentions = undefined;
+            ds.pendingSender = undefined;
             ds.pendingFollowUps = undefined;
             forkWorker(ds, prompt);
             await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: displayName }, loc));
@@ -469,10 +471,12 @@ export async function handleCommand(
             ds.pendingFollowUps,
             { name: selfBot.botName, openId: selfBot.botOpenId },
             loc,
+            ds.pendingSender,
           );
           ds.pendingPrompt = undefined;
           ds.pendingAttachments = undefined;
           ds.pendingMentions = undefined;
+          ds.pendingSender = undefined;
           ds.pendingFollowUps = undefined;
           forkWorker(ds, prompt);
           const cwd = getSessionWorkingDir(ds);
