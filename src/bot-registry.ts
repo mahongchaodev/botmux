@@ -33,13 +33,14 @@ export interface BotDefaultOncall {
 export interface BotConfig {
   larkAppId: string;
   larkAppSecret: string;
+  /** Optional process-name suffix; the daemon's process name is rendered as `botmux-<name>` (defaults to `botmux-<index>`). */
+  name?: string;
   cliId: CliId;
   cliPathOverride?: string;
   backendType?: 'pty' | 'tmux';
   workingDir?: string;
   workingDirs?: string[];
   allowedUsers?: string[];
-  projectScanDir?: string;
   /** Oncall bindings: chat_id → default workingDir. Any group member can talk; allowedUsers still gates card buttons / daemon commands. */
   oncallChats?: OncallChat[];
   /** UI language for this bot: 'zh' or 'en'. Falls back to BOTMUX_LANG / LANG env when unset. */
@@ -277,13 +278,13 @@ function parseBotConfigFile(filePath: string): BotConfig[] {
     configs.push({
       larkAppId: entry.larkAppId,
       larkAppSecret: entry.larkAppSecret,
+      name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : undefined,
       cliId: entry.cliId ?? 'claude-code',
       cliPathOverride: entry.cliPathOverride,
       backendType: entry.backendType,
       workingDir: workingDirs?.[0] ?? entry.workingDir,
       workingDirs,
       allowedUsers: entry.allowedUsers,
-      projectScanDir: entry.projectScanDir,
       oncallChats,
       defaultOncall,
       defaultOncallAutoboundChats,

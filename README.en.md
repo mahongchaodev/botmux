@@ -350,6 +350,8 @@ Configure bots via `~/.botmux/bots.json`. Run `botmux setup` to create it intera
 botmux setup
 ```
 
+When `~/.botmux/bots.json` already exists, `botmux setup` can add a bot, reconfigure from scratch, edit an existing bot, or delete a bot config. The edit/delete flow accepts the process name shown by `botmux status` (e.g. `botmux-1` or a custom `botmux-claude-main`) or the `larkAppId`; empty input keeps the current value, and `-` clears optional fields such as `name`, `backendType`, `workingDir`, and `allowedUsers`. Changing `larkAppId` asks for confirmation because historical session/chat state under the old app ID is not migrated automatically. Deleting a bot only removes one local `bots.json` entry; it does not delete the Lark app, historical messages, or local session data. Run `botmux restart` for changes to take effect.
+
 **bots.json format:**
 
 ```json
@@ -357,6 +359,7 @@ botmux setup
   {
     "larkAppId": "cli_xxx_bot1",
     "larkAppSecret": "secret_1",
+    "name": "claude-main",
     "cliId": "claude-code",
     "workingDir": "~/projects",
     "allowedUsers": ["alice@company.com"]
@@ -374,12 +377,12 @@ botmux setup
 |-------|----------|-------------|
 | `larkAppId` | Yes | Lark app ID |
 | `larkAppSecret` | Yes | Lark app secret |
+| `name` | No | Process name suffix shown by `botmux status`; e.g. `claude-main` appears as `botmux-claude-main`, defaults to `botmux-<index>` |
 | `cliId` | No | CLI adapter, defaults to `claude-code` (options: `aiden`, `coco`, `codex`, `cursor`, `gemini`, `opencode`) |
-| `cliPathOverride` | No | CLI binary path override |
+| `cliPathOverride` | No | Absolute path to the CLI entry, for wrappers / routers; typical use: `ccr`, `claude-w`, `aiden-x-claude`, etc. |
 | `backendType` | No | Session backend: `pty` or `tmux` (auto-detected by default) |
 | `workingDir` | No | Default working directory, supports comma-separated |
 | `allowedUsers` | No | Allowed users (email prefixes or open_ids) |
-| `projectScanDir` | No | Directory to scan for git repos |
 | `oncallChats` | No | Oncall bindings (written by `/oncall bind`), e.g. `[{ "chatId": "oc_xxx", "workingDir": "~/projects/foo" }]`; any group member can @ the bot |
 
 **Config priority:** `BOTS_CONFIG` env var > `~/.botmux/bots.json`
@@ -408,7 +411,7 @@ botmux setup
 
 | Command | Description |
 |---------|-------------|
-| `botmux setup` | Interactive setup (first-time or add bots) |
+| `botmux setup` | Interactive setup (first-time / add / edit / delete bots) |
 | `botmux start` | Start daemon (PM2 managed) |
 | `botmux stop` | Stop daemon |
 | `botmux restart` | Restart daemon (auto-restores active sessions) |
