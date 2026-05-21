@@ -185,16 +185,18 @@ describe('Streaming card toggle_stream', () => {
   // ── Bug 1: Old card toggle should NOT affect latest card ──────────────────
 
   describe('Bug 1: clicking toggle on OLD frozen card', () => {
-    it('should NOT toggle when card_nonce differs from streamCardNonce (stale card)', async () => {
+    it('self-heals live displayMode on a stale-nonce click, but queues no PATCH without a clicked message id', async () => {
       const ds = makeDaemonSession({ displayMode: 'hidden' });
       const sessions = new Map<string, DaemonSession>();
       sessions.set(sessionKey(ROOT_ID, APP_ID), ds);
 
       await handleCardAction(makeToggleAction(NONCE_OLD), makeDeps(sessions), APP_ID);
 
-      // Stale-nonce click goes down the frozen-card branch which never touches
-      // ds.displayMode; the live card's PATCH queue stays empty.
-      expect(ds.displayMode).toBe('hidden');
+      // A stale-nonce click migrates the live session's displayMode and notifies
+      // the worker (the self-heal added in #19; see card-integration Scenario 3).
+      // The makeToggleAction event carries no clicked message id, so there is no
+      // card to PATCH — the live card's PATCH queue stays empty.
+      expect(ds.displayMode).toBe('screenshot');
       expect(patchCalls).toHaveLength(0);
     });
 

@@ -236,9 +236,9 @@ describe('CoCo first-input submission (IdleDetector + readyPattern)', () => {
     detector.dispose();
   }, 30_000);
 
-  it('FIX: with readyPattern, idle waits for ⏵⏵ in TUI', async () => {
+  it('FIX: with readyPattern, idle does not fire until the ready prompt is rendered', async () => {
     const { IdleDetector } = await import('../src/utils/idle-detector.js');
-    const adapter = createCocoAdapter(); // has readyPattern: /⏵⏵/
+    const adapter = createCocoAdapter(); // has readyPattern: /⏵⏵|⬡/
     const sid = `e2e-fix-${Date.now()}`;
     const args = adapter.buildArgs({ sessionId: sid, resume: false });
 
@@ -248,8 +248,20 @@ describe('CoCo first-input submission (IdleDetector + readyPattern)', () => {
     let idleFiredAt = 0;
     detector.onIdle(() => { if (!idleFiredAt) idleFiredAt = Date.now(); });
 
+    // Track when CoCo's ready prompt first appears, so we assert the *contract*
+    // (idle gated on the prompt) rather than a wall-clock threshold — CoCo's
+    // boot speed varies by version (0.120.x renders the prompt in ~2.7s; older
+    // builds only after a ~5s xterm device-attribute query timeout).
+    const readyPattern = adapter.readyPattern!;
+    let acc = '';
+    let readySeenAt = 0;
+
     const spawnTs = Date.now();
-    session.proc.onData(data => detector.feed(data));
+    session.proc.onData(data => {
+      acc += data;
+      if (!readySeenAt && readyPattern.test(acc)) readySeenAt = Date.now();
+      detector.feed(data);
+    });
 
     await new Promise<void>(resolve => {
       const check = setInterval(() => {
@@ -260,12 +272,16 @@ describe('CoCo first-input submission (IdleDetector + readyPattern)', () => {
       }, 200);
     });
 
-    const elapsed = idleFiredAt ? idleFiredAt - spawnTs : -1;
-    console.log(`[fix] readyPattern ⏵⏵ → idle fired after ${elapsed}ms (TUI confirmed ready)`);
+    console.log(
+      `[fix] ready prompt seen at +${readySeenAt ? readySeenAt - spawnTs : -1}ms, ` +
+      `idle fired at +${idleFiredAt ? idleFiredAt - spawnTs : -1}ms`,
+    );
 
     expect(idleFiredAt, 'idle should eventually fire').toBeGreaterThan(0);
-    // Must fire AFTER TUI renders (⏵⏵ seen), which happens after xterm query timeout (~5s)
-    expect(elapsed, 'waits for TUI render before marking idle').toBeGreaterThanOrEqual(5000);
+    expect(readySeenAt, 'CoCo must emit a readyPattern glyph (⏵⏵/⬡) — guards against TUI glyph changes').toBeGreaterThan(0);
+    // The real contract: readyPattern suppresses quiescence until the input
+    // prompt renders, so idle must not fire before the glyph is seen.
+    expect(idleFiredAt, 'idle must not fire before the ready prompt is rendered').toBeGreaterThanOrEqual(readySeenAt);
 
     detector.dispose();
   }, 45_000);
