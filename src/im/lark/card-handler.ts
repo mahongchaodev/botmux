@@ -15,7 +15,7 @@ import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
-import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard } from '../../core/worker-pool.js';
+import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput } from '../../core/session-manager.js';
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
@@ -80,18 +80,6 @@ function getSessionByActionValue(
 
 function sessionCliId(ds: DaemonSession) {
   return ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
-}
-
-function clearUsageLimitState(ds: DaemonSession): void {
-  if (ds.usageLimitRetryTimer) {
-    clearTimeout(ds.usageLimitRetryTimer);
-    ds.usageLimitRetryTimer = undefined;
-  }
-  ds.usageLimit = undefined;
-}
-
-function cardUsageLimit(ds: DaemonSession) {
-  return ds.lastScreenStatus === 'limited' ? ds.usageLimit : undefined;
 }
 
 function validateCardCliBinding(ds: DaemonSession, value?: Record<string, string>): boolean {
@@ -368,7 +356,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       persistStreamCardState(ds);
 
       let cardJson: string | undefined;
-      if (ds.streamCardId && ds.streamCardId !== '__posting__' && ds.workerPort) {
+      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
         cardJson = buildStreamingCard(
           ds.session.sessionId,
@@ -695,7 +683,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       // Return the current card JSON so Feishu doesn't revert the displayed
       // image to the originally-POSTed initial frame while waiting for the
       // fresh screenshot PATCH (~1s).
-      if (ds.streamCardId && ds.streamCardId !== '__posting__' && ds.workerPort) {
+      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const botCfg = getBot(ds.larkAppId).config;
         const effectiveCliId = sessionCliId(ds);
         const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
@@ -734,7 +722,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         ds.worker.send({ type: 'term_action', key } as DaemonToWorker);
         logger.info(`[${tag(ds)}] term_action: ${key}`);
       }
-      if (ds.streamCardId && ds.streamCardId !== '__posting__' && ds.workerPort) {
+      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const botCfg = getBot(ds.larkAppId).config;
         const effectiveCliId = sessionCliId(ds);
         const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;

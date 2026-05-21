@@ -64,6 +64,11 @@ function parseMeridiemTime(text: string, now: Date): { retryAtMs: number; retryL
 }
 
 export function detectCliUsageLimit(text: string, now = new Date()): CliUsageLimitDetection {
+  // Hot path: runs on every screen tick for every active session. The retry
+  // patterns all require the literal "again" or "reset", so gate the heavier
+  // regex work behind one cheap scan to skip it for the >99% no-limit case.
+  if (!/again|reset/i.test(text)) return { limited: false };
+
   const time = parseMeridiemTime(text, now);
   if (!time) return { limited: false };
 

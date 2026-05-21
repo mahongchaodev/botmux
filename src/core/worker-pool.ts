@@ -97,7 +97,7 @@ function sessionCliId(ds: DaemonSession, botCfg: { cliId: CliId }): CliId {
   return ds.session.cliId ?? botCfg.cliId;
 }
 
-function clearUsageLimitState(ds: DaemonSession): void {
+export function clearUsageLimitState(ds: DaemonSession): void {
   if (ds.usageLimitRetryTimer) {
     clearTimeout(ds.usageLimitRetryTimer);
     ds.usageLimitRetryTimer = undefined;
@@ -106,8 +106,8 @@ function clearUsageLimitState(ds: DaemonSession): void {
   persistStreamCardState(ds);
 }
 
-function cardUsageLimit(ds: DaemonSession, status: DaemonSession['lastScreenStatus']): CliUsageLimitState | undefined {
-  return status === 'limited' ? ds.usageLimit : undefined;
+export function cardUsageLimit(ds: DaemonSession): CliUsageLimitState | undefined {
+  return ds.lastScreenStatus === 'limited' ? ds.usageLimit : undefined;
 }
 
 function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
@@ -167,6 +167,13 @@ function updateUsageLimitState(ds: DaemonSession, usageLimit?: CliUsageLimitStat
   if (!usageLimit) return;
 
   const previous = ds.usageLimit;
+  // Screen updates repeat the same limit every tick while a session sits
+  // blocked. Skip the persist + timer re-arm churn unless the limit changed.
+  if (
+    previous &&
+    usageLimitStateKey(previous) === usageLimitStateKey(usageLimit) &&
+    previous.retryReady === usageLimit.retryReady
+  ) return;
 
   ds.usageLimit = usageLimit;
   persistStreamCardState(ds);
@@ -839,7 +846,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
             isAdopt,
             showTakeover,
             loc,
-            cardUsageLimit(ds, ds.lastScreenStatus),
+            cardUsageLimit(ds),
           );
           // Mark POST in-flight so subsequent screen_updates are dropped,
           // not POSTed as duplicate cards.
@@ -886,7 +893,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
             isAdopt,
             showTakeover,
             loc,
-            cardUsageLimit(ds, ds.lastScreenStatus),
+            cardUsageLimit(ds),
           );
           scheduleCardPatch(ds, cardJson);
         }
@@ -919,7 +926,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           isAdopt,
           showTakeover,
           loc,
-          cardUsageLimit(ds, ds.lastScreenStatus),
+          cardUsageLimit(ds),
         );
         scheduleCardPatch(ds, cardJson);
         break;
