@@ -144,6 +144,8 @@ export const messages: Record<string, string> = {
   'cmd.group.failed': '⚠️ 建群失败：{error}',
   'cmd.group.warn_invite_rejected': '⚠️ 飞书拒绝了自动邀请（你可能不在当前机器人的 app scope 下）。请到群里手动加入。',
   'cmd.group.warn_transfer_failed': '⚠️ 转让群主失败（{reason}），当前机器人仍是群主。可在新群里手动转让。',
+  'cmd.group.bots_invited': '🤖 已拉入机器人：{bots}',
+  'cmd.group.warn_bots_rejected': '⚠️ 部分机器人未能加入（{bots}），可能不在当前机器人的 app scope 下。请到群里手动添加。',
 
   // ─── /schedule ───────────────────────────────────────────────────────────
   'schedule.empty_with_examples': '暂无定时任务。\n\n用法示例：\n/schedule 每日17:50 帮我看看今天AI圈有什么新闻\n/schedule 工作日每天9:00 检查服务状态\n/schedule 每周一10:00 生成周报',

@@ -11,7 +11,7 @@ import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects } from '../services/project-scanner.js';
 import { buildRepoSelectCard, buildAdoptSelectCard, buildSessionClosedCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
-import { deleteMessage, sendMessage } from '../im/lark/client.js';
+import { deleteMessage, sendMessage, listChatBotMembers } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
 import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
@@ -105,6 +105,16 @@ export function parseSlashCommandInvocation(content: string): SlashCommandInvoca
 
 function tag(ds: DaemonSession): string {
   return ds.session.sessionId.substring(0, 8);
+}
+
+/** Human-friendly name for a bot larkAppId — Lark app display name, else cliId, else the raw id. */
+function botDisplayName(larkAppId: string): string {
+  try {
+    const bot = getBot(larkAppId);
+    return bot.botName ?? getCliDisplayName(bot.config.cliId) ?? larkAppId;
+  } catch {
+    return larkAppId;
+  }
 }
 
 function formatUptime(ms: number): string {
@@ -674,21 +684,6 @@ export async function handleCommand(
 
       case '/group':
       case '/g': {
-        // Extract the requested group name from the user's message body.
-        // Strip whichever alias was used; split on newlines and take the first
-        // non-blank line so multi-line pastes don't smear into the name field.
-        const rawArgs = message.content.replace(/^\/(group|g)\s*/i, '');
-        const firstLine = rawArgs.split(/\r?\n/).map(s => s.trim()).find(Boolean) ?? '';
-        const MAX_NAME = 50; // Lark group names cap around 60; leave headroom for '…'
-        let groupName: string;
-        if (firstLine) {
-          groupName = firstLine.length > MAX_NAME ? firstLine.slice(0, MAX_NAME) + '…' : firstLine;
-        } else {
-          const now = new Date();
-          const ts = `${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-          groupName = t('cmd.group.empty_fallback', { ts }, loc);
-        }
-
         const creatorAppId = larkAppId ?? ds?.larkAppId;
         if (!creatorAppId) {
           await sessionReply(rootId, t('cmd.group.no_bot', undefined, loc));
@@ -701,11 +696,73 @@ export async function handleCommand(
           break;
         }
 
+        // Resolve @-mentioned bots → ordered list of larkAppIds (mention order,
+        // deduped). Each @-mentioned bot independently receives this same event
+        // and reaches this handler, so we elect the FIRST mentioned bot as the
+        // sole creator; the rest stay silent. The creator invites every
+        // mentioned bot into the new group.
+        //
+        // openId scope: mention.openId and the openIds from
+        // listChatBotMembers(creatorAppId, ...) are both in creatorAppId's app
+        // scope (the cross-ref was refreshed from this very message's mentions
+        // upstream in the dispatcher), so matching by openId is reliable and the
+        // resulting larkAppId list is identical for every competing bot.
+        const mentions = message.mentions ?? [];
+        const sourceChatId = ds?.chatId;
+        const mentionedBotAppIds: string[] = [];
+        if (mentions.length > 0 && sourceChatId) {
+          try {
+            const members = await listChatBotMembers(creatorAppId, sourceChatId);
+            const openIdToAppId = new Map(members.map(m => [m.openId, m.larkAppId]));
+            const seen = new Set<string>();
+            for (const m of mentions) {
+              if (!m.openId) continue;
+              const appId = openIdToAppId.get(m.openId);
+              if (appId && !seen.has(appId)) {
+                seen.add(appId);
+                mentionedBotAppIds.push(appId);
+              }
+            }
+          } catch (e: any) {
+            logger.warn(`[${logTag}] /group failed to resolve mentioned bots: ${e?.message ?? e}`);
+          }
+        }
+
+        // Leader election: when bots were @-mentioned, only the first one builds
+        // the group. The others bail silently to avoid duplicate groups.
+        if (mentionedBotAppIds.length > 0 && mentionedBotAppIds[0] !== creatorAppId) {
+          logger.info(`[${logTag}] /group: deferring to designated creator ${mentionedBotAppIds[0]} (me=${creatorAppId})`);
+          break;
+        }
+
+        // Extract the requested group name. Strip whichever alias was used, then
+        // remove any `@<name>` mention tokens that leaked into the body (Lark
+        // renders mentions as literal `@Name` text in content), then take the
+        // first non-blank line so multi-line pastes don't smear into the name.
+        let rawArgs = message.content.replace(/^\/(group|g)\s*/i, '');
+        for (const m of mentions) {
+          if (m.name) rawArgs = rawArgs.split(`@${m.name}`).join(' ');
+        }
+        const firstLine = rawArgs.split(/\r?\n/).map(s => s.trim()).find(Boolean) ?? '';
+        const MAX_NAME = 50; // Lark group names cap around 60; leave headroom for '…'
+        let groupName: string;
+        if (firstLine) {
+          groupName = firstLine.length > MAX_NAME ? firstLine.slice(0, MAX_NAME) + '…' : firstLine;
+        } else {
+          const now = new Date();
+          const ts = `${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+          groupName = t('cmd.group.empty_fallback', { ts }, loc);
+        }
+
+        // Bots to invite: every @-mentioned bot (creator filtered out internally
+        // by the service). Empty mentions → solo group (creator only).
+        const larkAppIdsForGroup = mentionedBotAppIds.length > 0 ? mentionedBotAppIds : [creatorAppId];
+
         try {
           const { createGroupWithBots } = await import('../services/group-creator.js');
           const result = await createGroupWithBots({
             creatorLarkAppId: creatorAppId,
-            larkAppIds: [creatorAppId],
+            larkAppIds: larkAppIdsForGroup,
             name: groupName,
             userOpenIds: [senderOpenId],
             transferOwnerTo: senderOpenId,
@@ -720,60 +777,23 @@ export async function handleCommand(
           } else if (result.transferError) {
             hints.push(t('cmd.group.warn_transfer_failed', { reason: result.transferError }, loc));
           }
+          // Confirm the bots that actually joined; warn about any Feishu rejected.
+          const invitedBotIds = larkAppIdsForGroup.filter(
+            id => id !== creatorAppId && !result.invalidBotIds.includes(id),
+          );
+          if (invitedBotIds.length > 0) {
+            hints.push(t('cmd.group.bots_invited', { bots: invitedBotIds.map(botDisplayName).join('、') }, loc));
+          }
+          if (result.invalidBotIds.length > 0) {
+            hints.push(t('cmd.group.warn_bots_rejected', { bots: result.invalidBotIds.map(botDisplayName).join('、') }, loc));
+          }
           const hintsText = hints.length > 0 ? '\n' + hints.join('\n') : '';
           await sessionReply(rootId, t('cmd.group.created', { name: groupName, link, hints: hintsText }, loc));
-          logger.info(`[${logTag}] /group created chat=${result.chatId} name="${groupName}" invitee=${senderOpenId}`);
-
-          // Auto-bootstrap the new chat: scan repos and post a repo-select card
-          // so the user doesn't need to send a second message to start the
-          // session. Mirrors the chat-scope auto-create branch in
-          // daemon.handleNewTopic, minus the worker spawn — clicking a repo on
-          // the card flows through card-handler which spawns the worker.
-          // Non-fatal: failures here just leave the new chat empty; user can
-          // still kick things off by sending any message.
-          try {
-            const scanDirs = getProjectScanDirs({ larkAppId: creatorAppId } as DaemonSession).filter(d => existsSync(d));
-            const projects = scanDirs.length > 0 ? scanMultipleProjects(scanDirs) : [];
-            if (projects.length > 0) {
-              const newSession = sessionStore.createSession(result.chatId, result.chatId, `/group ${groupName}`.substring(0, 50), 'group');
-              const now = Date.now();
-              newSession.larkAppId = creatorAppId;
-              newSession.scope = 'chat';
-              newSession.ownerOpenId = senderOpenId;
-              newSession.lastCallerOpenId = senderOpenId;
-              newSession.lastMessageAt = new Date(now).toISOString();
-              sessionStore.updateSession(newSession);
-
-              const newDs: DaemonSession = {
-                session: newSession,
-                worker: null,
-                workerPort: null,
-                workerToken: null,
-                larkAppId: creatorAppId,
-                chatId: result.chatId,
-                chatType: 'group',
-                scope: 'chat',
-                spawnedAt: now,
-                cliVersion: 'unknown',
-                lastMessageAt: now,
-                hasHistory: false,
-                pendingRepo: true,
-                ownerOpenId: senderOpenId,
-              };
-              activeSessions.set(sessionKey(result.chatId, creatorAppId), newDs);
-              deps.lastRepoScan.set(result.chatId, projects);
-
-              const currentCwd = getSessionWorkingDir(newDs);
-              const cardJson = buildRepoSelectCard(projects, currentCwd, result.chatId, loc);
-              const cardMessageId = await sendMessage(creatorAppId, result.chatId, cardJson, 'interactive');
-              newDs.repoCardMessageId = cardMessageId;
-              logger.info(`[${logTag}] /group posted repo-select card in new chat ${result.chatId} (${projects.length} projects)`);
-            } else {
-              logger.info(`[${logTag}] /group skipped repo-select card: no projects under scan dirs`);
-            }
-          } catch (bootstrapErr: any) {
-            logger.warn(`[${logTag}] /group auto-bootstrap failed: ${bootstrapErr?.message ?? bootstrapErr}`);
-          }
+          logger.info(`[${logTag}] /group created chat=${result.chatId} name="${groupName}" bots=[${larkAppIdsForGroup.join(',')}] invitee=${senderOpenId}`);
+          // Intentionally NO auto-bootstrap (repo-select card / chat-scope
+          // session) here: the group name rarely carries enough context to seed
+          // a useful prompt. The user starts a real conversation with the bot in
+          // the new group, which spawns the session on first message.
         } catch (err: any) {
           logger.error(`[${logTag}] /group failed: ${err?.message ?? err}`);
           await sessionReply(rootId, t('cmd.group.failed', { error: err?.message ?? String(err) }, loc));
