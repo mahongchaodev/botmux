@@ -24,6 +24,7 @@ import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { getBot, getAllBots } from '../bot-registry.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
+import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
@@ -97,6 +98,37 @@ function tag(ds: DaemonSession): string {
 
 function sessionCliId(ds: DaemonSession, botCfg: { cliId: CliId }): CliId {
   return ds.session.cliId ?? botCfg.cliId;
+}
+
+function loadKnownBotOpenIdsForApp(larkAppId: string): Set<string> {
+  const dataDir = config.session.dataDir;
+  let crossRef: Record<string, string> = {};
+  const crossRefPath = join(dataDir, `bot-openids-${larkAppId}.json`);
+  if (existsSync(crossRefPath)) {
+    const parsed = JSON.parse(readFileSync(crossRefPath, 'utf-8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      crossRef = parsed as Record<string, string>;
+    }
+  }
+
+  let botEntries: BotMentionEntry[] = [];
+  const botInfoPath = join(dataDir, 'bots-info.json');
+  if (existsSync(botInfoPath)) {
+    const parsed = JSON.parse(readFileSync(botInfoPath, 'utf-8'));
+    if (Array.isArray(parsed)) botEntries = parsed as BotMentionEntry[];
+  }
+
+  return knownBotOpenIdsFromCrossRef(crossRef, botEntries, larkAppId);
+}
+
+function daemonCardFooterRecipientOpenId(ds: DaemonSession): string | undefined {
+  const owner = ds.session.ownerOpenId;
+  if (!owner) return undefined;
+  try {
+    return loadKnownBotOpenIdsForApp(ds.larkAppId).has(owner) ? undefined : owner;
+  } catch {
+    return owner;
+  }
 }
 
 export function clearUsageLimitState(ds: DaemonSession): void {
@@ -424,9 +456,11 @@ export function cleanupLegacyMcpConfig(cliId: CliId): void {
         }
         break;
       }
-      case 'opencode': {
-        // ~/.config/opencode/opencode.json → { mcp: { botmux } } or { mcpServers: { botmux } }
-        const p = join(home, '.config', 'opencode', 'opencode.json');
+      case 'opencode':
+      case 'mtr': {
+        // ~/.config/opencode/{opencode,mtr}.json → { mcp: { botmux } } or { mcpServers: { botmux } }
+        const file = cliId === 'mtr' ? 'mtr.json' : 'opencode.json';
+        const p = join(home, '.config', 'opencode', file);
         const removed =
           removeJsonKey(p, ['mcp'], 'botmux') ||
           removeJsonKey(p, ['mcpServers'], 'botmux') ||
@@ -1188,12 +1222,13 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           break;
         }
         if (!msg.userText.trim() && !msg.assistantText.trim()) break;
+        const recipientOpenId = daemonCardFooterRecipientOpenId(ds);
         const cardJson = buildContextualReplyCard({
           title: '📜 /adopt 前最后一轮',
           userText: msg.userText,
           assistantText: msg.assistantText,
           assistantLabel: getCliDisplayName(effectiveCliId),
-          recipientOpenId: ds.session.ownerOpenId,
+          recipientOpenId,
         });
         cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId).catch((err: any) => {
           logger.warn(`[${t}] Failed to deliver adopt_preamble to Lark: ${err.message}`);
@@ -1264,6 +1299,7 @@ function deliverFinalOutput(
       // they use the contextual card so the user prompt sits in a
       // blockquote and only the assistant body goes through full markdown
       // rendering.
+      const recipientOpenId = daemonCardFooterRecipientOpenId(ds);
       const cardJson = msg.kind === 'local-turn' || msg.kind === 'local-turn-headless'
         ? buildContextualReplyCard({
             title: msg.kind === 'local-turn-headless'
@@ -1272,9 +1308,9 @@ function deliverFinalOutput(
             userText: msg.kind === 'local-turn' ? msg.userText ?? '' : undefined,
             assistantText: msg.content,
             assistantLabel: getCliDisplayName(effectiveCliId),
-            recipientOpenId: ds.session.ownerOpenId,
+            recipientOpenId,
           })
-        : buildMarkdownCard(msg.content, ds.session.ownerOpenId);
+        : buildMarkdownCard(msg.content, recipientOpenId);
       await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
       ds.lastBridgeEmittedUuid = msg.lastUuid;
       logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);

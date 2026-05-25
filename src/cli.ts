@@ -50,6 +50,12 @@ import {
   formatBotInfoEntriesForCli,
   formatChatBotsForCli,
 } from './cli/bots-list-output.js';
+import {
+  buildFooterAddressing,
+  hasKnownBotMention,
+  knownBotOpenIdsFromCrossRef,
+  type BotMentionEntry,
+} from './utils/bot-routing.js';
 import { isLocale, setDefaultLocale, SUPPORTED_LOCALES, type Locale } from './i18n/index.js';
 import { readGlobalConfig, setGlobalLocale, globalConfigPath } from './global-config.js';
 
@@ -511,7 +517,7 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   }
   console.log('✅ 凭证有效（tenant_access_token 已成功获取）\n');
 
-  console.log('支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity');
+  console.log('支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr');
   const cliChoice = await ask(rl, 'CLI 适配器 [1]: ');
   let cliId: CliId;
   try {
@@ -605,7 +611,7 @@ async function promptEditBotConfig(
   ]);
   input.larkAppSecret = await ask(rl, `LARK_APP_SECRET [保留当前值]: `);
 
-  console.log('\n支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity');
+  console.log('\n支持的 CLI: 1) claude-code  2) aiden  3) coco  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr');
   printInputHelp('CLI 适配器', [
     '选择 botmux 需要套用哪一种 CLI 参数协议和会话恢复方式。',
     '留空保留当前值；可以输入序号，也可以直接输入适配器 ID。',
@@ -1289,6 +1295,7 @@ interface SessionData {
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;
+  lastCallerOpenId?: string;
 }
 
 /**
@@ -2552,23 +2559,6 @@ function argValues(args: string[], ...flags: string[]): string[] {
 // keeps using `buildCardBodyElements` and `hasMarkdown` from there.
 import { buildCardBodyElements, hasMarkdown } from './im/lark/md-card.js';
 
-/**
- * Decide who the reply card should @ in its footer.
- *
- * Non-oncall chats: `发送给: @<owner>`.
- * Oncall chats: `发送给: @<last caller>` (falls back to owner if unknown) —
- *   permission is governed by allowedUsers, so there's no per-chat list to cc.
- */
-function buildFooterAddressing(
-  s: { ownerOpenId?: string; lastCallerOpenId?: string },
-  oncall: { workingDir: string } | undefined,
-): { sendTo: string | undefined; cc: string[] } {
-  const owner = s.ownerOpenId;
-  const caller = s.lastCallerOpenId ?? owner;
-  if (!oncall) return { sendTo: owner, cc: [] };
-  return { sendTo: caller, cc: [] };
-}
-
 async function cmdSend(rest: string[]): Promise<void> {
   // Safety gate: a CLI agent running inside a workflow subagent (Slice F)
   // must not chat-post directly — chat-facing side effects are reserved
@@ -2708,13 +2698,14 @@ async function cmdSend(rest: string[]): Promise<void> {
     // "获取群组中其他机器人和用户@当前机器人的消息"权限），不再走任何本地
     // 转发——botmux 历史上为绕过 Lark 不投递跨 bot 事件搞过 signal-file，
     // 那套已经在该权限上线后整体下线。
+    let botEntries: BotMentionEntry[] = [];
+    let crossRef: Record<string, string> = {};
     try {
       const dataDir = resolveDataDir();
       const botInfoPath = join(dataDir, 'bots-info.json');
-      type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; cliId: string };
-      const botEntries: BotInfoEntry[] = existsSync(botInfoPath) ? JSON.parse(readFileSync(botInfoPath, 'utf-8')) : [];
+      botEntries = existsSync(botInfoPath) ? JSON.parse(readFileSync(botInfoPath, 'utf-8')) : [];
       const crossRefPath = join(dataDir, `bot-openids-${appId}.json`);
-      const crossRef: Record<string, string> = existsSync(crossRefPath)
+      crossRef = existsSync(crossRefPath)
         ? JSON.parse(readFileSync(crossRefPath, 'utf-8'))
         : {};
       const alreadyMentioned = new Set(mentions.map(m => m.open_id));
@@ -2724,9 +2715,17 @@ async function cmdSend(rest: string[]): Promise<void> {
       const sortedEntries = [...botEntries].sort(
         (a, b) => (b.botName?.length ?? 0) - (a.botName?.length ?? 0),
       );
+      const selfAliases = new Set(
+        botEntries
+          .filter(entry => entry.larkAppId === appId)
+          .flatMap(entry => [entry.botName, entry.cliId])
+          .filter((name): name is string => !!name)
+          .map(name => name.toLowerCase()),
+      );
       for (const entry of sortedEntries) {
         if (!entry.botName || entry.larkAppId === appId) continue;
-        const names = [entry.botName, entry.cliId].filter(Boolean) as string[];
+        const names = [entry.botName, entry.cliId]
+          .filter((name): name is string => !!name && !selfAliases.has(name.toLowerCase()));
         for (const name of names) {
           const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           // Boundary: lookbehind blocks only ASCII word chars (so `user@Claude`
@@ -2752,6 +2751,16 @@ async function cmdSend(rest: string[]): Promise<void> {
         }
       }
     } catch { /* best-effort */ }
+
+    const explicitKnownBotMention = hasKnownBotMention(text, mentions, botEntries, crossRef, appId);
+    const knownBotOpenIds = knownBotOpenIdsFromCrossRef(crossRef, botEntries, appId);
+    const footerAddressing = sendTopLevel
+      ? { sendTo: undefined as string | undefined, cc: [] as string[] }
+      : buildFooterAddressing(s, {
+          isOncall: !!oncallEntry,
+          hasExplicitBotMention: explicitKnownBotMention,
+          knownBotOpenIds,
+        });
 
     // Decide: interactive card (renders markdown) vs. post (plain text).
     // Explicit --card / --text wins; otherwise auto-detect markdown syntax.
@@ -2813,14 +2822,13 @@ async function cmdSend(rest: string[]): Promise<void> {
 
       // Footer: de-emphasized markdown (v2 dropped the `note` tag). Use small
       // text size + grey font tag so it reads like a footnote below the hr.
-      // Oncall groups: `发送给` targets whoever triggered this turn (may not
-      // be the session owner). Non-oncall: keep owner-only behaviour.
+      // Oncall groups usually address whoever triggered this turn (may not be
+      // the session owner). Bot recipients are filtered out so footer chrome
+      // cannot accidentally wake a sibling bot.
       const footerParts = ['[botmux](https://github.com/deepcoldy/botmux)'];
       // Top-level publish has no specific recipient — drop "发送给/cc" addressing
       // so the message doesn't @ the session owner who isn't even in the target chat.
-      const addressing = sendTopLevel
-        ? { sendTo: undefined as string | undefined, cc: [] as string[] }
-        : buildFooterAddressing(s, oncallEntry);
+      const addressing = footerAddressing;
       if (addressing.sendTo) footerParts.push(`发送给：<at id=${addressing.sendTo}></at>`);
       if (addressing.cc.length > 0) {
         footerParts.push(`cc：${addressing.cc.map(id => `<at id=${id}></at>`).join(' ')}`);
@@ -2868,11 +2876,9 @@ async function cmdSend(rest: string[]): Promise<void> {
       }
 
       // Footer: mirror the card layout — a blank paragraph separates the body
-      // from the addressing line(s). `发送给: @<caller>` always. Top-level
-      // publish has no specific recipient — skip addressing entirely.
-      const addressing = sendTopLevel
-        ? { sendTo: undefined as string | undefined, cc: [] as string[] }
-        : buildFooterAddressing(s, oncallEntry);
+      // from the addressing line(s). Top-level publish has no specific
+      // recipient; bot recipients are filtered out by footerAddressing.
+      const addressing = footerAddressing;
       if (addressing.sendTo || addressing.cc.length > 0) {
         if (postContent.length > 0) postContent.push([{ tag: 'text', text: '' }]);
         if (addressing.sendTo) {
