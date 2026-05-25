@@ -21,6 +21,7 @@ import {
 import { buildFederatedRoster } from '../services/federation-roster.js';
 import { findMembershipByDelegationToken } from '../services/federation-membership-store.js';
 import { buildTeamRoster } from '../services/team-roster.js';
+import { getDeploymentIdentity } from '../services/deployment-identity.js';
 
 const MAX_BOTS = 200;
 const MAX_OWNERS = 100;
@@ -117,6 +118,11 @@ export async function handleFederationApi(
     if (!inviteCode) { jsonRes(res, 400, { ok: false, error: 'code_required' }); return true; }
     if (!dep || typeof dep.deploymentId !== 'string' || !dep.deploymentId) {
       jsonRes(res, 400, { ok: false, error: 'deployment_required' }); return true;
+    }
+    // Self-join is meaningless (a deployment federating with itself) — reject
+    // clearly before consuming the invite, so the spoke can surface it.
+    if (dep.deploymentId === getDeploymentIdentity(dataDir).deploymentId) {
+      jsonRes(res, 400, { ok: false, error: 'cannot_join_self' }); return true;
     }
     const inv = consumeInvite(dataDir, inviteCode);
     if (!inv.ok) { jsonRes(res, 403, { ok: false, error: `invite_${inv.reason}` }); return true; }

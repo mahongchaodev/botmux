@@ -13,6 +13,8 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { config } from '../config.js';
 import { jsonRes } from './workflow-api.js';
 import { buildTeamRoster } from '../services/team-roster.js';
@@ -24,6 +26,20 @@ import { listFederatedDeployments } from '../services/federation-store.js';
 import { ensureDefaultTeam, DEFAULT_TEAM_ID } from '../services/team-store.js';
 import { createInvite } from '../services/invite-store.js';
 import { loadBotConfigs } from '../bot-registry.js';
+import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
+
+const MAX_ROLE_BYTES = 4 * 1024;
+/** Team-level role file at {dataDir}/team-roles/{larkAppId}.md (matches role-resolver). */
+function teamRolePath(dataDir: string, larkAppId: string): string {
+  return join(dataDir, 'team-roles', `${larkAppId}.md`);
+}
+function writeTeamRole(dataDir: string, larkAppId: string, content: string): void {
+  const fp = teamRolePath(dataDir, larkAppId);
+  mkdirSync(dirname(fp), { recursive: true });
+  let out = content.trim();
+  while (Buffer.byteLength(out, 'utf-8') > MAX_ROLE_BYTES) out = out.slice(0, -1);
+  writeFileSync(fp, out, 'utf-8');
+}
 
 const HUB_TIMEOUT_MS = 8000;
 
@@ -127,10 +143,41 @@ export async function handleFederationSpokeApi(
   const path = url.pathname;
   const LOCAL = new Set(['/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment', '/api/team/federated-group']);
   const REMOTE = new Set(['/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote']);
-  if (!LOCAL.has(path) && !REMOTE.has(path)) return false;
+  const localBotEdit = path.match(/^\/api\/team\/local-bots\/([^/]+)\/(capability|role)$/);
+  if (!LOCAL.has(path) && !REMOTE.has(path) && !localBotEdit) return false;
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const fetcher = deps.fetcher ?? fetch;
   const method = req.method ?? 'GET';
+
+  // Edit a LOCAL bot's capability label / team role (federated bots are read-only
+  // — they're owned by another deployment and synced over). Local bots only.
+  if (localBotEdit) {
+    const larkAppId = decodeURIComponent(localBotEdit[1]);
+    const field = localBotEdit[2];
+    const localIds = new Set(buildTeamRoster(dataDir).bots.map(b => b.larkAppId));
+    if (!localIds.has(larkAppId)) { jsonRes(res, 404, { ok: false, error: 'not_a_local_bot' }); return true; }
+    if (field === 'role' && method === 'GET') {
+      const fp = teamRolePath(dataDir, larkAppId);
+      jsonRes(res, 200, { ok: true, role: existsSync(fp) ? readFileSync(fp, 'utf-8') : '' });
+      return true;
+    }
+    if (method === 'PUT') {
+      let body: any;
+      try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+      if (field === 'capability') {
+        const cap = String(body?.capability ?? '').trim();
+        if (cap) setBotCapability(dataDir, larkAppId, cap); else clearBotCapability(dataDir, larkAppId);
+      } else {
+        const role = String(body?.role ?? '').trim();
+        if (role) writeTeamRole(dataDir, larkAppId, role);
+        else { try { unlinkSync(teamRolePath(dataDir, larkAppId)); } catch { /* already gone */ } }
+      }
+      jsonRes(res, 200, { ok: true });
+      return true;
+    }
+    jsonRes(res, 405, { ok: false, error: 'method_not_allowed' });
+    return true;
+  }
 
   // Cross-deployment 拉群: create a Feishu group with selected bots (local +
   // federated). Bots are added by larkAppId (app_id) — the creator is picked
@@ -240,7 +287,7 @@ export async function handleFederationSpokeApi(
     }
     const j = await hubRes.json().catch(() => ({} as any));
     if (!hubRes.ok || !j?.ok) {
-      const status = hubRes.status === 403 || hubRes.status === 409 ? hubRes.status : 502;
+      const status = [400, 403, 409].includes(hubRes.status) ? hubRes.status : 502;
       jsonRes(res, status, { ok: false, error: j?.error || `hub_${hubRes.status}` });
       return true;
     }

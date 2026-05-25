@@ -114,7 +114,7 @@ export async function handleTeamRoute(
   // authed (handled by handleFederationSpokeApi AFTER the token gate). This
   // bmx_session route is mounted BEFORE that gate, so it must NOT swallow them
   // (it would 401 without a session / 404 with one). Let them fall through.
-  if (FEDERATION_DASHBOARD_PATHS.has(path)) return false;
+  if (FEDERATION_DASHBOARD_PATHS.has(path) || path.startsWith('/api/team/local-bots/')) return false;
 
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const method = req.method ?? 'GET';

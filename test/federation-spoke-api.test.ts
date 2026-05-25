@@ -66,6 +66,28 @@ describe('handleFederationSpokeApi', () => {
     expect(consumeInvite(dataDir, code)).toEqual({ ok: true, teamId: DEFAULT_TEAM_ID });
   });
 
+  it('local-bots: PUT capability/role on a LOCAL bot works; federated/unknown → not_a_local_bot', async () => {
+    writeBots([{ larkAppId: 'cli_local', botOpenId: null, botName: '本地Bot', cliId: 'claude' }]);
+    // capability on local bot
+    let res = makeRes();
+    await handleFederationSpokeApi(makeReq('PUT', '/api/team/local-bots/cli_local/capability', { capability: '排障' }), res, new URL('http://x/api/team/local-bots/cli_local/capability'), { dataDir });
+    expect(res.statusCode).toBe(200);
+    // reflected in local roster
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('GET', '/api/team/local'), res, new URL('http://x/api/team/local'), { dataDir });
+    expect(json(res).bots.find((b: any) => b.larkAppId === 'cli_local').capability).toBe('排障');
+    // role round-trips
+    await handleFederationSpokeApi(makeReq('PUT', '/api/team/local-bots/cli_local/role', { role: '# 后端\n严谨' }), makeRes(), new URL('http://x/api/team/local-bots/cli_local/role'), { dataDir });
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('GET', '/api/team/local-bots/cli_local/role'), res, new URL('http://x/api/team/local-bots/cli_local/role'), { dataDir });
+    expect(json(res).role).toContain('后端');
+    // a non-local (unknown / federated) bot can't be edited here
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('PUT', '/api/team/local-bots/cli_remote/capability', { capability: 'x' }), res, new URL('http://x/api/team/local-bots/cli_remote/capability'), { dataDir });
+    expect(res.statusCode).toBe(404);
+    expect(json(res).error).toBe('not_a_local_bot');
+  });
+
   it('local: POST /api/team/rename-deployment changes the name (id stable)', async () => {
     writeBots([]);
     const before = getDeploymentIdentity(dataDir);

@@ -18,6 +18,7 @@ import { registerDeployment } from '../src/services/federation-store.js';
 import { ensureDefaultTeam, addMember, DEFAULT_TEAM_ID } from '../src/services/team-store.js';
 import { createInvite } from '../src/services/invite-store.js';
 import { addMembership } from '../src/services/federation-membership-store.js';
+import { getDeploymentIdentity } from '../src/services/deployment-identity.js';
 
 let dataDir: string;
 beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'botmux-fedapi-')); state.dataDir = dataDir; });
@@ -121,6 +122,17 @@ describe('handleFederationApi', () => {
     res = makeRes();
     await call(makeReq('GET', '/api/federation/roster?syncToken=' + syncToken), res, '/api/federation/roster?syncToken=' + syncToken);
     expect(res.statusCode).toBe(200);
+  });
+
+  it('join rejects self-join (same deploymentId) with cannot_join_self', async () => {
+    ensureDefaultTeam(dataDir);
+    addMember(dataDir, DEFAULT_TEAM_ID, { unionId: 'on_owner' });
+    const { code } = createInvite(dataDir, DEFAULT_TEAM_ID, 'on_owner');
+    const me = getDeploymentIdentity(dataDir); // this deployment's own id
+    const res = makeRes();
+    await call(makeReq('POST', '/api/federation/join', { inviteCode: code, deployment: { deploymentId: me.deploymentId, name: 'self', bots: [] } }), res, '/api/federation/join');
+    expect(res.statusCode).toBe(400);
+    expect(json(res).error).toBe('cannot_join_self');
   });
 
   it('join rejects a bad invite code (403)', async () => {
