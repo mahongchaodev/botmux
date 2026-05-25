@@ -68,7 +68,6 @@ export const TEAM_PAGE_HTML = `<!doctype html>
         <select id="rf-cli" style="font:inherit;padding:5px"><option value="">全部 CLI</option></select>
         <label><input type="checkbox" id="rf-cap"> 有能力标签</label>
         <label><input type="checkbox" id="rf-role"> 有团队角色</label>
-        <label><input type="checkbox" id="rf-ment"> 仅可点名</label>
         <span class="muted" id="rf-count"></span>
       </div>
       <table><thead><tr><th></th><th>机器人</th><th>CLI</th><th>能力标签</th><th>团队角色</th></tr></thead>
@@ -144,7 +143,6 @@ function rosterMatch(b){
   const cli = $('rf-cli').value; if (cli && b.cliId !== cli) return false;
   if ($('rf-cap').checked && !b.capability) return false;
   if ($('rf-role').checked && !b.hasTeamRole) return false;
-  if ($('rf-ment').checked && !b.mentionable) return false;
   return true;
 }
 function updateRosterCount(visibleCount){
@@ -166,11 +164,17 @@ function renderRoster(){
     cb.onchange = () => { if (cb.checked) picked.add(cb.dataset.app); else picked.delete(cb.dataset.app); updateRosterCount(f.length); };
   });
   document.querySelectorAll('.capedit').forEach(inp => {
-    inp.onchange = async () => { await jput('/api/team/bots/'+encodeURIComponent(inp.dataset.app)+'/capability', { capability: inp.value }); };
+    inp.onchange = async () => {
+      const app = inp.dataset.app, val = inp.value;
+      await jput('/api/team/bots/'+encodeURIComponent(app)+'/capability', { capability: val });
+      // keep local model in sync so the "有能力标签" filter reflects the edit immediately
+      const bot = rosterBots.find(b => b.larkAppId === app); if (bot) bot.capability = val.trim();
+      renderRoster();
+    };
   });
   document.querySelectorAll('.roleedit').forEach(btn => { btn.onclick = () => openRoleModal(btn.dataset.app, btn.dataset.name); });
 }
-['rf-search','rf-cli','rf-cap','rf-role','rf-ment'].forEach(id => { const el = $(id); if (el) { el.oninput = renderRoster; el.onchange = renderRoster; } });
+['rf-search','rf-cli','rf-cap','rf-role'].forEach(id => { const el = $(id); if (el) { el.oninput = renderRoster; el.onchange = renderRoster; } });
 
 let pollTimer = null;
 

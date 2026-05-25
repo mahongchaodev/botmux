@@ -107,6 +107,9 @@ describe('handleTeamRoute', () => {
     expect(res._body).toContain('id="rf-search"');
     expect(res._body).toContain('id="rf-cli"');
     expect(res._body).toContain('已选');
+    // mentionable is per-chat, not on the team roster schema — the "仅可点名"
+    // filter was removed so it can't empty the list. Guard it stays gone.
+    expect(res._body).not.toContain('rf-ment');
   });
 
   it('team APIs require a session (401 without bmx_session)', async () => {
