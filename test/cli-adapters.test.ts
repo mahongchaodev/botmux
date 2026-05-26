@@ -20,6 +20,7 @@ import { createClaudeCodeAdapter } from '../src/adapters/cli/claude-code.js';
 import { createAidenAdapter } from '../src/adapters/cli/aiden.js';
 import { createCocoAdapter } from '../src/adapters/cli/coco.js';
 import { createCodexAdapter } from '../src/adapters/cli/codex.js';
+import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
 import { createGeminiAdapter } from '../src/adapters/cli/gemini.js';
 import { createOpenCodeAdapter } from '../src/adapters/cli/opencode.js';
 import { createAntigravityAdapter } from '../src/adapters/cli/antigravity.js';
@@ -31,7 +32,7 @@ import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'aiden', 'coco', 'codex', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync
@@ -50,7 +51,8 @@ describe('createCliAdapterSync factory', () => {
 
   it.each(ALL_CLI_IDS)('adapter for "%s" has resolvedBin set', (id) => {
     const adapter = createCliAdapterSync(id, `/opt/${id}`);
-    expect(adapter.resolvedBin).toBe(`/opt/${id}`);
+    if (id === 'codex-app') expect(adapter.resolvedBin).toBe(process.execPath);
+    else expect(adapter.resolvedBin).toBe(`/opt/${id}`);
   });
 });
 
@@ -181,6 +183,32 @@ describe('codex buildArgs', () => {
       '-C',
       '/repo/root',
     ]);
+  });
+});
+
+describe('codex-app buildArgs', () => {
+  const adapter = createCodexAppAdapter('/usr/bin/codex');
+
+  it('spawns the node runner and passes the Codex binary', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-app', resume: false, workingDir: '/repo/root' });
+    expect(adapter.resolvedBin).toBe(process.execPath);
+    expect(args[0]).toMatch(/codex-app-runner\.js$/);
+    expect(args).toContain('--session-id');
+    expect(args).toContain('sess-app');
+    expect(args).toContain('--codex-bin');
+    expect(args).toContain('/usr/bin/codex');
+    expect(args).toContain('--cwd');
+    expect(args).toContain('/repo/root');
+  });
+
+  it('resumes with the persisted Codex App thread id', () => {
+    const args = adapter.buildArgs({
+      sessionId: 'sess-app',
+      resume: true,
+      resumeSessionId: 'thread-123',
+    });
+    expect(args).toContain('--thread-id');
+    expect(args).toContain('thread-123');
   });
 });
 
@@ -388,6 +416,10 @@ describe('completionPattern', () => {
     expect(createCodexAdapter('/bin/codex').completionPattern).toBeUndefined();
   });
 
+  it('codex-app has no completionPattern', () => {
+    expect(createCodexAppAdapter('/bin/codex').completionPattern).toBeUndefined();
+  });
+
   it('gemini has no completionPattern', () => {
     expect(createGeminiAdapter('/bin/gemini').completionPattern).toBeUndefined();
   });
@@ -431,6 +463,12 @@ describe('readyPattern', () => {
     expect(adapter.readyPattern!.test('97% left')).toBe(true);
   });
 
+  it('codex-app matches runner prompt indicator', () => {
+    const adapter = createCodexAppAdapter('/bin/codex');
+    expect(adapter.readyPattern).toBeDefined();
+    expect(adapter.readyPattern!.test('›')).toBe(true);
+  });
+
   it('aiden has no readyPattern', () => {
     expect(createAidenAdapter('/bin/aiden').readyPattern).toBeUndefined();
   });
@@ -465,6 +503,11 @@ describe('systemHints', () => {
     expect(createClaudeCodeAdapter('/bin/claude').systemHints).toEqual([]);
   });
 
+  it('codex-app has empty systemHints (runner injects app-server instructions)', () => {
+    expect(createCodexAppAdapter('/bin/codex').systemHints).toEqual([]);
+    expect(createCodexAppAdapter('/bin/codex').injectsSessionContext).toBe(true);
+  });
+
   const nonClaudeAdapters: Array<[string, () => CliAdapter]> = [
     ['aiden', () => createAidenAdapter('/bin/aiden')],
     ['coco', () => createCocoAdapter('/bin/coco')],
@@ -493,6 +536,7 @@ describe('id property', () => {
     ['aiden', () => createAidenAdapter('/bin/aiden')],
     ['coco', () => createCocoAdapter('/bin/coco')],
     ['codex', () => createCodexAdapter('/bin/codex')],
+    ['codex-app', () => createCodexAppAdapter('/bin/codex')],
     ['gemini', () => createGeminiAdapter('/bin/gemini')],
     ['opencode', () => createOpenCodeAdapter('/bin/opencode')],
     ['antigravity', () => createAntigravityAdapter('/bin/agy')],
@@ -532,6 +576,10 @@ describe('altScreen property', () => {
 
   it('codex does not use alt screen', () => {
     expect(createCodexAdapter('/bin/codex').altScreen).toBe(false);
+  });
+
+  it('codex-app does not use alt screen', () => {
+    expect(createCodexAppAdapter('/bin/codex').altScreen).toBe(false);
   });
 
   it('antigravity uses alt screen (TUI)', () => {
@@ -585,6 +633,11 @@ describe('buildResumeCommand', () => {
     const a = createCodexAdapter('/bin/codex');
     expect(a.buildResumeCommand?.({ sessionId: 'bm-x', cliSessionId: 'cdx-uuid-1' }))
       .toBe('codex resume cdx-uuid-1');
+  });
+
+  it('codex-app has no copy-paste resume command', () => {
+    const a = createCodexAppAdapter('/bin/codex');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-x', cliSessionId: 'thread-1' })).toBeNull();
   });
 
   it('gemini does not implement buildResumeCommand (no precise resume)', () => {

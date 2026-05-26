@@ -203,10 +203,12 @@ describe('resolveCliId', () => {
     expect(resolveCliId('7')).toBe('opencode');
     expect(resolveCliId('9')).toBe('mtr');
     expect(resolveCliId('10')).toBe('hermes');
+    expect(resolveCliId('11')).toBe('codex-app');
   });
 
   it('passes through literal cliIds unchanged', () => {
     expect(resolveCliId('codex')).toBe('codex');
+    expect(resolveCliId('codex-app')).toBe('codex-app');
     expect(resolveCliId('opencode')).toBe('opencode');
     expect(resolveCliId('mtr')).toBe('mtr');
     expect(resolveCliId('hermes')).toBe('hermes');

@@ -10,6 +10,7 @@ const cliDisplayNames: Record<CliId, string> = {
   'aiden': 'Aiden',
   'coco': 'CoCo',
   'codex': 'Codex',
+  'codex-app': 'Codex App',
   'cursor': 'Cursor',
   'gemini': 'Gemini',
   'opencode': 'OpenCode',

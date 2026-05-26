@@ -1455,7 +1455,7 @@ function terminalOpenInTabLabel(kind: TerminalSurface['kind']): string {
  *  - Anything else (opencode / gemini / ...) is `resume_unsupported_cli`
  *    server-side.
  */
-const RESUME_REQUIRES_CLI_SESSION_ID = new Set<string>(['antigravity', 'cursor']);
+const RESUME_REQUIRES_CLI_SESSION_ID = new Set<string>(['antigravity', 'codex-app', 'cursor']);
 const RESUME_USES_SESSION_ID = new Set<string>(['aiden', 'coco', 'claude-code', 'codex', 'mtr', 'hermes']);
 function isResumeCapableCli(cliId: string | undefined): boolean {
   return !!cliId && (RESUME_USES_SESSION_ID.has(cliId) || RESUME_REQUIRES_CLI_SESSION_ID.has(cliId));

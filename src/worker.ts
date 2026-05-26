@@ -86,7 +86,7 @@ const writeToken = randomBytes(16).toString('hex');
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes' };
 function cliName(): string { return CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? ''] ?? 'CLI'; }
 let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
@@ -2081,9 +2081,93 @@ async function handleTuiTextInput(keys: string[], text: string): Promise<void> {
 const TRUST_DIALOG_PATTERN = /Yes, I trust this folder|Yes, continue/;
 let trustHandled = false;
 
+// Codex App runner sends botmux control messages as OSC sequences so they do
+// not pollute the visible terminal. Strip them before xterm rendering and
+// translate them back into worker IPC.
+const CODEX_APP_OSC_PREFIX = '\x1b]777;botmux:';
+let codexAppOscPending = '';
+
+function decodeCodexAppPayload(payload: string): any | undefined {
+  try {
+    return JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function handleCodexAppMarker(body: string): void {
+  const sep = body.indexOf(':');
+  if (sep < 0) return;
+  const kind = body.slice(0, sep);
+  const payload = decodeCodexAppPayload(body.slice(sep + 1));
+  if (!payload || typeof payload !== 'object') return;
+
+  if (kind === 'thread' && typeof payload.threadId === 'string') {
+    persistCliSessionId(payload.threadId);
+    return;
+  }
+
+  if (kind === 'final' && typeof payload.content === 'string') {
+    const startedAtMs = typeof payload.startedAtMs === 'number' ? payload.startedAtMs : undefined;
+    const completedAtMs = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : Date.now();
+    if (startedAtMs !== undefined) {
+      const sentByModel = readSendMarkers().some(m =>
+        m.sentAtMs >= startedAtMs && m.sentAtMs <= completedAtMs + 5_000,
+      );
+      if (sentByModel) {
+        log('Codex App final_output suppressed (model already called botmux send)');
+        return;
+      }
+    }
+    const turnId = typeof payload.turnId === 'string' ? payload.turnId : `codex-app-${Date.now()}`;
+    send({
+      type: 'final_output',
+      content: payload.content,
+      lastUuid: turnId,
+      turnId,
+    });
+  }
+}
+
+function splitCodexAppControl(data: string): string {
+  if (lastInitConfig?.cliId !== 'codex-app' && codexAppOscPending.length === 0) return data;
+  const input = codexAppOscPending + data;
+  codexAppOscPending = '';
+
+  let out = '';
+  let cursor = 0;
+  for (;;) {
+    const start = input.indexOf(CODEX_APP_OSC_PREFIX, cursor);
+    if (start < 0) {
+      let tailStart = input.length;
+      const tail = input.slice(cursor);
+      for (let n = Math.min(CODEX_APP_OSC_PREFIX.length - 1, tail.length); n > 0; n--) {
+        if (CODEX_APP_OSC_PREFIX.startsWith(tail.slice(tail.length - n))) {
+          tailStart = input.length - n;
+          break;
+        }
+      }
+      out += input.slice(cursor, tailStart);
+      codexAppOscPending = input.slice(tailStart);
+      return out;
+    }
+
+    out += input.slice(cursor, start);
+    const end = input.indexOf('\x07', start + CODEX_APP_OSC_PREFIX.length);
+    if (end < 0) {
+      codexAppOscPending = input.slice(start);
+      return out;
+    }
+    handleCodexAppMarker(input.slice(start + CODEX_APP_OSC_PREFIX.length, end));
+    cursor = end + 1;
+  }
+}
+
 // ─── Prompt Detection ────────────────────────────────────────────────────────
 
 function onPtyData(data: string): void {
+  data = splitCodexAppControl(data);
+  if (data.length === 0) return;
   captureWorkflowTranscript(data);
   renderer?.write(data);
 
@@ -2842,6 +2926,7 @@ function killCli(): void {
   scrollback = '';
   altBufferActive = false;
   trustHandled = false;
+  codexAppOscPending = '';
 }
 
 // ─── HTTP + WebSocket Server ─────────────────────────────────────────────────

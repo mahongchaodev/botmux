@@ -599,6 +599,7 @@ button.primary {
 
 .cli-claude-code { background: #e8f0ff; color: #234fb4; border-color: #c8d9ff; }
 .cli-codex       { background: #fff0df; color: #a14c11; border-color: #ffd8ad; }
+.cli-codex-app   { background: #e9f7ff; color: #11638f; border-color: #bde4fa; }
 .cli-cursor      { background: #ece9ff; color: #5b4ac7; border-color: #d9d2ff; }
 .cli-gemini      { background: #fde7f1; color: #a13268; border-color: #fac8df; }
 .cli-opencode    { background: #e7f7ec; color: #176b36; border-color: #bfe8ce; }
@@ -610,6 +611,7 @@ button.primary {
 
 :root[data-theme="dark"] .cli-claude-code,
 :root[data-theme="dark"] .cli-codex,
+:root[data-theme="dark"] .cli-codex-app,
 :root[data-theme="dark"] .cli-cursor,
 :root[data-theme="dark"] .cli-gemini,
 :root[data-theme="dark"] .cli-opencode,

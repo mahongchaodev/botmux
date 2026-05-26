@@ -5,6 +5,7 @@ import { createClaudeCodeAdapter } from './claude-code.js';
 import { createAidenAdapter } from './aiden.js';
 import { createCocoAdapter } from './coco.js';
 import { createCodexAdapter } from './codex.js';
+import { createCodexAppAdapter } from './codex-app.js';
 import { createCursorAdapter } from './cursor.js';
 import { createGeminiAdapter } from './gemini.js';
 import { createOpenCodeAdapter } from './opencode.js';
@@ -47,7 +48,7 @@ export async function createCliAdapter(id: CliId, pathOverride?: string): Promis
   return adapter;
 }
 
-export { createClaudeCodeAdapter, createAidenAdapter, createCocoAdapter, createCodexAdapter, createCursorAdapter, createGeminiAdapter, createOpenCodeAdapter, createAntigravityAdapter, createMtrAdapter, createHermesAdapter };
+export { createClaudeCodeAdapter, createAidenAdapter, createCocoAdapter, createCodexAdapter, createCodexAppAdapter, createCursorAdapter, createGeminiAdapter, createOpenCodeAdapter, createAntigravityAdapter, createMtrAdapter, createHermesAdapter };
 
 /** Synchronous version for use in worker process. */
 export function createCliAdapterSync(id: CliId, pathOverride?: string): CliAdapter {
@@ -56,6 +57,7 @@ export function createCliAdapterSync(id: CliId, pathOverride?: string): CliAdapt
     case 'aiden': return createAidenAdapter(pathOverride);
     case 'coco': return createCocoAdapter(pathOverride);
     case 'codex': return createCodexAdapter(pathOverride);
+    case 'codex-app': return createCodexAppAdapter(pathOverride);
     case 'cursor': return createCursorAdapter(pathOverride);
     case 'gemini': return createGeminiAdapter(pathOverride);
     case 'opencode': return createOpenCodeAdapter(pathOverride);
