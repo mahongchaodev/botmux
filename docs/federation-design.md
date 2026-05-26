@@ -154,9 +154,10 @@ Hub 的团队花名册 = 本地 bot（[[team-roster]]，按 bots.json 顺序）+
 **现状**：聚合只在 hub。hub 的 `/api/team/local` 是全量；spoke 的 `/api/team/local` 只有「自己本地 + 加入了自己 hub 的 spoke」，它加入的那个 team 的全量在 `/api/team/remote-roster`（只读、埋在另一区）。
 
 **改法**：
-- spoke 的「团队」页：当本部署**已加入某个远端团队**时，主花名册显示**该远端团队的聚合花名册**（继续用 remote-roster 从 hub 拉），与 hub 端体验一致（分组/折叠/搜索/筛选）。本部署既是某些人的 hub、又是别人的 spoke 时，分别展示（「我建的团队」+「我加入的团队」）。
-- 本地 bot 的能力/角色编辑：只对**本部署**的 bot 开放（联邦 bot 只读，归属方编辑后同步）——已实现，沿用。
-- **从 spoke 发起拉群**：新增 hub 端点 `POST /api/federation/group`（spoke 凭 `syncToken` 调用），body=`{name, larkAppIds, requestId}`；hub 校验 syncToken→该 team 成员，再走与 hub 自身 `federated-group` 相同的编排（本地有在线 bot 就本地建、否则委托拥有所选 bot 的部署）。spoke 端 `POST /api/team/remote-group {hubUrl, teamId, name, larkAppIds}` 转调之。
+- spoke 的「团队」页：当本部署**已加入某个远端团队**时，主花名册显示**该远端团队的聚合花名册**（继续用 remote-roster 从 hub 拉），与 hub 端体验一致（分组/折叠/搜索/筛选）。本部署既是某些人的 hub、又是别人的 spoke 时，分别展示（「我建的团队」+「我加入的团队」），**不合并成一张大列表**；每个团队的操作绑定明确的 `{hubUrl, teamId}`。
+- **可编辑性判断（Codex #4）**：hub 返回的聚合花名册里 `deployment.local` 是「**hub** 本地」，不是「**当前浏览者** 本地」。UI 判断哪些 bot 可编辑能力/角色，必须比较 `bot.deployment.id === 本部署 deploymentId`（用 `/api/team/local` 带出的本部署 id），**不能看 `local` flag**。联邦 bot 只读。
+- **从 spoke 发起拉群**：新增 hub 端点 `POST /api/federation/group`（spoke 凭 `syncToken` 调用），body=`{name, larkAppIds, requestId}`；hub 校验 syncToken→该 team 成员，再走与 hub 自身 `federated-group` 相同的编排（本地有在线 bot 就本地建、否则委托）。spoke 端 `POST /api/team/remote-group {hubUrl, teamId, name, larkAppIds}` 转调之。
+  - **鉴权/护栏（Codex #1 + 回答）**：**只接受 `Authorization: Bearer <syncToken>`**（不继承 query token fallback）；`larkAppIds` 必须是该 team 聚合花名册子集、去重 + 上限；**`requestId` 必填 + 幂等**——hub 按 `syncToken + requestId` 短 TTL 缓存编排结果，重放同 requestId 返回同一结果、不再编排第二次（语义同 delegate-group）。
 
 ## B. 操作者身份 + 拉群邀请人（#2 / #3）
 
@@ -165,16 +166,17 @@ Hub 的团队花名册 = 本地 bot（[[team-roster]]，按 bots.json 顺序）+
 **B1 绑定部署 owner 的飞书身份（复用 /pair）**：
 - 团队页加「绑定我的飞书身份」：`POST /api/team/identity/start`(dashboard token)→ 复用 `pairing-store` 出码；owner 在飞书给**本部署任一 bot** 发 `/pair <码>`；`POST /api/team/identity/consume` 拿到 claimedBy 的 `unionId/name`。
 - 存：`deployment-identity` 增 `ownerUnionId/ownerName`（本部署 owner=操作者）。
-- 副作用：把**本部署所有 bot** 归属到该 owner（写 bot-owner-store）→ `ownerUnionId` 随花名册同步给 hub → 别人拉你的 bot 时能把你（owner）带进群。
+- **身份要随联邦上行（Codex #2，必须）**：`ownerUnionId/ownerName` 要进 join/sync 的 deployment payload + hub 侧 `FederatedDeployment` 存储。这样 hub 能从 `syncToken → FederatedDeployment → ownerUnionId` **可信推导**发起方是谁（不靠间接的「本部署 bot owner 都同步上来」）。
+- **归属用 no-steal（Codex #3）**：绑定时把本部署 bot 归属到该 owner，**只填未归属的 bot**，已有 owner 的保持不动（不洗掉手工归属）；要覆盖走显式「归到我名下」。
 
-**B2 拉群邀请人**：`createTeamGroup` / `federated-group` / delegate-group 统一：
-- 邀请集合（union_id 去重）= **操作者本人**（发起拉群那个部署的 `ownerUnionId`）+ **所选每个 bot 的 owner**（本地查 bot-owner-store、联邦取 FederatedBot.ownerUnionId）。
-- 委托建群时把 `operatorUnionId` 一并传给被委托部署，由它一起 `addUsersToChatByUnionId`。
+**B2 拉群邀请人**：`createTeamGroup` / `federated-group` / `federation/group` / delegate-group 统一：
+- 邀请集合（union_id 去重）= **操作者本人** + **所选每个 bot 的 owner**（本地查 bot-owner-store、联邦取 FederatedBot.ownerUnionId）。
+- **操作者 union_id 必须由 hub 从认证推导**（Codex #2）：本地发起→本部署 deployment-identity.ownerUnionId；spoke 发起→hub 从 `syncToken → FederatedDeployment.ownerUnionId`。**不信任请求体传入的 operatorUnionId**；委托建群时 hub 把推导出的 operatorUnionId 作 trusted assertion 传给被委托方一起 `addUsersToChatByUnionId`。
 - 仍用 union_id 加人（租户稳定、跨 app）。
 
 **效果**：#2 对方 owner（绑定后有 union_id）被邀请进群；#3 操作者本人 + 对方 owner 都进群。
 
 ## 风险 / 待确认
 - 跨 app 加 bot 已验证可行（#2 实测 bot 进群）；加人按 union_id 亦为现有路径。
-- 未绑定身份的部署：拉群仍可建群+加 bot，但邀请不到「未知 owner」的人——UI 提示「绑定身份后可自动入群」。
+- **未绑定身份降级（Codex 回答）**：未绑定的部署拉群仍可建群+加 bot，但邀请不到「未知 owner」的人。响应/界面**显式标出** `missingOperatorIdentity`（发起方未绑定）+ 哪些 bot 的 owner 未知，避免用户误以为「人应进群却失败」。
 - spoke 发起拉群需 hub 在线可达（同 P2 委托的可达前提）。
