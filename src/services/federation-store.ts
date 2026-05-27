@@ -34,6 +34,11 @@ export interface FederatedDeployment {
   bots: FederatedBot[];
   joinedAt: number;
   lastSeenAt: number;
+  /** The spoke deployment's OWNER (the person), tenant-stable union_id. Hub uses
+   *  this — derived from syncToken — as the trusted operator identity when this
+   *  spoke initiates 拉群 (so the operator is pulled into the group). */
+  ownerUnionId?: string;
+  ownerName?: string;
   /** Spoke's dashboard base URL — so this hub can call back to delegate 拉群
    *  (hub→spoke) when no local online bot can be the group creator. */
   callbackUrl?: string;
@@ -74,6 +79,8 @@ export interface RegisterInput {
   deploymentId: string;
   name: string;
   bots: FederatedBot[];
+  ownerUnionId?: string;
+  ownerName?: string;
   callbackUrl?: string;
   delegationToken?: string;
 }
@@ -94,7 +101,7 @@ export function registerDeployment(dataDir: string, teamId: string, input: Regis
   const list = data.teams[teamId] ?? (data.teams[teamId] = []);
   if (list.some(d => d.deploymentId === input.deploymentId)) return { syncToken: '', created: false };
   const syncToken = randomBytes(24).toString('base64url');
-  list.push({ deploymentId: input.deploymentId, name: input.name, syncToken, bots: input.bots, joinedAt: now, lastSeenAt: now, callbackUrl: input.callbackUrl, delegationToken: input.delegationToken });
+  list.push({ deploymentId: input.deploymentId, name: input.name, syncToken, bots: input.bots, joinedAt: now, lastSeenAt: now, ownerUnionId: input.ownerUnionId, ownerName: input.ownerName, callbackUrl: input.callbackUrl, delegationToken: input.delegationToken });
   writeFileAtomic(dataDir, data);
   return { syncToken, created: true };
 }
@@ -111,13 +118,17 @@ export function getDeploymentByToken(dataDir: string, syncToken: string): { team
 }
 
 /** Refresh a deployment's advertised bots + heartbeat, by syncToken. Returns true if found. */
-export function syncDeployment(dataDir: string, syncToken: string, bots: FederatedBot[], now: number = Date.now()): boolean {
+export function syncDeployment(dataDir: string, syncToken: string, bots: FederatedBot[], owner?: { ownerUnionId?: string; ownerName?: string }, now: number = Date.now()): boolean {
   const data = readFile(dataDir);
   for (const list of Object.values(data.teams)) {
     const deployment = list.find(d => d.syncToken === syncToken);
     if (deployment) {
       deployment.bots = bots;
       deployment.lastSeenAt = now;
+      // Owner can be bound after join — keep it fresh on sync (only overwrite
+      // when the spoke actually sends one).
+      if (owner?.ownerUnionId !== undefined) deployment.ownerUnionId = owner.ownerUnionId;
+      if (owner?.ownerName !== undefined) deployment.ownerName = owner.ownerName;
       writeFileAtomic(dataDir, data);
       return true;
     }

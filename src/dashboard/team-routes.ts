@@ -33,6 +33,7 @@ import { TEAM_PAGE_HTML } from './team-page.js';
 const FEDERATION_DASHBOARD_PATHS = new Set([
   '/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment', '/api/team/federated-group',
   '/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote',
+  '/api/team/remote-group',
 ]);
 
 const MAX_ROLE_BYTES = 4 * 1024;
@@ -114,7 +115,7 @@ export async function handleTeamRoute(
   // authed (handled by handleFederationSpokeApi AFTER the token gate). This
   // bmx_session route is mounted BEFORE that gate, so it must NOT swallow them
   // (it would 401 without a session / 404 with one). Let them fall through.
-  if (FEDERATION_DASHBOARD_PATHS.has(path) || path.startsWith('/api/team/local-bots/')) return false;
+  if (FEDERATION_DASHBOARD_PATHS.has(path) || path.startsWith('/api/team/local-bots/') || path.startsWith('/api/team/identity/')) return false;
 
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const method = req.method ?? 'GET';

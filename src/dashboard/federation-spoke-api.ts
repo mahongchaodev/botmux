@@ -27,6 +27,10 @@ import { ensureDefaultTeam, DEFAULT_TEAM_ID } from '../services/team-store.js';
 import { createInvite } from '../services/invite-store.js';
 import { loadBotConfigs } from '../bot-registry.js';
 import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
+import { setBotOwner } from '../services/bot-owner-store.js';
+import { setDeploymentOwner } from '../services/deployment-identity.js';
+import { createPairing, getPairingStatus, consumePairing } from '../services/pairing-store.js';
+import { fetchWithTimeout, hubError, orchestrateFederatedGroup, type Fetcher } from './federated-group-core.js';
 
 const MAX_ROLE_BYTES = 4 * 1024;
 /** Team-level role file at {dataDir}/team-roles/{larkAppId}.md (matches role-resolver). */
@@ -39,32 +43,6 @@ function writeTeamRole(dataDir: string, larkAppId: string, content: string): voi
   let out = content.trim();
   while (Buffer.byteLength(out, 'utf-8') > MAX_ROLE_BYTES) out = out.slice(0, -1);
   writeFileSync(fp, out, 'utf-8');
-}
-
-const HUB_TIMEOUT_MS = 8000;
-
-/** Thrown by fetchWithTimeout when the hub doesn't answer in time. */
-class HubTimeout extends Error { constructor() { super('hub_timeout'); this.name = 'HubTimeout'; } }
-
-type Fetcher = typeof fetch;
-
-/** Wrap a hub call with an abort timeout; surface a distinguishable timeout. */
-async function fetchWithTimeout(fetcher: Fetcher, url: string, init: RequestInit = {}, ms = HUB_TIMEOUT_MS): Promise<Response> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), ms);
-  try {
-    return await fetcher(url, { ...init, signal: ac.signal });
-  } catch (e: any) {
-    if (e?.name === 'AbortError' || e instanceof HubTimeout) throw new HubTimeout();
-    throw e;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** Map an outbound hub-call failure to a stable {status, error}. */
-function hubError(e: unknown): { status: number; error: string } {
-  return e instanceof HubTimeout ? { status: 504, error: 'hub_timeout' } : { status: 502, error: 'hub_unreachable' };
 }
 
 async function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<any> {
@@ -111,13 +89,14 @@ function localBots(dataDir: string, live?: LiveBot[]): FederatedBot[] {
 /** Push this deployment's current bots to every joined hub. Best-effort. */
 export async function syncAllMemberships(dataDir: string, fetcher: Fetcher = fetch, live?: LiveBot[]): Promise<{ synced: number; failed: number }> {
   const bots = localBots(dataDir, live);
+  const me = getDeploymentIdentity(dataDir);
   let synced = 0, failed = 0;
   for (const m of listMemberships(dataDir)) {
     try {
       const r = await fetchWithTimeout(fetcher, `${m.hubUrl}/api/federation/sync`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${m.syncToken}` },
-        body: JSON.stringify({ syncToken: m.syncToken, bots }),
+        body: JSON.stringify({ syncToken: m.syncToken, bots, ownerUnionId: me.ownerUnionId, ownerName: me.ownerName }),
       });
       if (r.ok) synced++; else failed++;
     } catch { failed++; }
@@ -146,8 +125,9 @@ export async function handleFederationSpokeApi(
   deps: FederationSpokeDeps = {},
 ): Promise<boolean> {
   const path = url.pathname;
-  const LOCAL = new Set(['/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment', '/api/team/federated-group']);
-  const REMOTE = new Set(['/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote']);
+  const LOCAL = new Set(['/api/team/local', '/api/team/local-invite', '/api/team/rename-deployment', '/api/team/federated-group',
+    '/api/team/identity/start', '/api/team/identity/status', '/api/team/identity/consume']);
+  const REMOTE = new Set(['/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote', '/api/team/remote-group']);
   const localBotEdit = path.match(/^\/api\/team\/local-bots\/([^/]+)\/(capability|role)$/);
   if (!LOCAL.has(path) && !REMOTE.has(path) && !localBotEdit) return false;
   const dataDir = deps.dataDir ?? config.session.dataDir;
@@ -194,52 +174,70 @@ export async function handleFederationSpokeApi(
     let body: any;
     try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
     const larkAppIds: string[] = Array.isArray(body?.larkAppIds) ? body.larkAppIds.filter((x: any) => typeof x === 'string') : [];
-    const name = (String(body?.name ?? '').trim()) || '协作群';
-    if (larkAppIds.length === 0) { jsonRes(res, 400, { ok: false, error: 'no_bots_selected' }); return true; }
-    // Only bots on the aggregated roster (local + federated) — block bad ids.
-    const roster = buildFederatedRoster(dataDir, DEFAULT_TEAM_ID, undefined, undefined, live);
-    const rosterById = new Map(roster.bots.map(b => [b.larkAppId, b]));
-    const unknown = larkAppIds.filter(id => !rosterById.has(id));
-    if (unknown.length) { jsonRes(res, 400, { ok: false, error: 'unknown_bot', unknown }); return true; }
-    // Pull the OWNERS of the selected bots into the group too (by union_id,
-    // tenant-stable — works across deployments/app scopes).
-    const ownerUnionIds = Array.from(new Set(
-      larkAppIds.map(id => rosterById.get(id)?.owner?.unionId).filter((u): u is string => !!u),
-    ));
-    // Prefer creating with a LOCAL online bot (its daemon is ours to drive).
-    const r = await deps.createTeamGroup({ name, larkAppIds, ownerUnionIds });
-    if (r.ok) { jsonRes(res, 200, r); return true; }
-    // No local online creator → delegate to a federated deployment that OWNS a
-    // selected bot and is reachable (hub→spoke); it creates with its own bot.
-    if (r.error === 'no_online_daemon') {
-      const selected = new Set(larkAppIds);
-      // One requestId for this 拉群 → each delegate is idempotent on the spoke,
-      // so a retry/replay returns the same group instead of creating a duplicate.
-      const requestId = randomUUID();
-      let lastErr = 'no_creator_available';
-      for (const dep of listFederatedDeployments(dataDir, DEFAULT_TEAM_ID)) {
-        if (!dep.callbackUrl || !dep.delegationToken) continue;
-        if (!dep.bots.some(b => selected.has(b.larkAppId))) continue;
-        try {
-          const dr = await fetchWithTimeout(fetcher, `${dep.callbackUrl}/api/federation/delegate-group`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', authorization: `Bearer ${dep.delegationToken}` },
-            body: JSON.stringify({ name, larkAppIds, ownerUnionIds, requestId }),
-          });
-          const dj = await dr.json().catch(() => ({} as any));
-          if (dr.ok && dj?.ok && dj.chatId) { jsonRes(res, 200, { ...dj, delegatedTo: dep.name }); return true; }
-          lastErr = dj?.error || `hub_${dr.status}`; // got a response → definite failure, safe to try next
-        } catch (e) {
-          // Timeout: the spoke MAY have created the group (response lost). Do NOT
-          // try another deployment — that would risk a duplicate. Stop here.
-          if (e instanceof HubTimeout) { jsonRes(res, 504, { ok: false, error: 'delegation_timeout', delegatedTo: dep.name }); return true; }
-          lastErr = 'hub_unreachable'; // never connected → safe to try next
-        }
-      }
-      jsonRes(res, 502, { ok: false, error: lastErr });
-      return true;
+    const name = String(body?.name ?? '').trim() || '协作群';
+    // Operator = THIS deployment's bound owner (local initiation). Hub-derived
+    // operator (for spoke-initiated /api/federation/group) is handled separately.
+    const operatorUnionId = getDeploymentIdentity(dataDir).ownerUnionId;
+    const out = await orchestrateFederatedGroup(dataDir, { name, larkAppIds, operatorUnionId, requestId: randomUUID() }, { createTeamGroup: deps.createTeamGroup, fetcher, live });
+    jsonRes(res, out.status, out.body);
+    return true;
+  }
+
+  // ── Bind THIS deployment's owner Feishu identity (reuse /pair) ─────────────
+  // Owner sends `/pair <code>` to one of our bots; we capture their union_id so
+  // 拉群 can pull the operator into groups, and own our bots (no-steal).
+  if (path === '/api/team/identity/start' && method === 'POST') {
+    const p = createPairing(dataDir, 5 * 60 * 1000);
+    jsonRes(res, 200, { ok: true, pairingId: p.pairingId, code: p.code, browserToken: p.browserToken, expiresAt: p.expiresAt });
+    return true;
+  }
+  if (path === '/api/team/identity/status' && method === 'POST') {
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const v = getPairingStatus(dataDir, String(body?.pairingId ?? ''), String(body?.browserToken ?? ''));
+    if (v.status === 'not_found') { jsonRes(res, 200, { ok: true, status: 'not_found' }); return true; }
+    jsonRes(res, 200, { ok: true, status: v.status, name: v.status === 'claimed' ? v.claimedBy.name : undefined });
+    return true;
+  }
+  if (path === '/api/team/identity/consume' && method === 'POST') {
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const c = consumePairing(dataDir, String(body?.pairingId ?? ''), String(body?.browserToken ?? ''));
+    if (!c.ok) { jsonRes(res, 409, { ok: false, error: c.reason }); return true; }
+    const owner = { unionId: c.claimedBy.unionId, name: c.claimedBy.name };
+    setDeploymentOwner(dataDir, owner);
+    // Own THIS deployment's bots (no-steal: only unassigned; keep manual owners).
+    for (const b of buildTeamRoster(dataDir, undefined, undefined, live).bots) {
+      setBotOwner(dataDir, b.larkAppId, { unionId: owner.unionId, name: owner.name }, { override: false });
     }
-    jsonRes(res, 502, r);
+    jsonRes(res, 200, { ok: true, owner });
+    return true;
+  }
+
+  // ── Initiate 拉群 on a JOINED remote team (spoke → hub orchestrates) ────────
+  if (path === '/api/team/remote-group' && method === 'POST') {
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const hubUrl = normalizeHubUrl(body?.hubUrl);
+    const teamId = String(body?.teamId ?? '').trim();
+    const larkAppIds: string[] = Array.isArray(body?.larkAppIds) ? body.larkAppIds.filter((x: any) => typeof x === 'string') : [];
+    const name = String(body?.name ?? '').trim() || '协作群';
+    if (!hubUrl || !teamId) { jsonRes(res, 400, { ok: false, error: 'bad_request' }); return true; }
+    if (larkAppIds.length === 0) { jsonRes(res, 400, { ok: false, error: 'no_bots_selected' }); return true; }
+    const m = listMemberships(dataDir).find(x => x.hubUrl === hubUrl && x.teamId === teamId);
+    if (!m) { jsonRes(res, 404, { ok: false, error: 'not_a_member' }); return true; }
+    try {
+      const r = await fetchWithTimeout(fetcher, `${hubUrl}/api/federation/group`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${m.syncToken}` },
+        body: JSON.stringify({ name, larkAppIds, requestId: randomUUID() }),
+      });
+      const j = await r.json().catch(() => ({} as any));
+      jsonRes(res, r.ok ? 200 : (r.status === 400 || r.status === 403 ? r.status : 502), j);
+    } catch (e) {
+      const he = hubError(e);
+      jsonRes(res, he.status, { ok: false, error: he.error });
+    }
     return true;
   }
 
@@ -284,7 +282,7 @@ export async function handleFederationSpokeApi(
       hubRes = await fetchWithTimeout(fetcher, `${hubUrl}/api/federation/join`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ inviteCode, deployment: { deploymentId: me.deploymentId, name: me.name, bots: localBots(dataDir, live), callbackUrl, delegationToken } }),
+        body: JSON.stringify({ inviteCode, deployment: { deploymentId: me.deploymentId, name: me.name, ownerUnionId: me.ownerUnionId, ownerName: me.ownerName, bots: localBots(dataDir, live), callbackUrl, delegationToken } }),
       });
     } catch (e) {
       const he = hubError(e);

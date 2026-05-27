@@ -22,6 +22,7 @@ import { buildFederatedRoster } from '../services/federation-roster.js';
 import { findMembershipByDelegationToken } from '../services/federation-membership-store.js';
 import { buildTeamRoster, type LiveBot } from '../services/team-roster.js';
 import { getDeploymentIdentity } from '../services/deployment-identity.js';
+import { orchestrateFederatedGroup, type Fetcher } from './federated-group-core.js';
 
 const MAX_BOTS = 200;
 const MAX_OWNERS = 100;
@@ -91,6 +92,7 @@ function sanitizeBots(input: unknown): FederatedBot[] {
 
 export interface FederationApiDeps {
   dataDir?: string;
+  fetcher?: Fetcher;
   /** Live daemon-registry bots (authoritative over bots-info.json) for the
    *  delegate-group local-bot guard. */
   liveBots?: () => LiveBot[];
@@ -135,6 +137,8 @@ export async function handleFederationApi(
       deploymentId: dep.deploymentId,
       name: typeof dep.name === 'string' && dep.name ? dep.name : dep.deploymentId,
       bots: sanitizeBots(dep.bots),
+      ownerUnionId: typeof dep.ownerUnionId === 'string' ? dep.ownerUnionId : undefined,
+      ownerName: typeof dep.ownerName === 'string' ? dep.ownerName : undefined,
       callbackUrl: typeof dep.callbackUrl === 'string' && /^https?:\/\//i.test(dep.callbackUrl) ? dep.callbackUrl.replace(/\/+$/, '') : undefined,
       delegationToken: typeof dep.delegationToken === 'string' ? dep.delegationToken : undefined,
     });
@@ -164,17 +168,48 @@ export async function handleFederationApi(
     try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
     const syncToken = String(body?.syncToken ?? '').trim();
     if (!syncToken) { jsonRes(res, 401, { ok: false, error: 'token_required' }); return true; }
-    const ok = syncDeployment(dataDir, syncToken, sanitizeBots(body?.bots));
+    const ok = syncDeployment(dataDir, syncToken, sanitizeBots(body?.bots), {
+      ownerUnionId: typeof body?.ownerUnionId === 'string' ? body.ownerUnionId : undefined,
+      ownerName: typeof body?.ownerName === 'string' ? body.ownerName : undefined,
+    });
     if (!ok) { jsonRes(res, 403, { ok: false, error: 'unknown_token' }); return true; }
     jsonRes(res, 200, { ok: true });
     return true;
   }
 
-  // Spoke pulls the aggregated cross-deployment roster for its team.
+  // Spoke pulls the aggregated cross-deployment roster for its team. Hub's own
+  // local bots come from the live registry (liveBots) so an empty bots-info.json
+  // doesn't hide them from the roster spokes see.
   if (path === '/api/federation/roster' && method === 'GET') {
     const found = getDeploymentByToken(dataDir, federationToken(req, url));
     if (!found) { jsonRes(res, 403, { ok: false, error: 'unknown_token' }); return true; }
-    jsonRes(res, 200, { ok: true, ...buildFederatedRoster(dataDir, found.teamId) });
+    jsonRes(res, 200, { ok: true, ...buildFederatedRoster(dataDir, found.teamId, undefined, undefined, deps.liveBots?.()) });
+    return true;
+  }
+
+  // Spoke initiates 拉群 on the team it joined; the HUB orchestrates (local
+  // creator or delegate). Authed by the spoke's syncToken (team-internal trust).
+  // operator = the calling spoke's owner, DERIVED FROM THE TOKEN (never the body).
+  if (path === '/api/federation/group' && method === 'POST') {
+    if (!deps.createTeamGroup) { jsonRes(res, 501, { ok: false, error: 'group_create_unavailable' }); return true; }
+    let body: any;
+    try { body = await readBody(req); } catch { jsonRes(res, 400, { ok: false, error: 'bad_json' }); return true; }
+    const token = federationToken(req, url) || String(body?.syncToken ?? '').trim();
+    const found = getDeploymentByToken(dataDir, token);
+    if (!found) { jsonRes(res, 403, { ok: false, error: 'unknown_token' }); return true; }
+    const requestId = String(body?.requestId ?? '').trim();
+    if (!requestId) { jsonRes(res, 400, { ok: false, error: 'request_id_required' }); return true; }
+    const larkAppIds: string[] = Array.isArray(body?.larkAppIds) ? body.larkAppIds.filter((x: any) => typeof x === 'string') : [];
+    const name = String(body?.name ?? '').trim() || '协作群';
+    // Idempotency: replay of same {syncToken, requestId} returns the first result.
+    const idemKey = `group:${token}:${requestId}`;
+    const cached = idemGet(idemKey);
+    if (cached) { jsonRes(res, 200, cached); return true; }
+    const out = await orchestrateFederatedGroup(dataDir,
+      { name, larkAppIds, operatorUnionId: found.deployment.ownerUnionId, requestId, teamId: found.teamId },
+      { createTeamGroup: deps.createTeamGroup, fetcher: deps.fetcher ?? fetch, live: deps.liveBots?.() });
+    if (out.status === 200 && out.body?.ok) idemSet(idemKey, out.body);
+    jsonRes(res, out.status, out.body);
     return true;
   }
 

@@ -20,7 +20,10 @@ import { getDeploymentIdentity } from '../src/services/deployment-identity.js';
 import { consumeInvite } from '../src/services/invite-store.js';
 import { DEFAULT_TEAM_ID } from '../src/services/team-store.js';
 import { registerDeployment } from '../src/services/federation-store.js';
-import { setBotOwner } from '../src/services/bot-owner-store.js';
+import { setBotOwner, getBotOwner } from '../src/services/bot-owner-store.js';
+import { claimPairing } from '../src/services/pairing-store.js';
+
+function url(p: string) { return new URL('http://x' + p); }
 
 let dataDir: string;
 beforeEach(() => { dataDir = mkdtempSync(join(tmpdir(), 'botmux-spoke-')); state.dataDir = dataDir; });
@@ -86,6 +89,63 @@ describe('handleFederationSpokeApi', () => {
     await handleFederationSpokeApi(makeReq('PUT', '/api/team/local-bots/cli_remote/capability', { capability: 'x' }), res, new URL('http://x/api/team/local-bots/cli_remote/capability'), { dataDir });
     expect(res.statusCode).toBe(404);
     expect(json(res).error).toBe('not_a_local_bot');
+  });
+
+  it('identity: bind via /pair sets deployment owner + owns local bots (no-steal)', async () => {
+    writeBots([
+      { larkAppId: 'cli_mine', botOpenId: null, botName: '我的', cliId: 'claude' },
+      { larkAppId: 'cli_owned', botOpenId: null, botName: '已归属', cliId: 'codex' },
+    ]);
+    setBotOwner(dataDir, 'cli_owned', { unionId: 'on_existing', name: '别人' }); // pre-owned
+    // start → get code → simulate owner /pair → consume
+    let res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/start'), res, url('/api/team/identity/start'), { dataDir });
+    const { pairingId, code, browserToken } = json(res);
+    claimPairing(dataDir, code, { openId: 'ou_me', unionId: 'on_me', name: '申晗', larkAppId: 'cli_mine' });
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/consume', { pairingId, browserToken }), res, url('/api/team/identity/consume'), { dataDir });
+    expect(res.statusCode).toBe(200);
+    expect(json(res).owner).toMatchObject({ unionId: 'on_me', name: '申晗' });
+    // deployment owner bound
+    expect(getDeploymentIdentity(dataDir).ownerUnionId).toBe('on_me');
+    // unassigned bot now owned by me; pre-owned bot NOT stolen
+    expect(getBotOwner(dataDir, 'cli_mine')!.unionId).toBe('on_me');
+    expect(getBotOwner(dataDir, 'cli_owned')!.unionId).toBe('on_existing');
+  });
+
+  it('federated-group: includes the bound operator (this deployment owner) in invitees', async () => {
+    writeBots([{ larkAppId: 'cli_local', botOpenId: null, botName: '本地', cliId: 'claude' }]);
+    // bind owner
+    let res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/start'), res, url('/api/team/identity/start'), { dataDir });
+    const s = json(res);
+    claimPairing(dataDir, s.code, { openId: 'ou_op', unionId: 'on_operator', name: 'Op', larkAppId: 'cli_local' });
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/consume', { pairingId: s.pairingId, browserToken: s.browserToken }), makeRes(), url('/api/team/identity/consume'), { dataDir });
+    // federated-group → operator union_id in ownerUnionIds
+    let captured: any = null;
+    const createTeamGroup = vi.fn(async (a: any) => { captured = a; return { ok: true, chatId: 'oc', invalidBotIds: [] }; });
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/federated-group', { name: 'g', larkAppIds: ['cli_local'] }), res, url('/api/team/federated-group'), { dataDir, createTeamGroup: createTeamGroup as any });
+    expect(res.statusCode).toBe(200);
+    expect(captured.ownerUnionIds).toContain('on_operator'); // operator pulled in
+    expect(json(res).missingOperatorIdentity).toBeFalsy();
+  });
+
+  it('remote-group: forwards to hub /api/federation/group with Bearer + requestId', async () => {
+    writeBots([]);
+    // join a hub (mock)
+    const joinFetcher = vi.fn(async () => jsonResp(200, { ok: true, teamId: 'default', teamName: 'T', syncToken: 'TOK' }));
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/join-remote', { hubUrl: 'http://hub:7891', inviteCode: 'INV' }), makeRes(), url('/api/team/join-remote'), { dataDir, fetcher: joinFetcher as any });
+    // remote-group → hub /api/federation/group
+    let captured: any = null;
+    const grpFetcher = vi.fn(async (u: any, init: any) => { captured = { url: String(u), body: JSON.parse(init.body), auth: init.headers.authorization }; return jsonResp(200, { ok: true, chatId: 'oc_r' }); });
+    const res = makeRes();
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/remote-group', { hubUrl: 'http://hub:7891', teamId: 'default', name: 'x', larkAppIds: ['cli_a'] }), res, url('/api/team/remote-group'), { dataDir, fetcher: grpFetcher as any });
+    expect(res.statusCode).toBe(200);
+    expect(captured.url).toBe('http://hub:7891/api/federation/group');
+    expect(captured.auth).toBe('Bearer TOK');
+    expect(captured.body.requestId).toBeTruthy();
+    expect(captured.body.larkAppIds).toEqual(['cli_a']);
   });
 
   it('local: POST /api/team/rename-deployment changes the name (id stable)', async () => {

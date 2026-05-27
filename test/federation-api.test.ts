@@ -183,6 +183,35 @@ describe('handleFederationApi', () => {
     expect(res.statusCode).toBe(501);
   });
 
+  it('federation/group: spoke initiates; operator is hub-derived from syncToken; requestId required + idempotent', async () => {
+    writeBots([{ larkAppId: 'cli_hub', botOpenId: null, botName: 'Hub', cliId: 'claude' }]); // hub local bot
+    registerDeployment(dataDir, DEFAULT_TEAM_ID, { deploymentId: 'dep_spoke', name: 'S', ownerUnionId: 'on_spoke', bots: [{ larkAppId: 'cli_sp', botName: 'SP', cliId: 'codex' }] });
+    const list = (await import('../src/services/federation-store.js')).listFederatedDeployments(dataDir, DEFAULT_TEAM_ID);
+    const syncToken = list[0].syncToken;
+    let calls = 0; let captured: any = null;
+    const createTeamGroup = vi.fn(async (a: any) => { calls++; captured = a; return { ok: true, chatId: 'oc_g', invalidBotIds: [] }; });
+    // missing requestId → 400
+    let res = makeRes();
+    await callWithGroup(makeReq('POST', '/api/federation/group', { name: 'g', larkAppIds: ['cli_hub'] }, bearer(syncToken)), res, '/api/federation/group', createTeamGroup);
+    expect(json(res).error).toBe('request_id_required');
+    // valid → orchestrates; operator (spoke owner, hub-derived) in invitees
+    res = makeRes();
+    await callWithGroup(makeReq('POST', '/api/federation/group', { name: 'g', larkAppIds: ['cli_hub'], requestId: 'r1' }, bearer(syncToken)), res, '/api/federation/group', createTeamGroup);
+    expect(res.statusCode).toBe(200);
+    expect(json(res).chatId).toBe('oc_g');
+    expect(captured.ownerUnionIds).toContain('on_spoke'); // operator from syncToken, NOT request body
+    // replay same requestId → idempotent (createTeamGroup not called again)
+    res = makeRes();
+    await callWithGroup(makeReq('POST', '/api/federation/group', { name: 'g', larkAppIds: ['cli_hub'], requestId: 'r1' }, bearer(syncToken)), res, '/api/federation/group', createTeamGroup);
+    expect(res.statusCode).toBe(200);
+    expect(json(res).chatId).toBe('oc_g');
+    expect(calls).toBe(1);
+    // unknown token → 403
+    res = makeRes();
+    await callWithGroup(makeReq('POST', '/api/federation/group', { larkAppIds: ['cli_hub'], requestId: 'r2' }, bearer('NOPE')), res, '/api/federation/group', createTeamGroup);
+    expect(res.statusCode).toBe(403);
+  });
+
   it('join requires inviteCode + deployment', async () => {
     let res = makeRes();
     await call(makeReq('POST', '/api/federation/join', { deployment: { deploymentId: 'd', name: 'n', bots: [] } }), res, '/api/federation/join');

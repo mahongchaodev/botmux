@@ -14,6 +14,11 @@ import { hostname } from 'node:os';
 export interface DeploymentIdentity {
   deploymentId: string;
   name: string;
+  /** The owner's tenant-stable Feishu identity, bound once via /pair. Used as
+   *  the "operator" when this deployment initiates 拉群 (so the operator is
+   *  pulled into the group). Absent until bound. */
+  ownerUnionId?: string;
+  ownerName?: string;
 }
 
 function filePath(dataDir: string): string {
@@ -35,7 +40,12 @@ export function getDeploymentIdentity(dataDir: string): DeploymentIdentity {
     try {
       const p = JSON.parse(readFileSync(fp, 'utf-8'));
       if (p && typeof p.deploymentId === 'string' && p.deploymentId) {
-        return { deploymentId: p.deploymentId, name: typeof p.name === 'string' && p.name ? p.name : 'botmux' };
+        return {
+          deploymentId: p.deploymentId,
+          name: typeof p.name === 'string' && p.name ? p.name : 'botmux',
+          ownerUnionId: typeof p.ownerUnionId === 'string' ? p.ownerUnionId : undefined,
+          ownerName: typeof p.ownerName === 'string' ? p.ownerName : undefined,
+        };
       }
     } catch { /* corrupt — regenerate */ }
   }
@@ -47,7 +57,15 @@ export function getDeploymentIdentity(dataDir: string): DeploymentIdentity {
 /** Rename this deployment (owner-facing label). Returns the updated identity. */
 export function setDeploymentName(dataDir: string, name: string): DeploymentIdentity {
   const cur = getDeploymentIdentity(dataDir);
-  const next: DeploymentIdentity = { deploymentId: cur.deploymentId, name: name.trim() || cur.name };
+  const next: DeploymentIdentity = { ...cur, name: name.trim() || cur.name };
+  write(dataDir, next);
+  return next;
+}
+
+/** Bind the owner's Feishu identity (via /pair). Returns the updated identity. */
+export function setDeploymentOwner(dataDir: string, owner: { unionId?: string; name?: string }): DeploymentIdentity {
+  const cur = getDeploymentIdentity(dataDir);
+  const next: DeploymentIdentity = { ...cur, ownerUnionId: owner.unionId || cur.ownerUnionId, ownerName: owner.name || cur.ownerName };
   write(dataDir, next);
   return next;
 }

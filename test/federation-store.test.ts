@@ -74,11 +74,11 @@ describe('federation-store (hub)', () => {
 
   it('syncDeployment updates bots + heartbeat by token; unknown token is false', () => {
     const { syncToken } = registerDeployment(dataDir, 'default', { deploymentId: 'dep_x', name: 'X', bots: [bot('cli_a')] }, 1000);
-    expect(syncDeployment(dataDir, syncToken, [bot('cli_a'), bot('cli_c')], 5000)).toBe(true);
+    expect(syncDeployment(dataDir, syncToken, [bot('cli_a'), bot('cli_c')], undefined, 5000)).toBe(true);
     const d = getDeploymentByToken(dataDir, syncToken)!.deployment;
     expect(d.bots.map(b => b.larkAppId)).toEqual(['cli_a', 'cli_c']);
     expect(d.lastSeenAt).toBe(5000);
-    expect(syncDeployment(dataDir, 'bogus', [], 6000)).toBe(false);
+    expect(syncDeployment(dataDir, 'bogus', [], undefined, 6000)).toBe(false);
   });
 
   it('removeDeployment / removeTeamFederation drop records', () => {
