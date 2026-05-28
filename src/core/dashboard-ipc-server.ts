@@ -10,8 +10,9 @@ import * as brandStore from '../services/brand-store.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
-import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry } from './worker-pool.js';
-import { getChatMode, replyMessage, sendMessage } from '../im/lark/client.js';
+import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession } from './worker-pool.js';
+import { listOnlineDaemons } from '../utils/daemon-discovery.js';
+import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId } from '../im/lark/client.js';
 import { resumeSession } from './session-manager.js';
 import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
@@ -184,6 +185,126 @@ ipcRoute('POST', '/api/sessions/:sessionId/resume', async (_req, res, params) =>
     workingDir: ds.session.workingDir,
     cliId,
   });
+});
+
+/**
+ * Cross-daemon session transfer endpoint.
+ *
+ * Called by a *leader* daemon during `/relay --create` to instruct *peer*
+ * daemons to migrate their own session (located by `sourceAnchor`) into a
+ * newly-created chat. The peer daemon authenticates the request and runs its
+ * own `transferSession()` internally — the leader never touches another
+ * daemon's process / tmux / jsonl directly.
+ *
+ * Security:
+ *   - Only accepts requests from 127.0.0.1 (no remote daemon coordination).
+ *   - `requesterLarkAppId` must be a known bot in this machine's bots
+ *     registry. The threat model assumes a malicious bot daemon process is
+ *     already root-equivalent on the box; this check just prevents random
+ *     other 127.0.0.1 processes from forging migrations.
+ *   - `sourceAnchor` must match a session currently owned by *this* daemon
+ *     (peer can only move its own sessions — never anybody else's).
+ *   - Owner-only: only the original session owner may relocate the session.
+ *
+ * The leader passes `targetRootMessageId` — typically the leader's M1
+ * notification message — so the peer's session lands anchored on a real
+ * message in the new chat. Since the new chat is always chat-scope, the
+ * rootMessageId is only used for audit / display, not routing.
+ */
+ipcRoute('POST', '/api/sessions/migrate-to-chat', async (req, res) => {
+  const remote = req.socket.remoteAddress;
+  // node may report '127.0.0.1' or '::ffff:127.0.0.1' (IPv4 mapped) or '::1'.
+  const localish = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  if (!localish) return jsonRes(res, 403, { ok: false, error: 'not_local' });
+
+  let body: {
+    sourceAnchor?: string;
+    targetChatId?: string;
+    targetRootMessageId?: string;
+    requesterLarkAppId?: string;
+    requestingUserOpenId?: string;
+    requestingUserUnionId?: string;
+  };
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_json' });
+  }
+  const { sourceAnchor, targetChatId, targetRootMessageId, requesterLarkAppId, requestingUserOpenId, requestingUserUnionId } = body;
+  if (!sourceAnchor || !targetChatId || !targetRootMessageId || !requesterLarkAppId || !requestingUserOpenId) {
+    return jsonRes(res, 400, { ok: false, error: 'missing_field' });
+  }
+
+  // Requester must be a live botmux daemon — not a random localhost process
+  // pretending to be one. We check the cross-process daemon registry
+  // (~/.botmux/data/dashboard-daemons/<larkAppId>.json + heartbeat) rather
+  // than this process's local bot list: in production each bot has its own
+  // daemon process, and a per-process `getAllBots()` only sees its OWN bot
+  // (botmux is one-daemon-per-bot at boot, daemon.ts:2367). Using the
+  // registry lets the peer recognise the leader bot.
+  const requesterKnown = listOnlineDaemons().some(d => d.larkAppId === requesterLarkAppId);
+  if (!requesterKnown) return jsonRes(res, 403, { ok: false, error: 'unknown_requester' });
+
+  // Locate this daemon's own session at the given source anchor. We match
+  // by anchor (rootMessageId for thread-scope, chatId for chat-scope) AND
+  // larkAppId — multi-bot threads share a rootMessageId but each bot's
+  // session is uniquely keyed by (anchor, larkAppId).
+  const reg = getActiveSessionsRegistry();
+  if (!reg) return jsonRes(res, 503, { ok: false, error: 'registry_unavailable' });
+
+  let ds: ReturnType<typeof findActiveBySessionId> = undefined;
+  for (const candidate of reg.values()) {
+    const candAnchor = candidate.scope === 'chat' ? candidate.chatId : candidate.session.rootMessageId;
+    if (candAnchor === sourceAnchor && candidate.larkAppId === cachedLarkAppId) {
+      ds = candidate;
+      break;
+    }
+  }
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'no_session_at_anchor' });
+
+  // Owner-only: the user who triggered /relay --create must own this peer's
+  // session too. If a peer's session is owned by someone else, we refuse —
+  // the leader summarises this as "skipped: not your session" rather than
+  // forcing a transfer of someone else's work.
+  //
+  // Cross-app identity: Lark `open_id` is app-scoped — the same user has a
+  // different open_id in each bot's namespace, so leader's senderOpenId
+  // and peer's stored ownerOpenId cannot be compared directly. Prefer
+  // `union_id` (stable across apps within a tenant) when both sides have
+  // it. Sessions persisted before ownerUnionId existed fall through to a
+  // lazy backfill: resolve peer's stored open_id → union_id via Lark API
+  // (using PEER's bot client, so the open_id is in the right namespace),
+  // persist for next time, and compare.
+  if (ds.session.ownerOpenId) {
+    let peerOwnerUnionId = ds.session.ownerUnionId;
+    if (!peerOwnerUnionId && requestingUserUnionId) {
+      // Backfill: legacy session, look up the union_id via Lark API once
+      // and persist it so subsequent comparisons (and any other code path
+      // that grows to read it) are fast.
+      const looked = await resolveUnionIdFromOpenId(ds.larkAppId, ds.session.ownerOpenId);
+      if (looked) {
+        peerOwnerUnionId = looked;
+        ds.session.ownerUnionId = looked;
+        sessionStore.updateSession(ds.session);
+      }
+    }
+    const ownerMatch = (peerOwnerUnionId && requestingUserUnionId)
+      ? peerOwnerUnionId === requestingUserUnionId
+      // Same-bot fallback (no union_id on either side): open_id namespaces
+      // match, so direct compare works.
+      : ds.session.ownerOpenId === requestingUserOpenId;
+    if (!ownerMatch) {
+      return jsonRes(res, 403, { ok: false, error: 'not_session_owner' });
+    }
+  }
+
+  // Target chat was built by the leader's /relay --create — by
+  // construction a regular group. The peer inherits that guarantee.
+  const result = await transferSession(ds.session.sessionId, targetChatId, targetRootMessageId, 'group');
+  if (!result.ok) {
+    return jsonRes(res, 500, { ok: false, error: result.error });
+  }
+  jsonRes(res, 200, { ok: true, sessionId: ds.session.sessionId });
 });
 
 ipcRoute('POST', '/api/sessions/:sessionId/locate', async (_req, res, params) => {

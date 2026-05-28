@@ -29,6 +29,14 @@ export interface Session {
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;       // topic creator's open_id — for @mention in replies
+  /** Lark `union_id` of the session owner. Stable across apps within a tenant
+   *  (unlike `ownerOpenId`, which is app-scoped: the same Lark user has a
+   *  different `open_id` in each bot's namespace). Used by cross-daemon
+   *  owner-checks like `/relay --create`'s peer `migrate-to-chat`, where
+   *  the leader and peer daemons see different open_ids for the same user.
+   *  Optional — older sessions persisted before this field was added have
+   *  it undefined; callers should fall back to ownerOpenId in that case. */
+  ownerUnionId?: string;
   /** open_id of the user whose message triggered the most recent CLI turn.
    *  Equals ownerOpenId for the first turn; updates on every subsequent reply.
    *  Used by `botmux send` to address the card to the actual caller in oncall
@@ -93,6 +101,12 @@ export interface LarkMessage {
    *  UI to reference a specific earlier message. Empty otherwise. */
   parentId?: string;
   senderId: string;
+  /** Lark `union_id` of the sender — stable across apps within a tenant
+   *  (unlike senderId / open_id which is app-scoped). Used by cross-daemon
+   *  owner checks (e.g. /relay --create's peer migrate-to-chat). May be
+   *  undefined for events that don't carry it (older formats, API-fetched
+   *  messages). */
+  senderUnionId?: string;
   senderType: string;
   msgType: string;
   content: string;

@@ -170,6 +170,38 @@ export async function removeReaction(larkAppId: string, messageId: string, react
   logger.info(`Removed reaction ${reactionId} from message ${messageId}`);
 }
 
+/**
+ * Resolve a user's tenant-stable `union_id` from their app-scoped `open_id`.
+ * Used by cross-daemon owner checks (e.g. /relay --create peer migrate)
+ * to compare identities across bot namespaces — open_id alone is
+ * app-scoped, so two daemons looking at the same physical user see
+ * different open_ids.
+ *
+ * Best-effort: returns null on API failure / missing scope / empty
+ * response, so callers can fall back to other identity strategies
+ * instead of failing the whole flow.
+ */
+export async function resolveUnionIdFromOpenId(
+  larkAppId: string,
+  openId: string,
+): Promise<string | null> {
+  const c = getBotClient(larkAppId);
+  try {
+    const res = await larkGet(c, `/open-apis/contact/v3/users/${encodeURIComponent(openId)}`, {
+      user_id_type: 'open_id',
+    });
+    if (res?.code !== 0) {
+      logger.debug(`[union_id] resolve failed for ${openId.substring(0, 12)}: code=${res?.code} msg=${res?.msg ?? ''}`);
+      return null;
+    }
+    const unionId: string | undefined = res?.data?.user?.union_id;
+    return unionId ?? null;
+  } catch (err) {
+    logger.debug(`[union_id] resolve threw for ${openId.substring(0, 12)}: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
 export async function sendUserMessage(larkAppId: string, openId: string, content: string, msgType: string = 'text'): Promise<string> {
   const c = getBotClient(larkAppId);
   const body = msgType === 'text' ? JSON.stringify({ text: content }) : content;
@@ -204,6 +236,74 @@ export async function getChatInfo(larkAppId: string, chatId: string): Promise<{ 
     userCount: Number(res.data?.user_count ?? 0),
     botCount: Number(res.data?.bot_count ?? 0),
   };
+}
+
+/**
+ * Resolve a chat's display name (the user-facing group title). Returns `null`
+ * on any failure (chatId is unknown to this bot, network error, bot not in
+ * chat etc.) — callers should fall back to displaying the raw chatId so the
+ * UI degrades gracefully rather than rendering "undefined". For p2p chats the
+ * returned name may be an empty string; treat that as "no display name" and
+ * also fall back. */
+export async function getChatName(larkAppId: string, chatId: string): Promise<string | null> {
+  try {
+    const c = getBotClient(larkAppId);
+    const res = await larkGet(c, `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`);
+    if (res.code !== 0) return null;
+    const name = String(res.data?.name ?? '').trim();
+    return name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One-shot fetch of both the chat's display name AND its mode (普通群 /
+ * 话题群 / p2p) — saves a duplicate API call when the caller wants both
+ * (the /relay picker needs name for display and mode for the type tag).
+ * Falls back to `{ name: null, mode: 'group' }` on any error, mirroring
+ * getChatMode's safer-default behaviour.
+ *
+ * Cached per (appId, chatId) for 5 minutes — the /relay picker re-renders
+ * on every select / paginate / search click, and without the cache each
+ * click would fire N parallel chat.get API calls (one per unique source
+ * chat) which the user perceives as a loading spinner. Mirrors the TTL
+ * cache `getChatMode` already has. */
+interface ChatInfoCacheEntry { name: string | null; mode: ChatMode; cachedAt: number }
+const chatInfoCache = new Map<string, ChatInfoCacheEntry>();
+const CHAT_INFO_TTL_MS = 5 * 60 * 1000;
+
+export async function getChatNameAndMode(
+  larkAppId: string,
+  chatId: string,
+): Promise<{ name: string | null; mode: ChatMode }> {
+  const cacheKey = `${larkAppId}::${chatId}`;
+  const cached = chatInfoCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < CHAT_INFO_TTL_MS) {
+    return { name: cached.name, mode: cached.mode };
+  }
+
+  let name: string | null = null;
+  let mode: ChatMode = 'group';
+  try {
+    const c = getBotClient(larkAppId);
+    const res = await larkGet(c, `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}`);
+    if (res.code === 0) {
+      const raw = String(res.data?.name ?? '').trim();
+      name = raw.length > 0 ? raw : null;
+      const rawMode = String(res.data?.chat_mode ?? '').toLowerCase();
+      const rawType = String(res.data?.chat_type ?? '').toLowerCase();
+      const rawGmt = String(res.data?.group_message_type ?? '').toLowerCase();
+      // Same classification as getChatMode — keep in sync.
+      if (rawType === 'p2p') mode = 'p2p';
+      else if (rawMode === 'topic' || rawGmt === 'thread') mode = 'topic';
+      else mode = 'group';
+    }
+  } catch {
+    /* keep safe defaults */
+  }
+  chatInfoCache.set(cacheKey, { name, mode, cachedAt: Date.now() });
+  return { name, mode };
 }
 
 /** Lark chat-mode classification used by botmux to decide session scope:

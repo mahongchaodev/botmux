@@ -39,6 +39,11 @@ vi.mock('../src/core/worker-pool.js', () => ({
   killStalePids: vi.fn(),
   getCurrentCliVersion: vi.fn(() => '1.0.0-test'),
   restoreUsageLimitRuntimeState: vi.fn(),
+  // Stub: bypass the closeSession-on-collision path and just set the entry.
+  // The collision-detection behavior is exercised in transfer-session.test.ts.
+  setActiveSessionSafe: vi.fn(async (map: Map<string, any>, key: string, ds: any) => {
+    map.set(key, ds);
+  }),
 }));
 
 vi.mock('../src/bot-registry.js', () => ({
@@ -199,7 +204,7 @@ describe('resumeSession', () => {
   });
 
   describe('success path', () => {
-    it('restores usage-limit runtime state for active sessions after daemon restart', () => {
+    it('restores usage-limit runtime state for active sessions after daemon restart', async () => {
       const s = sessionStore.createSession('oc_chat_limit', 'om_limit', 'Limited topic');
       s.larkAppId = 'app_test';
       s.scope = 'thread';
@@ -213,7 +218,10 @@ describe('resumeSession', () => {
       sessionStore.updateSession(s);
       const map = new Map<string, DaemonSession>();
 
-      restoreActiveSessions(map);
+      // restoreActiveSessions is async (became so when setActiveSessionSafe
+      // landed) — without await the post-restore Map lookup below races
+      // ahead of the for-of body that populates the map.
+      await restoreActiveSessions(map);
 
       const ds = map.get(sessionKey('om_limit', 'app_test'));
       expect(ds).toBeDefined();

@@ -1711,6 +1711,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   }
 
   const senderOpenId: string | undefined = data.sender?.sender_id?.open_id;
+  const senderUnionId: string | undefined = data.sender?.sender_id?.union_id;
   const botCfg = getBot(larkAppId).config;
   logger.info(`New session: "${content.substring(0, 60)}" (scope=${scope}, anchor=${anchor.substring(0, 12)}, resources: ${resources.length}, active: ${getActiveCount()}, messageId: ${messageId}, chatId: ${chatId})`);
 
@@ -1745,6 +1746,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       const now = Date.now();
       session.larkAppId = larkAppId;
       session.ownerOpenId = senderOpenId;
+      session.ownerUnionId = senderUnionId;
       session.lastCallerOpenId = senderOpenId;
       session.lastMessageAt = new Date(now).toISOString();
       session.scope = scope;
@@ -1826,6 +1828,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.ownerOpenId = senderOpenId;
+  session.ownerUnionId = senderUnionId;
   session.lastCallerOpenId = senderOpenId;
   // First turn of a brand-new topic: seed quoteTarget* so the very first
   // `botmux send` can --mention-back / 引用 the triggering message (chat scope).
@@ -2177,6 +2180,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     logger.info(`No active session for ${scope}-scope ${anchor}, auto-creating new session...`);
     refreshCliVersion(botCfg.cliId, botCfg.cliPathOverride);
     const senderOId = data.sender?.sender_id?.open_id;
+    const senderUId = data.sender?.sender_id?.union_id;
     // For thread-scope: rootMessageId = anchor (real thread root).
     // For chat-scope:   rootMessageId = the message_id that triggered this auto-create
     //                   (used as audit trail; routing key is chatId).
@@ -2186,8 +2190,10 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     // Bot-started handoff sessions have no human owner; keeping the bot as
     // owner makes daemon-generated footers wake that bot again.
     const ownerOpenId = isForeignBot ? undefined : senderOId;
+    const ownerUnionId = isForeignBot ? undefined : senderUId;
     session.larkAppId = larkAppId;
     session.ownerOpenId = ownerOpenId;
+    session.ownerUnionId = ownerUnionId;
     session.lastCallerOpenId = senderOId;
     session.quoteTargetId = parsed.messageId;
     session.quoteTargetSenderOpenId = senderOId;
@@ -2550,7 +2556,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   }
 
   // Restore active sessions from previous run
-  restoreActiveSessions(activeSessions);
+  await restoreActiveSessions(activeSessions);
 
   await attachColdWorkflowRuns(cfg.larkAppId);
 

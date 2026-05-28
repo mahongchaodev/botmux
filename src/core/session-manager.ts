@@ -11,7 +11,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as messageQueue from '../services/message-queue.js';
 import { downloadMessageResource, listChatBotMembers } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
-import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState } from './worker-pool.js';
+import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
@@ -527,7 +527,7 @@ export function rememberLastCliInput(ds: DaemonSession, userPrompt: string, cliI
 
 // ─── Session restore ─────────────────────────────────────────────────────────
 
-export function restoreActiveSessions(activeSessions: Map<string, DaemonSession>): void {
+export async function restoreActiveSessions(activeSessions: Map<string, DaemonSession>): Promise<void> {
   const sessions = sessionStore.listSessions();
   const active = sessions.filter(s => s.status === 'active');
 
@@ -585,7 +585,12 @@ export function restoreActiveSessions(activeSessions: Map<string, DaemonSession>
       const anchor = sessionAnchorId(ds);
       messageQueue.ensureQueue(anchor);
       if (ds.usageLimit) restoreUsageLimitRuntimeState(ds);
-      activeSessions.set(sessionKey(anchor, larkAppId), ds);
+      // Same-key collision guard: if a prior iteration already set an entry
+      // at this key (legitimately possible if disk holds two active sessions
+      // resolving to the same chat-scope key — e.g. a leaked scratch +
+      // relayed real session from a prior buggy run), close the loser
+      // rather than silently overwriting it.
+      await setActiveSessionSafe(activeSessions, sessionKey(anchor, larkAppId), ds);
       forkAdoptWorker(ds, { restoredFromMetadata: true });
       logger.info(`[${session.sessionId.substring(0, 8)}] Restored adopt session (target: ${adopted.tmuxTarget}, scope: ${scope})`);
       continue;
@@ -629,7 +634,8 @@ export function restoreActiveSessions(activeSessions: Map<string, DaemonSession>
     const anchor = sessionAnchorId(ds);
     messageQueue.ensureQueue(anchor);
     if (ds.usageLimit) restoreUsageLimitRuntimeState(ds);
-    activeSessions.set(sessionKey(anchor, larkAppId), ds);
+    // Same-key collision guard — see adopt-branch comment above.
+    await setActiveSessionSafe(activeSessions, sessionKey(anchor, larkAppId), ds);
 
     logger.debug(`Registered session ${session.sessionId} (scope: ${scope}, anchor: ${anchor})`);
   }

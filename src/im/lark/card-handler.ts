@@ -7,7 +7,7 @@ import { execSync } from 'node:child_process';
 import { config } from '../../config.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate } from './event-dispatcher.js';
-import { sendUserMessage, updateMessage, deleteMessage, replyMessage, sendEphemeralCard } from './client.js';
+import { sendUserMessage, updateMessage, deleteMessage, replyMessage, sendMessage, sendEphemeralCard } from './client.js';
 import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent } from './card-builder.js';
 import { addChatGrant, addGlobalGrant } from '../../services/grant-store.js';
 import { checkNonce, clearPending, markDenied } from './grant-pending.js';
@@ -192,6 +192,211 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
 
   if (isAskCardAction(value?.action)) {
     return handleAskCardAction(data);
+  }
+
+  // ─── /relay picker: state-changing actions (select / page / search) ────
+  // These three actions all re-render the picker card with updated state:
+  //   • relay_select — user clicked a session card → set as selectedSessionId
+  //   • relay_page   — user clicked prev/next page → bump page index
+  //   • relay_search — user submitted the search form → apply new query (reset page)
+  //
+  // The card is stateless on the Lark side, so each callback value carries
+  // the FULL state (search / page / selected / target_chat_id / root_id);
+  // we just compute the new state from the action and re-render.
+  if (value?.action && larkAppId && ['relay_select', 'relay_page', 'relay_search'].includes(value.action as string)) {
+    const loc = localeForBot(larkAppId);
+    const targetChatId = value.target_chat_id;
+    const targetRootId = value.root_id;
+    const invokerOpenId = value.invoker_open_id as string | undefined;
+    if (!targetChatId || !targetRootId || !operatorOpenId) {
+      return { toast: { type: 'error', content: t('card.relay.toast_failed', { error: 'missing_value' }, loc) } };
+    }
+    // Picker is owner-only: only the user who summoned it may flip pages,
+    // search, or select. Otherwise A's invocation in a shared chat could be
+    // silently swapped to C's session list when C clicks a button. Cards
+    // built before this guard was deployed lack invoker_open_id — we let
+    // them through (legacy) rather than break in-flight pickers; new cards
+    // are protected from the moment they're rendered.
+    if (invokerOpenId && invokerOpenId !== operatorOpenId) {
+      return { toast: { type: 'error', content: t('card.relay.toast_not_invoker', undefined, loc) } };
+    }
+
+    // Reconstruct the next state from the action.
+    const carriedSearch = (value.search as string) ?? '';
+    const carriedPage = Number(value.page ?? 0) || 0;
+    const carriedSelected = (value.selected as string) ?? '';
+
+    let nextSearch = carriedSearch;
+    let nextPage = carriedPage;
+    let nextSelected: string | undefined = carriedSelected || undefined;
+
+    if (value.action === 'relay_search') {
+      // v2 input fires `behaviors[].callback` directly — the typed text
+      // arrives as action.input_value (NOT form_value), since we're no
+      // longer wrapping the input in a form. Reset page on new search.
+      nextSearch = String((action as any)?.input_value ?? '').trim();
+      nextPage = 0;
+      // Don't carry over the selection on a new search — the selected entry
+      // may not match the new filter, and even if it does, "I just searched
+      // for something else" implies the user is changing what they want.
+      nextSelected = undefined;
+    } else if (value.action === 'relay_page') {
+      nextPage = Number(value.page ?? 0) || 0;
+    } else if (value.action === 'relay_select') {
+      nextSelected = value.session_id;
+    }
+
+    const { collectRelayPickerEntries } = await import('../../services/relay-picker.js');
+    const entries = await collectRelayPickerEntries(activeSessions, larkAppId, targetChatId, operatorOpenId);
+    const { buildRelayPickerCard } = await import('./card-builder.js');
+    const cardJson = buildRelayPickerCard(
+      entries,
+      targetChatId,
+      targetRootId,
+      // Preserve the original invoker so the re-rendered card stays bound
+      // to them. Fall back to operatorOpenId for legacy cards rendered
+      // before invoker_open_id was added (shouldn't normally happen since
+      // the check above already lets legacy through, but a render needs a
+      // string regardless).
+      invokerOpenId ?? operatorOpenId,
+      loc,
+      {
+        selectedSessionId: nextSelected,
+        searchQuery: nextSearch,
+        page: nextPage,
+      },
+    );
+    // Return an updated card body — event-dispatcher wraps this as
+    // { card: { type: 'raw', data: <body> } } so Lark patches the picker
+    // in place rather than appending a new message.
+    return JSON.parse(cardJson);
+  }
+
+  // ─── /relay picker: confirm transfer (stage 2 → done) ──────────────────
+  // The confirm button on the picker card fires this. Same logic as the
+  // original (pre-two-stage) relay_pickup action: owner-check, pre-flight
+  // conflict check, send M1, transferSession, delete picker card.
+  if (value?.action === 'relay_confirm' && larkAppId) {
+    const loc = localeForBot(larkAppId);
+    const sourceSessionId = value.session_id;
+    const targetChatId = value.target_chat_id;
+    const targetRootId = value.root_id;
+    const invokerOpenId = value.invoker_open_id as string | undefined;
+    if (!sourceSessionId || !targetChatId || !targetRootId) {
+      return { toast: { type: 'error', content: t('card.relay.toast_failed', { error: 'missing_value' }, loc) } };
+    }
+    // Invoker-only confirm: redundant with the ownerOpenId check below in
+    // normal flow (invoker = session owner = picker invoker), but defends
+    // against the edge case where the source session changed owners after
+    // the picker was rendered, OR where the picker was shared/forwarded.
+    // Legacy cards (no invoker_open_id) fall through to ownerOpenId only.
+    if (invokerOpenId && operatorOpenId && invokerOpenId !== operatorOpenId) {
+      return { toast: { type: 'error', content: t('card.relay.toast_not_invoker', undefined, loc) } };
+    }
+    // Locate the source session in the in-process registry. Since picker only
+    // lists sessions of THIS bot in OTHER chats, the source must live in our
+    // activeSessions — if it's gone, treat as not found rather than reaching
+    // across daemons (cross-daemon pull is out of v1 scope).
+    let sourceDs: DaemonSession | undefined;
+    for (const cand of activeSessions.values()) {
+      if (cand.larkAppId === larkAppId && cand.session.sessionId === sourceSessionId) {
+        sourceDs = cand;
+        break;
+      }
+    }
+    if (!sourceDs) {
+      return { toast: { type: 'error', content: t('card.relay.toast_not_found', undefined, loc) } };
+    }
+    if (sourceDs.session.ownerOpenId && sourceDs.session.ownerOpenId !== operatorOpenId) {
+      return { toast: { type: 'error', content: t('card.relay.toast_not_owner', undefined, loc) } };
+    }
+    if (sourceDs.chatId === targetChatId) {
+      return { toast: { type: 'error', content: t('card.relay.toast_same_chat', undefined, loc) } };
+    }
+    // Real-session preflight — done BEFORE M1 send so a refusal doesn't
+    // leave a misleading "已接力" announcement in the target chat.
+    // collectRelayPickerEntries already filters scratches at render time,
+    // but a stale picker (rendered before a scratch was created) could
+    // still produce a confirm click; this is the depth defense.
+    {
+      const { isRelayableRealSession } = await import('../../core/worker-pool.js');
+      if (!isRelayableRealSession(sourceDs)) {
+        return { toast: { type: 'error', content: t('card.relay.toast_not_started_yet', undefined, loc) } };
+      }
+    }
+    // Pre-flight target-chat conflict check — done BEFORE sendMessage M1 so
+    // a refusal doesn't leave a misleading "已接力" announcement in the
+    // target chat (王皓 caught this in testing). Mirror the same predicate
+    // transferSession uses, plus the `!!worker` filter that excludes daemon
+    // command scratch sessions (e.g. the /relay command's own session,
+    // which shares the bot's larkAppId + chatId but has no worker).
+    const targetConflict = [...activeSessions.values()].find(c =>
+      c !== sourceDs
+      && c.larkAppId === larkAppId
+      && c.chatId === targetChatId
+      && c.scope === 'chat'
+      && !!c.worker
+    );
+    if (targetConflict) {
+      const conflictTitle = targetConflict.session.title || targetConflict.session.sessionId.substring(0, 8);
+      // Send as a regular text message in the target chat instead of a
+      // popup toast — per王皓's preference for visible/persistent error
+      // ("不要用弹窗，就用消息形式"). No toast returned so the operator
+      // sees the chat message land where the error actually applies.
+      // Pass raw text — sendMessage wraps text-msgType bodies itself; the
+      // earlier `JSON.stringify({text: ...})` caused double-wrapping and
+      // Lark rendered the JSON literally (王皓 caught this in the M1).
+      const errText = t('cmd.relay.target_has_session_msg', { title: conflictTitle }, loc);
+      sendMessage(larkAppId, targetChatId, errText, 'text').catch(() => undefined);
+      return;
+    }
+    // Resolve a friendly source chat label for the M1 announcement — falls
+    // back to the raw chatId if Lark can't return a name.
+    const { getChatName } = await import('./client.js');
+    const sourceLabel = (await getChatName(larkAppId, sourceDs.chatId)) ?? sourceDs.chatId;
+    // Send the M1 announcement — its message_id becomes the new
+    // rootMessageId after the transfer (mirrors /relay --create's flow).
+    let m1MessageId: string;
+    try {
+      const m1Text = t('cmd.relay.m1_announce', { sourceChat: sourceLabel, groupName: targetChatId }, loc);
+      m1MessageId = await sendMessage(larkAppId, targetChatId, m1Text, 'text');
+    } catch (err: any) {
+      return { toast: { type: 'error', content: t('card.relay.toast_failed', { error: err?.message ?? 'send_m1_failed' }, loc) } };
+    }
+    const { transferSession } = await import('../../core/worker-pool.js');
+    // Target is always a regular group in the picker path — picker-mode's
+    // entry guard in command-handler.ts refused p2p / topic before the card
+    // even rendered. Passing literal 'group' here makes that contract
+    // explicit at the call site.
+    const r = await transferSession(sourceDs.session.sessionId, targetChatId, m1MessageId, 'group');
+    if (!r.ok) {
+      // Best-effort: orphan M1 cleanup so a failed transfer doesn't leave a
+      // misleading "已接力" message in the target chat (王皓's "明明失败了
+      // 却返回成功了" complaint). Race-condition fallback only — the
+      // pre-flight checks above should catch the common cases first.
+      deleteMessage(larkAppId, m1MessageId).catch(() => { /* leave it */ });
+      if (r.error === 'target_chat_has_session') {
+        // Lost the race vs the pre-flight check — still surface as a message.
+        const errText = t('cmd.relay.target_has_session_msg', { title: '' }, loc);
+        sendMessage(larkAppId, targetChatId, errText, 'text').catch(() => undefined);
+        return;
+      }
+      if (r.error === 'adopt_not_relayable') {
+        return { toast: { type: 'error', content: t('card.relay.toast_adopt_not_relayable', undefined, loc) } };
+      }
+      if (r.error === 'worker_busy') {
+        return { toast: { type: 'error', content: t('card.relay.toast_worker_busy', undefined, loc) } };
+      }
+      if (r.error === 'not_started_yet') {
+        return { toast: { type: 'error', content: t('card.relay.toast_not_started_yet', undefined, loc) } };
+      }
+      return { toast: { type: 'error', content: t('card.relay.toast_failed', { error: r.error }, loc) } };
+    }
+    // Best-effort: remove the picker card now that the selection resolved.
+    if (cardMessageId && larkAppId) {
+      deleteMessage(larkAppId, cardMessageId).catch(() => { /* leave it */ });
+    }
+    return { toast: { type: 'success', content: t('card.relay.toast_success', undefined, loc) } };
   }
 
   const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'retry_last_task', 'get_write_link', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_reject', 'wf_cancel'].includes(value.action);
