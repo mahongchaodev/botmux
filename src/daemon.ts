@@ -2442,9 +2442,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     pid: process.pid,
     startedAt: Date.now(),
     lastHeartbeat: Date.now(),
-    // Strip email-form entries — the dashboard only needs resolved open_ids,
-    // and the email→open_id resolution below will rewrite this field.
-    resolvedAllowedUsers: getBot(cfg.larkAppId).resolvedAllowedUsers.filter(u => !u.includes('@')),
+    // Dashboard create-group only consumes app-scoped open_ids — publish ONLY
+    // ou_ entries. Before the resolution below runs, the list may still hold raw
+    // email/on_ forms; emitting only ou_ avoids a startup race where the dashboard
+    // briefly sees an unusable on_/email (the resolution below rewrites this field).
+    resolvedAllowedUsers: getBot(cfg.larkAppId).resolvedAllowedUsers.filter(u => u.startsWith('ou_')),
   };
   // Initialise worker pool with daemon callbacks
   initWorkerPool({
@@ -2524,8 +2526,10 @@ export async function startDaemon(botIndex?: number): Promise<void> {
 
     // Resolve allowed users per bot
     if (bot.resolvedAllowedUsers.length > 0) {
-      const hasEmails = bot.resolvedAllowedUsers.some(u => u.includes('@'));
-      if (hasEmails) {
+      // 含邮箱或 union_id(on_) 都要重解析成本 app 的 open_id —— 否则 canTalk/canOperate
+      // 拿 sender 的 ou_ 对不上 on_，owner 会被自己的 bot 锁死（PR#72）。
+      const needsResolve = bot.resolvedAllowedUsers.some(u => u.includes('@') || u.startsWith('on_'));
+      if (needsResolve) {
         try {
           // 同时拿到 raw→open_id 映射，供 /revoke 反查删除 email 形式的 raw 条目（R2#2）。
           const { resolved, map } = await resolveAllowedUsersWithMap(cfg.larkAppId, bot.resolvedAllowedUsers);
@@ -2540,7 +2544,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       // dashboard's create-group flow can pick this bot as creator using the
       // operator's scope-correct open_id. Best-effort; the periodic heartbeat
       // will eventually catch up too.
-      desc.resolvedAllowedUsers = bot.resolvedAllowedUsers.filter(u => !u.includes('@'));
+      desc.resolvedAllowedUsers = bot.resolvedAllowedUsers.filter(u => u.startsWith('ou_'));
       try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
     }
 

@@ -32,6 +32,7 @@ import { setBotOwner } from '../services/bot-owner-store.js';
 import { setDeploymentOwner } from '../services/deployment-identity.js';
 import { createPairing, getPairingStatus, consumePairing } from '../services/pairing-store.js';
 import { resolveAllowedUsersWithMap, resolveUserUnionId } from '../im/lark/client.js';
+import { logger } from '../utils/logger.js';
 import { fetchWithTimeout, hubError, orchestrateFederatedGroup, type Fetcher } from './federated-group-core.js';
 
 export interface OwnerCandidate { unionId: string; name: string }
@@ -51,10 +52,16 @@ interface OwnerResolveDeps {
 
 /** Resolve this deployment's owner identity from bots.json `allowedUsers` using
  *  each bot's OWN app credentials (no /pair, no shared pairings.json — immune to
- *  the dataDir-split that broke /pair). Walks bots with allowedUsers in order;
- *  returns the first bot's distinct resolved {unionId,name} (skips bots that
- *  resolve to nothing, so one mis-config doesn't hide the rest). The UI auto-binds
- *  when there's exactly one, else lets the owner pick. */
+ *  the dataDir-split that broke /pair). Iterates ALL bots with non-empty
+ *  allowedUsers, resolves each independently, then aggregates and deduplicates by
+ *  union_id across all bots. The UI auto-binds when there's exactly one candidate,
+ *  else lets the owner pick. A bot failing (no scope / API error) is skipped so
+ *  one mis-config doesn't hide the rest.
+ *
+ *  allowedUsers 支持三种格式：
+ *  - `on_xxx` (union_id)  — 跨应用稳定 ID，直接使用，无需 API 解析（推荐）
+ *  - 邮箱                 — 通过 bot 凭证查询 open_id 再转 union_id
+ *  - `ou_xxx` (open_id)   — 仅对签发该 open_id 的同一应用有效；跨应用会报 99992361 */
 export async function resolveOwnerCandidatesFromAllowedUsers(d: OwnerResolveDeps = {}): Promise<OwnerCandidate[]> {
   const loadConfigs = d.configs ?? loadBotConfigs;
   const ensureClient = d.ensureClient ?? ((cfg: BotConfig) => { try { getBot(cfg.larkAppId); } catch { registerBot(cfg); } });
@@ -62,21 +69,43 @@ export async function resolveOwnerCandidatesFromAllowedUsers(d: OwnerResolveDeps
   const resolveUnion = d.resolveUnion ?? resolveUserUnionId;
   let configs: BotConfig[] = [];
   try { configs = loadConfigs(); } catch { return []; }
+  const byUnion = new Map<string, OwnerCandidate>();
   for (const cfg of configs) {
     const allowed = cfg.allowedUsers ?? [];
     if (allowed.length === 0) continue;
+
+    // on_ union_id: 跨应用稳定，直接加入候选列表，无需 bot 凭证（best-effort 补名字）
+    for (const v of allowed) {
+      if (!v.startsWith('on_') || byUnion.has(v)) continue;
+      let name = '';
+      try {
+        ensureClient(cfg);
+        const res = await (getBot(cfg.larkAppId).client as any).contact.v3.user.get({
+          path: { user_id: v }, params: { user_id_type: 'union_id' },
+        });
+        if (res.code === 0) name = res.data?.user?.name ?? '';
+      } catch { /* best-effort */ }
+      byUnion.set(v, { unionId: v, name });
+    }
+
+    // 邮箱 / ou_ open_id: 通过 bot 自身凭证解析
+    const nonUnion = allowed.filter(v => !v.startsWith('on_'));
+    if (nonUnion.length === 0) continue;
     try { ensureClient(cfg); } catch { continue; }
     let openIds: string[] = [];
-    try { openIds = await resolveAllowed(cfg.larkAppId, allowed); } catch { continue; } // one bot failing → try next
-    const byUnion = new Map<string, OwnerCandidate>();
+    try { openIds = await resolveAllowed(cfg.larkAppId, nonUnion); } catch {
+      logger.warn(`resolveOwnerCandidates [${cfg.larkAppId}]: resolveAllowed 失败，跳过该 bot`);
+      continue;
+    }
     for (const oid of openIds) {
       if (!oid.startsWith('ou_')) continue;
       const u = await resolveUnion(cfg.larkAppId, oid);
-      if (u.unionId) byUnion.set(u.unionId, { unionId: u.unionId, name: u.name ?? '' });
+      if (u.unionId && !byUnion.has(u.unionId)) {
+        byUnion.set(u.unionId, { unionId: u.unionId, name: u.name ?? '' });
+      }
     }
-    if (byUnion.size > 0) return [...byUnion.values()];
   }
-  return [];
+  return [...byUnion.values()];
 }
 
 const MAX_ROLE_BYTES = 4 * 1024;
