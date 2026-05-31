@@ -26,6 +26,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
+import { parseDispatchBotSpec, buildDispatchMessages } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -3194,6 +3195,105 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
 }
 
+// ─── Dispatch subcommand (Phase 0: open a sub-project thread + assign bots) ───
+
+async function cmdDispatch(rest: string[]): Promise<void> {
+  if (rest.includes('--help') || rest.includes('-h')) {
+    console.log(`botmux dispatch — 开一个子项目话题并把指定 bot 拉进去协作
+
+用法:
+  botmux dispatch --title "子项目标题" --bot <open_id[:名字[:角色]]> [--bot ...] [--brief "简报" | --brief-file <path>]
+
+说明:
+  在当前群里发一条顶层「子项目」种子消息，并在它的线程里 @ 指定的 bot（带角色），
+  触发每个 bot 在该话题里各起一个独立会话。常见用法是一个话题派两个 bot 协作
+  （比如 coder + reviewer）。返回 JSON，含 seedMessageId / threadRootId 供编排者登记。
+
+选项:
+  --title <t>           子项目标题（必填）
+  --bot <spec>          指派的 bot，可重复；spec 形如 open_id 或 open_id:名字 或 open_id:名字:角色
+  --brief <text>        子项目简报
+  --brief-file <path>   从文件读取简报
+  --chat-id <id>        覆盖目标群（默认当前会话所在群）
+  --session-id <id>     指定来源会话（默认自动推断）`);
+    return;
+  }
+
+  process.env.SESSION_DATA_DIR ??= resolveDataDir();
+  const sessionIdArg = argValue(rest, '--session-id');
+  const title = argValue(rest, '--title') ?? '';
+  const briefFile = argValue(rest, '--brief-file');
+  const overrideChatId = argValue(rest, '--chat-id');
+  const botSpecs = argValues(rest, '--bot');
+
+  let brief = argValue(rest, '--brief') ?? '';
+  if (briefFile) {
+    if (!existsSync(briefFile)) { console.error(`文件不存在: ${briefFile}`); process.exit(1); }
+    brief = readFileSync(briefFile, 'utf-8');
+  }
+
+  if (botSpecs.length === 0) {
+    console.error('至少要用 --bot 指派一个 bot。用法见 botmux dispatch --help');
+    process.exit(1);
+  }
+
+  let bots;
+  try {
+    bots = botSpecs.map(parseDispatchBotSpec);
+  } catch (err: any) {
+    console.error(`--bot 解析失败: ${err.message}`);
+    process.exit(1);
+  }
+
+  let messages;
+  try {
+    messages = buildDispatchMessages({ title, brief, bots });
+  } catch (err: any) {
+    console.error(`dispatch 构建失败: ${err.message}`);
+    process.exit(1);
+  }
+
+  const sid = sessionIdArg ?? findAncestorSessionId();
+  if (!sid) {
+    console.error('无法推断 session-id。请在 Lark 话题内的 CLI 会话中运行，或传 --session-id <id>。');
+    process.exit(1);
+  }
+  const sessions = loadSessions();
+  const s = sessions.get(sid);
+  if (!s) { console.error(`未找到 session ${sid}`); process.exit(1); }
+  if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
+
+  const targetChatId = overrideChatId ?? s.chatId;
+  if (!targetChatId) { console.error(`session ${sid} 缺少 chatId，且未提供 --chat-id`); process.exit(1); }
+
+  const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
+  try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  const { sendMessage, replyMessage } = await import('./im/lark/client.js');
+  const appId = s.larkAppId!;
+
+  try {
+    // 1. Seed (thread root) — a top-level header so the sub-project is visible
+    //    to humans and gives the thread something to hang off.
+    const seedId = await sendMessage(appId, targetChatId, messages.seedText, 'text');
+    // 2. Threaded kickoff — reply_in_thread to the seed, @-ing the assigned bots
+    //    so each spawns its own thread-scoped session anchored at the seed
+    //    (bot→bot @ inside a thread is ungated — see event-dispatcher routing).
+    const postJson = JSON.stringify({ zh_cn: { title: '', content: messages.threadContent } });
+    const kickoffId = await replyMessage(appId, seedId, postJson, 'post', true);
+    console.log(JSON.stringify({
+      success: true,
+      seedMessageId: seedId,
+      threadRootId: seedId,
+      kickoffMessageId: kickoffId,
+      chatId: targetChatId,
+      bots: messages.mentionedOpenIds,
+    }));
+  } catch (err: any) {
+    console.error(`dispatch 失败: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 // ─── Create-group subcommand ─────────────────────────────────────────────────
 
 async function cmdCreateGroup(rest: string[]): Promise<void> {
@@ -3950,6 +4050,7 @@ switch (command) {
     break;
   }
   case 'send':     await cmdSend(process.argv.slice(3)); break;
+  case 'dispatch': await cmdDispatch(process.argv.slice(3)); break;
   case 'create-group': await cmdCreateGroup(process.argv.slice(3)); break;
   case 'bots':     await cmdBots(process.argv[3] ?? 'list', process.argv.slice(4)); break;
   case 'history':  await cmdHistory(process.argv.slice(3)); break;
