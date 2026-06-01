@@ -49,7 +49,7 @@ import {
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
-import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds } from './adapters/cli/claude-code.js';
+import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
@@ -99,7 +99,7 @@ const writeToken = randomBytes(16).toString('hex');
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira' };
 function cliName(): string { return CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? ''] ?? 'CLI'; }
 let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
@@ -188,6 +188,11 @@ let bridgeJsonlDir: string | undefined;
  *  follow the new jsonl. */
 let bridgeCliPid: number | undefined;
 let bridgeCliCwd: string | undefined;
+/** Claude-family data root the bridge resolves JSONL / pid-state / tasks
+ *  against. `~/.claude` for Claude Code; Seed CLI's `.claude-runtime`. Set at
+ *  bridge start (from the adapter's claudeDataDir); defaults to `~/.claude` so
+ *  the adopt path and any non-seed caller behave exactly as before. */
+let bridgeDataDir: string = DEFAULT_CLAUDE_DATA_DIR;
 /** Last sessionId we observed via the pid resolver — used to detect
  *  rotations cheaply (string compare instead of stat()ing every jsonl). */
 let bridgeObservedCliSessionId: string | undefined;
@@ -456,7 +461,7 @@ function bridgeAbsorbBaseline(): void {
  *  agrees. */
 function bridgeMarkStalePidStateForAcceptedSid(acceptedSid: string): void {
   if (bridgeCliPid === undefined || bridgeCliCwd === undefined) return;
-  const pidResolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd);
+  const pidResolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd, bridgeDataDir);
   if (pidResolved && pidResolved.cliSessionId !== acceptedSid) {
     bridgeStalePidStateSessionId = pidResolved.cliSessionId;
   }
@@ -896,7 +901,7 @@ function maybeFollowQuietRotation(): void {
 
 function maybeFollowSessionRotationViaPid(): PidFollowResult {
   if (!bridgeCliPid || !bridgeCliCwd) return 'unavailable';
-  const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd);
+  const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd, bridgeDataDir);
   if (!resolved) return 'unavailable';
   if (bridgeObservedCliSessionId !== resolved.cliSessionId) {
     bridgeObservedCliSessionId = resolved.cliSessionId;
@@ -1050,11 +1055,12 @@ function bridgeIngest(): void {
   bridgeQueue.ingest(result.events, bridgeJsonlPath);
 }
 
-function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?: string; mode?: 'baseline-existing' | 'fresh-empty' }): void {
+function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?: string; mode?: 'baseline-existing' | 'fresh-empty'; dataDir?: string }): void {
   bridgeJsonlPath = jsonlPath;
   bridgeJsonlDir = dirname(jsonlPath);
   bridgeCliPid = opts?.cliPid;
   bridgeCliCwd = opts?.cliCwd;
+  bridgeDataDir = opts?.dataDir ?? DEFAULT_CLAUDE_DATA_DIR;
   const mode = opts?.mode ?? 'baseline-existing';
   // Pid-state record ranks above the path the adopt scan computed. If
   // Claude was launched with `--resume` (or the adopt scan picked a
@@ -1062,7 +1068,7 @@ function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?
   // and we swap to it before baseline so we don't waste a baseline on
   // a frozen file.
   if (bridgeCliPid && bridgeCliCwd) {
-    const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd);
+    const resolved = resolveJsonlFromPid(bridgeCliPid, bridgeCliCwd, bridgeDataDir);
     if (resolved) {
       bridgeObservedCliSessionId = resolved.cliSessionId;
       bridgeRememberSessionIdForPath(resolved.path);
@@ -1087,10 +1093,10 @@ function startBridgeWatcher(jsonlPath: string, opts?: { cliPid?: number; cliCwd?
   // continuously for the active session, so this catches the rotation
   // even between writes). `findOpenClaudeSessionIds` unions both.
   if (bridgeCliPid !== undefined && bridgeJsonlDir && bridgeCliCwd) {
-    const sids = findOpenClaudeSessionIds(bridgeCliPid);
+    const sids = findOpenClaudeSessionIds(bridgeCliPid, bridgeDataDir);
     const candidates: string[] = [];
     for (const sid of sids) {
-      const path = claudeJsonlPathForSession(sid, bridgeCliCwd);
+      const path = claudeJsonlPathForSession(sid, bridgeCliCwd, bridgeDataDir);
       bridgeRememberSessionIdForPath(path);
       if (existsSyncSafe(path)) candidates.push(path);
     }
@@ -2876,9 +2882,15 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // actually committed (rather than trusting a fixed sleep), so wire it up now.
   // Codex's adapter uses ~/.codex/history.jsonl (a fixed global path) directly,
   // so it needs no per-session wiring here.
-  if (cfg.cliId === 'claude-code') {
+  //
+  // `claudeDataDir` is the Claude-family marker: set for claude-code AND its
+  // forks (Seed → `.claude-runtime`), undefined for everything else. Every
+  // JSONL/pid/bridge gate below keys off it instead of `cliId === 'claude-code'`,
+  // so a fork inherits the whole submit-confirm + bridge-fallback machinery.
+  const claudeDataDir = cliAdapter.claudeDataDir;
+  if (claudeDataDir) {
     (backend as TmuxBackend | PtyBackend | ZellijBackend).claudeJsonlPath =
-      claudeJsonlPathForSession(cfg.cliSessionId ?? adapterSessionId, cfg.workingDir);
+      claudeJsonlPathForSession(cfg.cliSessionId ?? adapterSessionId, cfg.workingDir, claudeDataDir);
   }
 
   const args = cliAdapter.buildArgs({
@@ -2900,13 +2912,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
 
   // Claude Code 在 root/sudo 下会拒绝 --dangerously-skip-permissions 并立即 exit。
   // botmux 必须带这个 flag（话题里没法弹交互式审批），所以为 root 自动注入
-  // IS_SANDBOX=1 走 Claude Code 的受控环境逃生舱。用户显式设了就尊重不覆盖。
+  // IS_SANDBOX=1 走 Claude Code 的受控环境逃生舱。Seed 是 Claude Code fork，同样
+  // 受此限制 → 按 claude 家族判断。用户显式设了就尊重不覆盖。
   const injectClaudeSandbox =
-    cfg.cliId === 'claude-code' &&
+    !!claudeDataDir &&
     process.getuid?.() === 0 &&
     !process.env.IS_SANDBOX;
   if (injectClaudeSandbox) {
-    log('Detected root user — injecting IS_SANDBOX=1 for Claude Code');
+    log('Detected root user — injecting IS_SANDBOX=1 for Claude-family CLI');
   }
 
   // Claude Code 2.1.x：`--resume` 一个「空闲 >70min 且累计 >10 万 token」的会话会弹
@@ -2915,8 +2928,9 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // 而 return null → 菜单不弹、按 full session 原样续（走 summary 会触发 /compact，
   // 破坏 bridge 的会话连续性追踪）。用户显式设了就尊重。注意：该 key 必须同时进
   // BOTMUX_INJECTED_ENV_KEYS 白名单，否则 tmux backend 不会把它透传进 pane。
+  // Seed 是 Claude Code fork，同样有 resume-summary 菜单 → 按 claude 家族判断。
   const claudeResumeTokenThreshold =
-    cfg.cliId === 'claude-code'
+    claudeDataDir
       ? process.env.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD ?? '2147483647'
       : undefined;
 
@@ -2955,6 +2969,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
   if (injectClaudeSandbox) childEnv.IS_SANDBOX = '1';
   if (claudeResumeTokenThreshold) childEnv.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD = claudeResumeTokenThreshold;
+  // Adapter-supplied env: points Claude-family forks at their data root (Seed's
+  // CLAUDE_CONFIG_DIR → `.claude-runtime`). Keys here are also in the tmux
+  // passthrough whitelist (BOTMUX_INJECTED_ENV_KEYS) so the tmux backend forwards
+  // them past the server's global env.
+  if (cliAdapter.spawnEnv) Object.assign(childEnv, cliAdapter.spawnEnv);
 
   backend.spawn(cliAdapter.resolvedBin, args, {
     cwd: cfg.workingDir,
@@ -2987,7 +3006,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // "no rotation at all". The pinned claudeJsonlPath above is still the
   // initial guess; the resolver corrects it on first write when Claude was
   // started with `--resume`.
-  if (cfg.cliId === 'claude-code' && cliPid) {
+  if (claudeDataDir && cliPid) {
     (backend as TmuxBackend | PtyBackend | ZellijBackend).cliPid = cliPid;
     (backend as TmuxBackend | PtyBackend | ZellijBackend).cliCwd = cfg.workingDir;
   }
@@ -2998,7 +3017,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // the marker, an in-CLI `botmux send` walks ancestor pids, finds no match,
   // and reports "无法推断 session-id". Retry briefly (non-blocking — a sync wait
   // would lose zellij's initial render since node-pty doesn't buffer pre-listener
-  // output) until the pid appears, then write the marker + wire claude-code pid.
+  // output) until the pid appears, then write the marker + wire claude-family pid.
   if (!cliPid) {
     let attempts = 0;
     const resolveCliPidLate = () => {
@@ -3016,7 +3035,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
             log(`Failed to write CLI PID marker (async): ${err.message}`);
           }
         }
-        if (cfg.cliId === 'claude-code') {
+        if (claudeDataDir) {
           (backend as TmuxBackend | PtyBackend | ZellijBackend).cliPid = pid;
           (backend as TmuxBackend | PtyBackend | ZellijBackend).cliCwd = cfg.workingDir;
         }
@@ -3038,13 +3057,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // the file Claude creates on first submit isn't absorbed as history,
   // and baseline-existing on resume so prior-run turns ARE absorbed (we
   // don't want to re-emit yesterday's conversation as fresh turns).
-  if (cfg.cliId === 'claude-code' && adapterSessionId) {
+  if (claudeDataDir && adapterSessionId) {
     const claudeBridgeSessionId = cfg.cliSessionId ?? adapterSessionId;
-    const claudeJsonl = claudeJsonlPathForSession(claudeBridgeSessionId, cfg.workingDir);
+    const claudeJsonl = claudeJsonlPathForSession(claudeBridgeSessionId, cfg.workingDir, claudeDataDir);
     startBridgeWatcher(claudeJsonl, {
       cliPid: cliPid ?? undefined,
       cliCwd: cfg.workingDir,
       mode: cfg.resume ? 'baseline-existing' : 'fresh-empty',
+      dataDir: claudeDataDir,
     });
   }
 

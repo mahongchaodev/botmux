@@ -9,6 +9,7 @@ import { t, type Locale } from '../../i18n/index.js';
 
 const cliDisplayNames: Record<CliId, string> = {
   'claude-code': 'Claude',
+  'seed': 'Seed',
   'aiden': 'Aiden',
   'coco': 'CoCo',
   'codex': 'Codex',

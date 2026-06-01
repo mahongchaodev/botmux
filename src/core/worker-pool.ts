@@ -736,9 +736,9 @@ function cleanupGlobalBotmuxSkillsOnce(): void {
  *  Claude keys trust off realpath(cwd) (its getcwd(3) is already realpath'd),
  *  so seed that path. Merge-safe + best-effort: only ADDS the flag, never
  *  clobbers other keys; any failure is swallowed so it can't block spawn. */
-export function ensureClaudeFolderTrust(workingDir: string): void {
+export function ensureClaudeFolderTrust(workingDir: string, stateJsonPath: string = join(homedir(), '.claude.json')): void {
   try {
-    const configPath = join(homedir(), '.claude.json');
+    const configPath = stateJsonPath;
     let canonical: string;
     try { canonical = realpathSync(workingDir); } catch { canonical = workingDir; }
 
@@ -1129,7 +1129,11 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
   ensureCliEnv(botCfg.cliId, botCfg.cliPathOverride);
   // Claude Code blocks on the interactive folder-trust dialog the first time
   // it runs in an untrusted workingDir; pre-accept it so the spawn doesn't hang.
-  if (botCfg.cliId === 'claude-code') ensureClaudeFolderTrust(cwd);
+  // Seed CLI (Claude Code fork) has the same dialog — drive both off the
+  // adapter's claude-family fields, writing to each variant's own .claude.json
+  // (`~/.claude.json` for claude, `.claude-runtime/.claude.json` for seed).
+  const familyAdapter = createCliAdapterSync(botCfg.cliId, botCfg.cliPathOverride);
+  if (familyAdapter.claudeStateJsonPath) ensureClaudeFolderTrust(cwd, familyAdapter.claudeStateJsonPath);
 
   // Prepend ~/.botmux/bin to PATH so CLIs can call `botmux send` etc.
   // The wrapper script there is written by the daemon at startup.
