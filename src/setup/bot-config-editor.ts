@@ -1,4 +1,5 @@
 import type { CliId } from '../adapters/cli/types.js';
+import { normalizeWorkingDirInput } from '../utils/working-dir.js';
 
 export const CLI_ID_CHOICES: Record<string, CliId> = {
   '1': 'claude-code',
@@ -304,7 +305,11 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
     }
   }
 
-  applyOptionalString(out, 'workingDir', input.workingDir);
+  if (input.workingDir !== undefined) {
+    const workingDir = input.workingDir.trim();
+    if (workingDir === '-') delete out.workingDir;
+    else if (workingDir) out.workingDir = normalizeWorkingDirInput(workingDir);
+  }
 
   if (input.allowedUsers !== undefined) {
     const allowedUsers = input.allowedUsers.trim();

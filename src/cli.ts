@@ -48,7 +48,7 @@ import { buildPreset, serializePreset, presetFilename } from './setup/agent-pres
 import type { CliId } from './adapters/cli/types.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
 import { logger } from './utils/logger.js';
-import { invalidWorkingDirs } from './utils/working-dir.js';
+import { invalidWorkingDirs, normalizeWorkingDirInput } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
 import {
   formatBotInfoEntriesForCli,
@@ -673,7 +673,12 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     console.log('   不写 bots.json。请重新运行 botmux setup。');
     return null;
   }
-  const workingDir = await ask(rl, '默认工作目录 [~]: ');
+  printInputHelp('默认工作目录', [
+    '留空沿用兼容默认值 ~（当前用户 home）；不改变老用户一路回车的行为。',
+    `当前命令所在目录是：${process.cwd()}；如果想使用它，请输入 .`,
+    '相对路径（如 docai/docai-oncall）会按当前命令所在目录解析；如要放在 home 下请写 ~/docai/docai-oncall。',
+  ]);
+  const workingDir = await ask(rl, '默认工作目录 [~]（当前目录请输入 .）: ');
   const modelChoice = await promptModel(rl, cliId);
 
   // 不再持久化 brand 字段: setup 阶段 brand=lark 直接被 obtainCredentials 中止,
@@ -684,9 +689,9 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     larkAppId: creds.appId,
     larkAppSecret: creds.appSecret,
     cliId,
-    // 总是写 workingDir, 留空用 '~'. 用户手动编辑 bots.json 时一眼能看到字段
+    // 总是写 workingDir, 留空兼容旧版用 '~'. 用户手动编辑 bots.json 时一眼能看到字段
     // 在哪儿, 不用去 README 查字段名.
-    workingDir: workingDir.trim() || '~',
+    workingDir: normalizeWorkingDirInput(workingDir),
   };
   // modelChoice === undefined → 该 CLI 没声明候选 / 用户跳过；不写 model 字段
   if (typeof modelChoice === 'string' && modelChoice) {
@@ -809,6 +814,8 @@ async function promptEditBotConfig(
 
   printInputHelp('默认工作目录', [
     '可选。新会话默认进入的目录，支持逗号分隔多个候选目录。',
+    '推荐输入 ~/xxx 或 /绝对路径，语义最明确。',
+    '相对路径（如 docai/docai-oncall）会按当前命令所在目录解析；如要放在 home 下请写 ~/docai/docai-oncall。',
     '留空保留当前值；输入 - 清空并回到默认 ~。',
   ]);
   input.workingDir = await ask(rl, `默认工作目录 [${formatOptionalValue(bot.workingDir)}]: `);

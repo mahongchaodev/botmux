@@ -176,6 +176,18 @@ describe('applyBotConfigEdits', () => {
     });
   });
 
+  it('preserves bare relative workingDir edits', () => {
+    const updated = applyBotConfigEdits({
+      larkAppId: 'app',
+      larkAppSecret: 'secret',
+      workingDir: '~',
+    }, {
+      workingDir: 'docai/docai-oncall',
+    });
+
+    expect(updated.workingDir).toBe('docai/docai-oncall');
+  });
+
   it('accepts cliChoice as a literal cliId', () => {
     const updated = applyBotConfigEdits({
       larkAppId: 'app',
