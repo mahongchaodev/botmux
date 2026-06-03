@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionBackend, SpawnOpts } from './types.js';
+import type { SessionBackend, SpawnOpts, SessionProbe } from './types.js';
 import { zellijEnv, probeZellijFunctional } from '../../setup/ensure-zellij.js';
 import { resolveUserShell, buildBotmuxEnvAssignments, SHELL_WRAPPER_SCRIPT } from './tmux-backend.js';
 import { logger } from '../../utils/logger.js';
@@ -79,6 +79,15 @@ export class ZellijBackend implements SessionBackend {
    *  session lingers in `list-sessions` as "(EXITED - attach to resurrect)";
    *  we must not treat those as reattachable, so filter them out. */
   static liveSessions(): string[] {
+    const probe = ZellijBackend.probeLiveSessions();
+    return probe.ok ? probe.sessions : [];
+  }
+
+  /** Like liveSessions(), but distinguishes "command failed/timed out" ({ok:false})
+   *  from "command succeeded, zero live sessions" ({ok:true, sessions:[]}). The
+   *  tri-state probe builds on this so a transient `list-sessions` failure isn't
+   *  read as "session gone". */
+  static probeLiveSessions(): { ok: true; sessions: string[] } | { ok: false } {
     try {
       const out = execFileSync('zellij', ['list-sessions', '--no-formatting'], {
         encoding: 'utf-8',
@@ -86,19 +95,28 @@ export class ZellijBackend implements SessionBackend {
         timeout: 3000,
         env: zellijEnv(),
       });
-      return out
-        .split('\n')
-        .map(l => l.trim())
-        .filter(l => l.length > 0 && !/EXITED/i.test(l))
-        .map(l => l.split(/\s+/)[0]!)
-        .filter(Boolean);
+      return {
+        ok: true,
+        sessions: out
+          .split('\n')
+          .map(l => l.trim())
+          .filter(l => l.length > 0 && !/EXITED/i.test(l))
+          .map(l => l.split(/\s+/)[0]!)
+          .filter(Boolean),
+      };
     } catch {
-      return [];
+      return { ok: false };
     }
   }
 
   static hasSession(name: string): boolean {
-    return ZellijBackend.liveSessions().includes(name);
+    return ZellijBackend.probeSession(name) === 'exists';
+  }
+
+  static probeSession(name: string): SessionProbe {
+    const probe = ZellijBackend.probeLiveSessions();
+    if (!probe.ok) return 'unknown';
+    return probe.sessions.includes(name) ? 'exists' : 'missing';
   }
 
   /** Kill + purge a session (so no resurrectable corpse accumulates). */

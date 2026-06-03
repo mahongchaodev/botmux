@@ -118,6 +118,36 @@ describe('HerdrBackend connection surface', () => {
     expect(HerdrBackend.hasSession('missing')).toBe(false);
   });
 
+  // ── Tri-state probe (exists | missing | unknown) ────────────────────────────
+  // The restore-time zombie-close decision MUST NOT collapse "list command
+  // failed/timed out" into "session is gone" — a transient probe failure would
+  // otherwise permanently close a still-alive session. probeSession() keeps the
+  // two apart; hasSession() stays the conservative boolean wrapper.
+  it('probeSession() reports "exists" for a running session and "missing" for an absent one', () => {
+    setHerdrResponses([{
+      match: a => a[0] === 'session' && a[1] === 'list',
+      reply: () => JSON.stringify({ sessions: [{ name: SESSION, running: true }] }),
+    }]);
+    expect(HerdrBackend.probeSession(SESSION)).toBe('exists');
+    expect(HerdrBackend.probeSession('bmx-absent')).toBe('missing');
+  });
+
+  it('probeSession() reports "missing" for a present-but-not-running row (a genuine zombie)', () => {
+    setHerdrResponses([{
+      match: a => a[0] === 'session' && a[1] === 'list',
+      reply: () => JSON.stringify({ sessions: [{ name: SESSION, running: false }] }),
+    }]);
+    expect(HerdrBackend.probeSession(SESSION)).toBe('missing');
+  });
+
+  it('probeSession() reports "unknown" when `session list` fails/times out — NOT "missing"', () => {
+    mockedExecFileSync.mockImplementation((() => { throw new Error('ETIMEDOUT'); }) as any);
+    expect(HerdrBackend.probeSession(SESSION)).toBe('unknown');
+    // hasSession() must stay conservative (false) on unknown so existing
+    // boolean callers are unaffected by the new tri-state.
+    expect(HerdrBackend.hasSession(SESSION)).toBe(false);
+  });
+
   it('ensureServer skips boot poll when session already exists (no spawn, no sleep)', () => {
     setHerdrResponses([
       { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },

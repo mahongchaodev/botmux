@@ -2,7 +2,7 @@ import * as pty from 'node-pty';
 import { execSync, execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { basename } from 'node:path';
-import type { SessionBackend, SpawnOpts } from './types.js';
+import type { SessionBackend, SpawnOpts, SessionProbe } from './types.js';
 import { probeTmuxFunctional, tmuxEnv } from '../../setup/ensure-tmux.js';
 import { REDACTED_CHILD_ENV_KEYS } from '../../utils/child-env.js';
 import { logger } from '../../utils/logger.js';
@@ -71,11 +71,25 @@ export class TmuxBackend implements SessionBackend {
 
   /** Check if a named tmux session exists. */
   static hasSession(name: string): boolean {
+    return TmuxBackend.probeSession(name) === 'exists';
+  }
+
+  /**
+   * Tri-state existence probe. `tmux has-session` exits 0 when the session
+   * exists and exits non-zero (clean status, no signal) when the server
+   * answered but the session is absent — including "no server running", which
+   * means every pane is genuinely gone. Either of those is an authoritative
+   * 'missing'. A timeout (signal/killed) or a spawn failure (e.g. ENOENT, no
+   * numeric exit status) means we never got an answer → 'unknown', so a hung
+   * server can't be mistaken for a gone session.
+   */
+  static probeSession(name: string): SessionProbe {
     try {
-      execSync(`tmux has-session -t ${shellescape(name)}`, { stdio: 'ignore', env: tmuxEnv() });
-      return true;
-    } catch {
-      return false;
+      execSync(`tmux has-session -t ${shellescape(name)}`, { stdio: 'ignore', env: tmuxEnv(), timeout: 3000 });
+      return 'exists';
+    } catch (e: any) {
+      if (e && typeof e.status === 'number' && !e.signal) return 'missing';
+      return 'unknown';
     }
   }
 

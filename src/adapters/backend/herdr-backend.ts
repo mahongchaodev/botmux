@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import type { BackendType, SessionBackend, SpawnOpts } from './types.js';
+import type { BackendType, SessionBackend, SpawnOpts, SessionProbe } from './types.js';
 
 export type PersistentBackendType = Exclude<BackendType, 'pty'>;
 
@@ -149,8 +149,21 @@ export class HerdrBackend implements SessionBackend {
   }
 
   static hasSession(name: string): boolean {
-    const raw = jsonCommand(['session', 'list', '--json']);
-    return extractSessions(raw).some((s: any) => s?.name === name && s?.running === true);
+    return HerdrBackend.probeSession(name) === 'exists';
+  }
+
+  /**
+   * Tri-state existence probe. A failed/timed-out `session list` (tryJsonCommand
+   * → {ok:false}) yields 'unknown' rather than collapsing into 'missing', so a
+   * transient herdr-server hiccup on restore can't be mistaken for a gone
+   * session. A present-but-not-running row is a genuine zombie → 'missing'.
+   */
+  static probeSession(name: string): SessionProbe {
+    const result = tryJsonCommand(['session', 'list', '--json']);
+    if (!result.ok) return 'unknown';
+    return extractSessions(result.value).some((s: any) => s?.name === name && s?.running === true)
+      ? 'exists'
+      : 'missing';
   }
 
   static killSession(name: string): void {

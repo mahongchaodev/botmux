@@ -21,7 +21,7 @@ import { ZellijBackend } from '../adapters/backend/zellij-backend.js';
 import { getBot, getAllBots } from '../bot-registry.js';
 import type { CliId } from '../adapters/cli/types.js';
 import { validateZellijAdoptTarget } from './zellij-adopt-discovery.js';
-import type { BackendType } from '../adapters/backend/types.js';
+import type { BackendType, SessionProbe } from '../adapters/backend/types.js';
 import type { LarkAttachment, LarkMention, ScheduledTask } from '../types.js';
 import type { MessageResource } from '../im/lark/message-parser.js';
 import type { ResolvedSender } from '../im/lark/identity-cache.js';
@@ -728,10 +728,25 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     if (!shouldAutoForkOnRestore(backendType, config.daemon.quietRestart)) continue;
 
     const backendName = persistentSessionName(backendType, ds.session.sessionId);
-    if (!persistentSessionExists(backendType, backendName)) {
+    const probe = probePersistentSession(backendType, backendName);
+    if (probe === 'missing') {
+      // Probe succeeded and authoritatively says the backing pane/agent is gone
+      // — this is a true zombie. Close it (evicts the active record + marks the
+      // store row closed) so the next message starts a clean session.
       const tag = ds.session.sessionId.substring(0, 8);
       logger.warn(`[${tag}] ${backendType} backing session "${backendName}" is gone — closing zombie active session`);
       await closeSession(ds.session.sessionId);
+      continue;
+    }
+    if (probe === 'unknown') {
+      // Probe FAILED (CLI error / timeout / unparseable output) — e.g. a herdr
+      // server still warming up on restart. We can't tell whether the session
+      // survived, so we must NOT close it: a transient failure would otherwise
+      // permanently tear down a still-alive session (context lost, pane leaked,
+      // store closed → no lazy recovery). Keep the worker-less active record and
+      // let it re-attach on the next message, exactly like the old behaviour.
+      const tag = ds.session.sessionId.substring(0, 8);
+      logger.warn(`[${tag}] ${backendType} backing session "${backendName}" probe inconclusive — keeping active session for lazy recovery`);
       continue;
     }
 
@@ -776,10 +791,10 @@ function persistentSessionName(backendType: Exclude<BackendType, 'pty'>, session
   return HerdrBackend.sessionName(sessionId);
 }
 
-function persistentSessionExists(backendType: Exclude<BackendType, 'pty'>, name: string): boolean {
-  if (backendType === 'tmux') return TmuxBackend.hasSession(name);
-  if (backendType === 'zellij') return ZellijBackend.hasSession(name);
-  return HerdrBackend.hasSession(name);
+function probePersistentSession(backendType: Exclude<BackendType, 'pty'>, name: string): SessionProbe {
+  if (backendType === 'tmux') return TmuxBackend.probeSession(name);
+  if (backendType === 'zellij') return ZellijBackend.probeSession(name);
+  return HerdrBackend.probeSession(name);
 }
 
 function killPersistentSession(backendType: Exclude<BackendType, 'pty'>, name: string): void {
@@ -813,7 +828,11 @@ export async function ensureTerminalWorkerPort(ds: DaemonSession): Promise<numbe
 
   const backendType = getSessionPersistentBackendType(ds);
   if (!backendType) return undefined;
-  if (!persistentSessionExists(backendType, persistentSessionName(backendType, ds.session.sessionId))) {
+  // Non-destructive read path: only wake a worker when the backing pane is
+  // CONFIRMED alive. 'missing' or 'unknown' both bail (a 502 the terminal
+  // retries) — same conservative stance as the old boolean check, with no risk
+  // of closing anything.
+  if (probePersistentSession(backendType, persistentSessionName(backendType, ds.session.sessionId)) !== 'exists') {
     return undefined;
   }
 
