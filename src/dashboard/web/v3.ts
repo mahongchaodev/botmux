@@ -106,9 +106,9 @@ function renderV3DetailPage(root: HTMLElement, runId: string): () => void {
       <h1 style="display:inline-block;margin-left:.5rem">${esc(runId)}</h1>
       <span id="v3-runstatus" class="badge" style="margin-left:.5rem"></span>
     </div>
-    <div style="display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap">
-      <div id="v3-graph" style="flex:1 1 520px;min-width:320px;overflow:auto;border:1px solid var(--border,#333);border-radius:8px;background:var(--panel,#1b1b1b)"></div>
-      <div id="v3-node-panel" style="flex:1 1 320px;min-width:280px;border:1px solid var(--border,#333);border-radius:8px;padding:1rem;background:var(--panel,#1b1b1b)">
+    <div style="display:flex;flex-direction:column;gap:1rem;align-items:stretch">
+      <div id="v3-graph" style="max-height:48vh;overflow:auto;border:1px solid var(--border,#333);border-radius:8px;background:var(--panel,#1b1b1b)"></div>
+      <div id="v3-node-panel" style="border:1px solid var(--border,#333);border-radius:8px;padding:1rem;background:var(--panel,#1b1b1b)">
         <p class="muted">点一个节点看详情与终端</p>
       </div>
     </div>`;

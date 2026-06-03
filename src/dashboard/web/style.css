@@ -1439,6 +1439,17 @@ input.row-select,
 .wf-terminal-frame { display: block; width: 100%; height: 460px; border: 0; border-top: 1px solid var(--border); background: #0d1117; }
 .wf-error-msg { display: block; margin-top: 0.15rem; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 
+/* v3 per-node terminal panel (live iframe / replay) */
+.v3-terminal-panel { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: #0d1117; }
+.v3-terminal-head { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 12px; }
+.v3-terminal-head .muted { margin-left: 0; }
+.v3-terminal-head .btn-link { margin-left: auto; }
+.v3-terminal-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--muted); }
+.v3-terminal-dot.live { background: #1a73e8; box-shadow: 0 0 0 3px rgba(26,115,232,0.25); }
+.v3-terminal-dot.replay { background: #f9ab00; }
+.v3-terminal-dot.closed { background: #188038; }
+.v3-terminal-empty { padding: 1.5rem 0.75rem; text-align: center; border: 1px dashed var(--border); border-radius: 6px; }
+
 /* Workflow catalog */
 .catalog-head, .catalog-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.8rem; margin-bottom: 0.8rem; }
 .catalog-head h2, .catalog-detail-head h2 { margin: 0 0 0.15rem; font-size: 18px; line-height: 1.25; }

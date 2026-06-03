@@ -76,7 +76,7 @@ function replaySrcdoc(endpoint: string, title: string): string {
     html,body{margin:0;height:100%;background:#0d1117;color:#c9d1d9;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
     #bar{height:31px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#161b22;border-bottom:1px solid #30363d;box-sizing:border-box}
     #status{margin-left:auto;color:#8b949e;white-space:nowrap}
-    #term{height:calc(100% - 31px);padding:4px;box-sizing:border-box}
+    #term{height:calc(100% - 31px);padding:4px;box-sizing:border-box;overflow:auto}
     a{color:#58a6ff;text-decoration:none}
   </style>
 </head>
@@ -88,10 +88,18 @@ function replaySrcdoc(endpoint: string, title: string): string {
   <script>
   (function(){
     var endpoint=${endpointJson};
+    // v3 ephemeral workers spawn their PTY at DEFAULT_RENDER_COLS (=160, see
+    // worker.ts) and never adopt, so the captured stream's TUI / box-drawing
+    // is exactly 160 cols wide.  Fitting it into a narrower (or oddly-measured)
+    // grid re-wraps those fixed-width lines into a stair-stepped mess and
+    // wastes the panel.  So we render at the capture width and let FitAddon
+    // only size the ROW count to the iframe height (cols pinned back to 160).
+    var COLS=160;
     var status=document.getElementById('status');
     var termEl=document.getElementById('term');
     if(!window.Terminal){status.textContent='xterm.js failed to load';return;}
     var term=new Terminal({
+      cols:COLS,
       convertEol:false,
       scrollback:100000,
       fontSize:13,
@@ -101,7 +109,10 @@ function replaySrcdoc(endpoint: string, title: string): string {
     var fit=null;
     if(window.FitAddon){fit=new window.FitAddon.FitAddon();term.loadAddon(fit);}
     term.open(termEl);
-    function doFit(){try{if(fit)fit.fit()}catch(_){}}
+    function doFit(){
+      try{if(fit)fit.fit()}catch(_){}
+      if(term.cols!==COLS)term.resize(COLS,term.rows||24);
+    }
     doFit(); window.addEventListener('resize',doFit);
     fetch(endpoint,{credentials:'include'}).then(function(res){
       if(!res.ok){

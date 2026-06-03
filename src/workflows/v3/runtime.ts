@@ -83,7 +83,7 @@ function renderGoalFile(goal: string): string {
     '',
     `  - On success: status "${okStatus}", at least one file entry, and NO \`error\` field.`,
     `  - On failure: status "${failStatus}", \`error\` required, \`files\` may be empty.`,
-    '  - Every file `path` MUST be relative to the output directory — absolute paths are rejected.',
+    `  - Every file \`path\` is relative to $${E.OUTPUT_DIR} ITSELF. A file you wrote directly into that directory has a path that is JUST its filename, e.g. \`"path": "report.md"\`. Do NOT prepend the directory or its folder name (NOT \`"work/report.md"\`) and do NOT use an absolute path — both are rejected.`,
     '',
     `You are DONE only after the manifest at $${E.MANIFEST_PATH} exists and every file it references exists.`,
     'If you cannot complete the goal, write a failure manifest and stop.',
