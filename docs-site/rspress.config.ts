@@ -1,4 +1,4 @@
-import { defineConfig } from 'rspress/config';
+import { defineConfig } from '@rspress/core';
 
 export default defineConfig({
   root: 'docs',
@@ -7,7 +7,7 @@ export default defineConfig({
   title: 'botmux 文档',
   description: '飞书话题群 ↔ AI 编程 CLI 桥接',
   builderConfig: {
-    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v10/" },
+    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v11/" },
   },
   themeConfig: {
     socialLinks: [
@@ -171,10 +171,6 @@ export default defineConfig({
             ]
       }
 ] },
-    prevPageText: '上一页',
-    nextPageText: '下一页',
-    outlineTitle: '本页大纲',
-    searchPlaceholderText: '搜索文档',
     lastUpdated: false,
   },
 });
