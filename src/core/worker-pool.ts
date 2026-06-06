@@ -27,8 +27,10 @@ import { buildMarkdownCard, buildContextualReplyCard } from '../im/lark/md-card.
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
+import { normalizeBrand } from '../im/lark/lark-hosts.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
+import { publishAttentionPatch } from './session-activity.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
@@ -1286,6 +1288,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     webPort: ds.session.webPort,
     larkAppId: botCfg.larkAppId,
     larkAppSecret: botCfg.larkAppSecret,
+    brand: normalizeBrand(botCfg.brand),
     botName: bot.botName,
     botOpenId: bot.botOpenId,
     locale: botLocale(botCfg),
@@ -1707,6 +1710,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           );
           const cardMsgId = await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
           ds.tuiPromptCardId = cardMsgId;
+          publishAttentionPatch(ds);
         } catch (err) {
           logger.warn(`[${t}] Failed to post TUI prompt card: ${err}`);
         }
@@ -1723,6 +1727,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           );
           ds.tuiPromptCardId = undefined;
           ds.tuiPromptOptions = undefined;
+          publishAttentionPatch(ds);
         }
         break;
       }
@@ -2079,6 +2084,9 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   //     to re-probe via session.log / traces.jsonl fds).
   //   - mtr: worker tails MTR's sqlite transcript, resolving by native sid
   //     when discovery has one or by adopted cwd as a fallback.
+  //   - cursor: worker maps the adopt pid → its open store.db fd → chatId →
+  //     the append-only agent-transcript JSONL, then harvests final replies
+  //     from there (cursor-agent never calls `botmux send`).
   // Other CLIs fall back to legacy screen-capture only.
   const adoptedCliId = adopted.cliId ?? 'claude-code';
   if (adopted.source === 'herdr' && adoptedCliId === 'claude-code' && !adopted.sessionId) {
@@ -2097,7 +2105,11 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     adoptedCliId === 'claude-code' && adopted.sessionId
       ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd)
       : undefined;
-  const isStructuredBridge = adoptedCliId === 'codex' || adoptedCliId === 'coco' || adoptedCliId === 'mtr';
+  // cursor: worker resolves the agent-transcript JSONL from the adopt pid's
+  // open store.db fd (chatId), or from cliSessionId (= chatId) when discovery
+  // captured it — so adopt must forward the pid + cwd like the other
+  // transcript-backed CLIs.
+  const isStructuredBridge = adoptedCliId === 'codex' || adoptedCliId === 'coco' || adoptedCliId === 'mtr' || adoptedCliId === 'cursor';
   const adoptBackendType = adopted.source === 'herdr' ? 'herdr' : adopted.zellijPaneId ? 'zellij' : 'tmux';
 
   const initMsg: DaemonToWorker = {
@@ -2116,6 +2128,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     webPort: ds.session.webPort,
     larkAppId: botCfg.larkAppId,
     larkAppSecret: botCfg.larkAppSecret,
+    brand: normalizeBrand(botCfg.brand),
     botName: bot.botName,
     botOpenId: bot.botOpenId,
     locale: botLocale(botCfg),

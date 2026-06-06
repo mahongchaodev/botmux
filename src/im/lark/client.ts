@@ -10,6 +10,7 @@ import { resolveUserToken } from '../../utils/user-token.js';
 import { listObservedBots } from '../../services/observed-bots-store.js';
 import { getBotCapability } from '../../services/bot-profile-store.js';
 import { resolveTeamRoleFile } from '../../core/role-resolver.js';
+import { type Brand, larkHosts, normalizeBrand, sdkDomain } from './lark-hosts.js';
 
 type LarkRequestParams = Record<string, string | number | boolean | undefined>;
 
@@ -39,7 +40,7 @@ function getAllBotClients() {
     allBotClients = loadBotConfigs().map((cfg) => ({
       appId: cfg.larkAppId,
       cliId: cfg.cliId,
-      client: new Client({ appId: cfg.larkAppId, appSecret: cfg.larkAppSecret, loggerLevel: LoggerLevel.error }),
+      client: new Client({ appId: cfg.larkAppId, appSecret: cfg.larkAppSecret, domain: sdkDomain(normalizeBrand(cfg.brand)), loggerLevel: LoggerLevel.error }),
     }));
   }
   return allBotClients;
@@ -587,7 +588,8 @@ export async function downloadMessageResource(larkAppId: string, messageId: stri
 
   // Fallback: User Token from botmux OAuth (/login)
   const bot = getBot(larkAppId);
-  const userToken = await resolveUserToken(bot.config.larkAppId, bot.config.larkAppSecret);
+  const brand = normalizeBrand(bot.config.brand);
+  const userToken = await resolveUserToken(bot.config.larkAppId, bot.config.larkAppSecret, brand);
   if (!userToken) {
     throw new Error(
       `App Token 无法下载此资源，且未找到可用的 User Token。` +
@@ -595,7 +597,7 @@ export async function downloadMessageResource(larkAppId: string, messageId: stri
     );
   }
 
-  await downloadWithUserToken(userToken, messageId, fileKey, type, savePath);
+  await downloadWithUserToken(userToken, messageId, fileKey, type, savePath, brand);
   logger.info(`Downloaded ${type} ${fileKey} → ${savePath} (via User Token)`);
 }
 
@@ -614,8 +616,8 @@ async function downloadWithAppToken(larkAppId: string, messageId: string, fileKe
   await writeResourceToDisk(res, savePath);
 }
 
-async function downloadWithUserToken(userToken: string, messageId: string, fileKey: string, type: 'image' | 'file', savePath: string): Promise<void> {
-  const url = `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${fileKey}?type=${type}`;
+async function downloadWithUserToken(userToken: string, messageId: string, fileKey: string, type: 'image' | 'file', savePath: string, brand: Brand = 'feishu'): Promise<void> {
+  const url = `${larkHosts(brand).openApi}/open-apis/im/v1/messages/${messageId}/resources/${fileKey}?type=${type}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${userToken}` },
   });

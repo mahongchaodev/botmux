@@ -362,3 +362,96 @@ describe('decideDashboardAuth — ?t=<token> cookie set redirect', () => {
     expect(d.kind).toBe('deny401');
   });
 });
+
+describe('decideDashboardAuth — publicReadOnly mode', () => {
+  const TOK = 'tok-active';
+
+  it('tokenless GET /api/sessions → allow (read-only visitor)', () => {
+    const d = decideDashboardAuth({
+      method: 'GET', pathname: '/api/sessions', hasTokenParam: false,
+      presentedToken: undefined, activeToken: TOK, publicReadOnly: true,
+    });
+    expect(d.kind).toBe('allow');
+  });
+
+  it('tokenless GET /events (SSE) → allow', () => {
+    const d = decideDashboardAuth({
+      method: 'GET', pathname: '/events', hasTokenParam: false,
+      presentedToken: undefined, activeToken: TOK, publicReadOnly: true,
+    });
+    expect(d.kind).toBe('allow');
+  });
+
+  it('tokenless POST (write) → still deny401', () => {
+    const d = decideDashboardAuth({
+      method: 'POST', pathname: '/api/sessions/sess-1/close', hasTokenParam: false,
+      presentedToken: undefined, activeToken: TOK, publicReadOnly: true,
+    });
+    expect(d.kind).toBe('deny401');
+  });
+
+  it('tokenless GET raw PTY log → still deny401 (sensitive carve-out)', () => {
+    const d = decideDashboardAuth({
+      method: 'GET', pathname: '/api/workflows/run-1/nodes/n1/terminal-log/raw', hasTokenParam: false,
+      presentedToken: undefined, activeToken: TOK, publicReadOnly: true,
+    });
+    expect(d.kind).toBe('deny401');
+  });
+
+  it('publicReadOnly off → tokenless GET /api/sessions denied (legacy behavior)', () => {
+    const d = decideDashboardAuth({
+      method: 'GET', pathname: '/api/sessions', hasTokenParam: false,
+      presentedToken: undefined, activeToken: TOK, publicReadOnly: false,
+    });
+    expect(d.kind).toBe('deny401');
+  });
+
+  it('stale token GET behaves like tokenless read-only (no 401 wall)', () => {
+    const d = decideDashboardAuth({
+      method: 'GET', pathname: '/api/schedules', hasTokenParam: false,
+      presentedToken: 'rotated-away', activeToken: TOK, publicReadOnly: true,
+    });
+    expect(d.kind).toBe('allow');
+  });
+
+  it('management/config reads stay behind the token even in publicReadOnly', () => {
+    for (const pathname of [
+      '/api/connectors',
+      '/api/connectors/stats',
+      '/api/webhook-secrets',
+      '/api/trigger-logs',
+      '/api/bot-onboarding/ob-1',
+      // Allow-list is fail-closed: these read endpoints are NOT public-readable
+      // (role/persona content, per-bot oncall config, CLI option metadata).
+      '/api/roles/cli_app/oc_chat',
+      '/api/bots',
+      '/api/cli-options',
+      // A path that doesn't exist yet must also default to private.
+      '/api/some-future-read',
+    ]) {
+      const d = decideDashboardAuth({
+        method: 'GET', pathname, hasTokenParam: false,
+        presentedToken: undefined, activeToken: TOK, publicReadOnly: true,
+      });
+      expect(d.kind, pathname).toBe('deny401');
+    }
+  });
+
+  it('allow-listed watch-work reads are public in publicReadOnly', () => {
+    for (const pathname of ['/api/sessions', '/api/schedules', '/api/settings', '/api/groups', '/events']) {
+      const d = decideDashboardAuth({
+        method: 'GET', pathname, hasTokenParam: false,
+        presentedToken: undefined, activeToken: TOK, publicReadOnly: true,
+      });
+      expect(d.kind, pathname).toBe('allow');
+    }
+  });
+
+  it('token holder still reads management endpoints in publicReadOnly', () => {
+    const d = decideDashboardAuth({
+      method: 'GET', pathname: '/api/connectors', hasTokenParam: false,
+      presentedToken: TOK, activeToken: TOK, publicReadOnly: true,
+    });
+    expect(d.kind).toBe('allow');
+  });
+});

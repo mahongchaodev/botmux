@@ -21,6 +21,7 @@ import { handleV3RunsApi } from './dashboard/v3-runs-api.js';
 import { defaultRunsDir as v3RunsDir } from './workflows/v3/ops-projection.js';
 import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
 import { handleConnectorApi } from './dashboard/connector-api.js';
+import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/public-redact.js';
 import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships } from './dashboard/federation-spoke-api.js';
@@ -28,9 +29,9 @@ import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { CLI_OPTIONS, resolveCliId } from './setup/bot-config-editor.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
+import { mergeDashboardConfig, readGlobalConfig, type DashboardGlobalConfig } from './global-config.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
-import type { WebhookLifecycleRecord } from './services/webhook-lifecycle-store.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
@@ -59,6 +60,26 @@ const aggregator = new Aggregator();
 const botOnboarding = new BotOnboardingManager({ botsJsonPath: BOTS_JSON_PATH });
 const subs = new Map<string, () => void>();
 const attaching = new Set<string>();   // dedup concurrent attaches per appId
+
+interface ResolvedDashboardSettings {
+  publicReadOnly: boolean;
+  openTerminalInFeishu: boolean;
+}
+
+function resolveDashboardSettings(): ResolvedDashboardSettings {
+  const dashboard = readGlobalConfig().dashboard ?? {};
+  return {
+    publicReadOnly: dashboard.publicReadOnly ?? config.dashboard.publicReadOnly,
+    openTerminalInFeishu: dashboard.openTerminalInFeishu === true,
+  };
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  return raw ? JSON.parse(raw) : {};
+}
 
 /**
  * Attach to one daemon: hydrate its sessions/schedules into the aggregator,
@@ -137,6 +158,10 @@ const MIME: Record<string, string> = {
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2',
+  '.webp': 'image/webp',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
 };
 
 function serveStatic(_req: IncomingMessage, res: ServerResponse, pathname: string): boolean {
@@ -249,12 +274,22 @@ async function createLifecycleGroupForWebhook(
   if (!pick) throw new Error('no_online_daemon');
   const creator = registry.getByAppId(pick.creatorLarkAppId);
   if (!creator) throw new Error('creator_daemon_offline');
+  // Pull the creator bot's authorized humans (allowedUsers) into the auto-created
+  // group so a person — not just bots — is in the room. allowedUsers stores both
+  // union_ids (on_, tenant-stable) and legacy open_ids (ou_, creator-app-scoped);
+  // route each to the matching invite channel. @-notify the first open_id if any.
+  const allowed = creator.resolvedAllowedUsers ?? [];
+  const ownerUnionIds = allowed.filter(u => u.startsWith('on_'));
+  const userOpenIds = allowed.filter(u => u.startsWith('ou_'));
   const upstream = await fetch(`http://127.0.0.1:${creator.ipcPort}/api/groups/create`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       name: lifecycleGroupName(connector, args.dedupKey),
       larkAppIds: selectedIds,
+      ...(ownerUnionIds.length > 0 ? { ownerUnionIds } : {}),
+      ...(userOpenIds.length > 0 ? { userOpenIds } : {}),
+      ...(userOpenIds[0] ? { notifyOwnerOpenId: userOpenIds[0] } : {}),
     }),
   });
   const text = await upstream.text();
@@ -264,31 +299,6 @@ async function createLifecycleGroupForWebhook(
     throw new Error(parsed?.error ?? `group_create_http_${upstream.status}`);
   }
   return { chatId: parsed.chatId, creatorLarkAppId: parsed.creator ?? pick.creatorLarkAppId };
-}
-
-async function closeLifecycleGroupForWebhook(
-  connector: ConnectorDefinition,
-  record: WebhookLifecycleRecord,
-): Promise<{ ok: boolean; error?: string }> {
-  if (!record.chatId) return { ok: true };
-  const candidates = Array.from(new Set([
-    record.creatorLarkAppId,
-    ...lifecycleBotIds(connector),
-  ].filter((x): x is string => typeof x === 'string' && x.length > 0)));
-  let lastError = 'no_candidate_bot';
-  for (const appId of candidates) {
-    try {
-      const upstream = await proxyToDaemon(appId, `/api/groups/${encodeURIComponent(record.chatId)}/disband`, { method: 'POST' });
-      const text = await upstream.text();
-      let parsed: any = null;
-      try { parsed = JSON.parse(text); } catch { /* tolerate */ }
-      if (upstream.ok && parsed?.ok) return { ok: true };
-      lastError = parsed?.error ?? `group_disband_http_${upstream.status}`;
-    } catch (e: any) {
-      lastError = e?.message ?? String(e);
-    }
-  }
-  return { ok: false, error: lastError };
 }
 
 /**
@@ -334,7 +344,6 @@ const server = createServer(async (req, res) => {
     if (await handleWebhookRoute(req, res, url, {
       proxyToDaemon,
       createLifecycleGroup: createLifecycleGroupForWebhook,
-      closeLifecycleGroup: closeLifecycleGroupForWebhook,
     })) {
       return;
     }
@@ -372,12 +381,14 @@ const server = createServer(async (req, res) => {
     }
 
     const presentedToken = authedToken(req, url);
+    const dashboardSettings = resolveDashboardSettings();
     const decision = decideDashboardAuth({
       method: req.method ?? 'GET',
       pathname: url.pathname,
       hasTokenParam: url.searchParams.has('t'),
       presentedToken,
       activeToken: activeToken ?? '',
+      publicReadOnly: dashboardSettings.publicReadOnly,
     });
     // `authed` is consumed by route handlers that need to distinguish
     // "request got in via public-read carve-out" from "request has a
@@ -416,7 +427,41 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { sessions: aggregator.getSessions() });
     }
     if (req.method === 'GET' && url.pathname === '/api/schedules') {
-      return jsonRes(res, 200, { schedules: aggregator.getSchedules() });
+      // Public-read carve-out: the row carries CONTENT (prompt = business
+      // instructions) and a bound `workingDir` (repo/customer path) — strip
+      // both for anonymous visitors. The schedules page only renders
+      // name/timing/status, so nothing degrades.
+      const schedules = authed
+        ? aggregator.getSchedules()
+        : redactSchedulesForPublic(aggregator.getSchedules());
+      return jsonRes(res, 200, { schedules });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/settings') {
+      // `authed` lets the Settings page disable toggles for read-only
+      // visitors up front, instead of letting them flip a switch that
+      // 401s + rolls back on save.
+      return jsonRes(res, 200, { settings: dashboardSettings, authed });
+    }
+    if (req.method === 'PUT' && url.pathname === '/api/settings') {
+      let parsed: unknown;
+      try {
+        parsed = await readJsonBody(req);
+      } catch {
+        return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+      }
+      const body = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+      const patch: DashboardGlobalConfig = {};
+      if ('publicReadOnly' in body) {
+        if (typeof body.publicReadOnly !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_publicReadOnly' });
+        patch.publicReadOnly = body.publicReadOnly;
+      }
+      if ('openTerminalInFeishu' in body) {
+        if (typeof body.openTerminalInFeishu !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_openTerminalInFeishu' });
+        patch.openTerminalInFeishu = body.openTerminalInFeishu;
+      }
+      if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'empty_patch' });
+      mergeDashboardConfig(patch);
+      return jsonRes(res, 200, { ok: true, settings: resolveDashboardSettings() });
     }
 
     if (await handleConnectorApi(req, res, url)) {
@@ -574,8 +619,13 @@ const server = createServer(async (req, res) => {
           return (a.name ?? a.chatId).localeCompare(b.name ?? b.chatId);
         })
         .map(({ _firstSeenAt, ...rest }) => rest);
+      // Public-read carve-out: oncall bindings carry workingDir (repo/customer
+      // paths). The read-only board only needs chat/bot names; the oncall
+      // editor that consumes oncallChat is authed-only. Strip for anon so the
+      // bound dirs don't leak via /api/groups (mirrors the /api/schedules
+      // prompt strip + keeps /api/bots oncall removal honest).
       return jsonRes(res, 200, {
-        chats: sorted,
+        chats: authed ? sorted : redactGroupsForPublic(sorted),
         bots: onlineBots.map(b => ({ larkAppId: b.larkAppId, botName: b.botName })),
       });
     }
@@ -974,7 +1024,20 @@ const server = createServer(async (req, res) => {
       });
       res.write('retry: 5000\n\n');
       const off = aggregator.on(ev => {
-        res.write(`event: ${ev.type}\ndata: ${JSON.stringify({ larkAppId: ev.larkAppId, body: ev.body })}\n\n`);
+        // Mirror the GET /api/schedules carve-out: schedule events carry the
+        // full task object — strip the prompt AND workingDir for anonymous SSE
+        // listeners, or the REST-side scrub would be trivially bypassed by
+        // `/events`.
+        let body = ev.body;
+        if (!authed && (ev.type === 'schedule.created' || ev.type === 'schedule.updated')) {
+          const b = body as { schedule?: Record<string, unknown>; patch?: Record<string, unknown>; id?: string };
+          body = {
+            ...b,
+            ...(b.schedule ? { schedule: { ...b.schedule, prompt: undefined, workingDir: undefined } } : {}),
+            ...(b.patch ? { patch: { ...b.patch, prompt: undefined, workingDir: undefined } } : {}),
+          } as typeof ev.body;
+        }
+        res.write(`event: ${ev.type}\ndata: ${JSON.stringify({ larkAppId: ev.larkAppId, body })}\n\n`);
       });
       const hb = setInterval(() => {
         res.write(`event: heartbeat\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);

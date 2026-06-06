@@ -28,11 +28,12 @@ import {
   type PidFollowResult,
 } from './services/bridge-rotation-policy.js';
 import { CodexBridgeQueue } from './services/codex-bridge-queue.js';
-import { drainCodexRollout, findCodexRolloutBySessionId, findCodexRolloutByPid, splitCodexEventsByCutoff, extractLastCodexTurn } from './services/codex-transcript.js';
+import { drainCodexRollout, findCodexRolloutBySessionId, findCodexRolloutByPid, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from './services/codex-transcript.js';
 import { findTraexRolloutBySessionId, findTraexRolloutByPid } from './services/traex-transcript.js';
 import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from './services/coco-transcript.js';
 import { currentHermesStateOffset, drainHermesStateDb } from './services/hermes-transcript.js';
 import { currentMtrSessionOffset, drainMtrSession, findLatestMtrSessionByDirectory, findMtrSessionById, type MtrTranscriptSource } from './services/mtr-transcript.js';
+import { drainCursorTranscript, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
 import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
@@ -342,7 +343,7 @@ function formatHeadlessLocalTurnContent(assistantText: string): string | null {
 // ─── Bridge fallback marker (non-adopt) ────────────────────────────────────
 //
 // `botmux send` (cli.ts cmdSend) appends a line
-// `{sentAtMs, messageId, contentFingerprint?, contentLength?}\n` to
+// `{sentAtMs, messageId, contentLength?}\n` to
 // `<DATA_DIR>/turn-sends/<sid>.jsonl` every time the model successfully posts
 // a reply to its OWN session thread. The worker reads these markers at idle
 // and suppresses transcript-driven final_output for any turn whose time window
@@ -1401,7 +1402,14 @@ function drainPathInto(path: string, fromOffset: number): { offset: number; tail
 function codexBridgeFallbackActive(): boolean {
   // True for transcript-backed CLIs whose final output can be harvested
   // when the model forgets to call `botmux send`.
-  return lastInitConfig?.cliId === 'codex' || lastInitConfig?.cliId === 'traex' || lastInitConfig?.cliId === 'coco' || lastInitConfig?.cliId === 'hermes' || lastInitConfig?.cliId === 'mtr';
+  const id = lastInitConfig?.cliId;
+  if (id === 'codex' || id === 'traex' || id === 'coco' || id === 'hermes' || id === 'mtr') return true;
+  // Cursor only harvests its transcript in adopt mode: a botmux-spawned
+  // cursor session carries the botmux skill and replies via `botmux send`,
+  // and we never resolve a transcript path for it — so leave that flow
+  // (screen capture + botmux send) untouched and scope the bridge to adopt.
+  if (id === 'cursor') return lastInitConfig?.adoptMode === true;
+  return false;
 }
 
 // Both Codex and TRAE share the same rollout JSONL layout (response_item
@@ -1418,8 +1426,13 @@ function structuredBridgeIsMtr(): boolean {
   return lastInitConfig?.cliId === 'mtr';
 }
 
+function codexBridgeIsCursor(): boolean {
+  return lastInitConfig?.cliId === 'cursor';
+}
+
 function structuredBridgeIngestPath(path: string, offset: number) {
   if (structuredBridgeIsCodex()) return drainCodexRollout(path, offset);
+  if (codexBridgeIsCursor()) return drainCursorTranscript(path, offset);
   if (structuredBridgeIsHermes()) {
     const result = drainHermesStateDb(offset);
     return { events: result.events, newOffset: result.newOffset, pendingTail: '' };
@@ -1462,6 +1475,29 @@ function codexBridgeStartTimer(): void {
           }
         }
         mtrBridgeIngest();
+        if (isPromptReady) emitReadyCodexTurns();
+        return;
+      }
+      if (codexBridgeIsCursor()) {
+        // Late-attach: the transcript usually exists at adopt time (the
+        // session is already running), so cursorBridgeAttach in setup wins.
+        // This covers the rare race where pid→chatId resolved but the JSONL
+        // hadn't been created yet. Resolution order: chatId (cliSessionId) →
+        // path; then adopt pid → store.db fd → chatId → path.
+        if (!codexBridgeRolloutPath) {
+          let path = codexBridgePendingSessionId
+            ? findCursorTranscriptByChatId(codexBridgePendingSessionId)
+            : undefined;
+          if (!path && codexAdoptPendingPid) {
+            path = findCursorTranscriptByPid(codexAdoptPendingPid)?.path;
+          }
+          if (path) {
+            codexBridgePendingSessionId = undefined;
+            codexAdoptPendingPid = undefined;
+            cursorBridgeAttach(path, cursorLateAttachMode(path));
+          }
+        }
+        codexBridgeIngest();
         if (isPromptReady) emitReadyCodexTurns();
         return;
       }
@@ -1577,7 +1613,7 @@ function mtrBridgeIngest(): void {
   }
 }
 
-function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'fresh-empty' | 'split-live'): void {
+function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'baseline-existing-skip-tail' | 'fresh-empty' | 'split-live'): void {
   codexBridgeRolloutPath = rolloutPath;
   if (mode === 'fresh-empty') {
     // Brand-new session OR late-attach right after first submit. Either
@@ -1616,6 +1652,13 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'fre
     codexBridgePendingTail = '';
     codexBridgeBaselineDone = true;
     log(`Codex bridge split-live degraded to fresh (file missing): ${rolloutPath}`);
+  } else if (mode === 'baseline-existing-skip-tail' && existsSync(rolloutPath)) {
+    let size = 0;
+    try { size = statSync(rolloutPath).size; } catch { /* degrade below */ }
+    codexBridgeOffset = size;
+    codexBridgePendingTail = '';
+    codexBridgeBaselineDone = true;
+    log(`Codex bridge baselined: ${rolloutPath} (offset=${codexBridgeOffset}, skipTail=true)`);
   } else if (existsSync(rolloutPath)) {
     const cursor = baselineJsonlCursor(rolloutPath);
     codexBridgeOffset = cursor.newOffset;
@@ -1645,6 +1688,40 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'fre
   codexBridgeStartTimer();
 }
 
+type CursorAttachMode = 'baseline-existing' | 'fresh-empty';
+
+function cursorLateAttachMode(path: string): CursorAttachMode {
+  const start = codexAdoptStartMs;
+  if (start !== undefined) {
+    try {
+      const birthtimeMs = statSync(path).birthtimeMs;
+      // Cursor often creates the agent-transcript file lazily on the first
+      // post-adopt submit. In that case the first user line is live and must
+      // be ingested from byte 0 rather than swallowed as history.
+      if (Number.isFinite(birthtimeMs) && birthtimeMs >= start - 5_000) return 'fresh-empty';
+    } catch { /* fall back to history-safe baseline */ }
+  }
+  return 'baseline-existing';
+}
+
+/** Attach the Cursor adopt bridge. Cursor's JSONL has no per-event
+ *  timestamp, so existing transcripts are baselined by byte offset. Cursor
+ *  restore intentionally skips any partial tail present at attach time: it is
+ *  old in-flight output and must not be attributed to the next Lark turn. If
+ *  the transcript is created after /adopt, attach fresh so the first
+ *  post-adopt Lark/user turn can still be attributed. */
+function cursorBridgeAttach(path: string, mode: CursorAttachMode = 'baseline-existing'): void {
+  if (mode === 'baseline-existing' && existsSync(path)) {
+    try {
+      const full = drainCursorTranscript(path, 0);
+      maybeEmitCodexAdoptPreamble(full.events);
+    } catch (err: any) {
+      log(`Cursor bridge preamble drain failed: ${err.message}`);
+    }
+  }
+  codexBridgeAttach(path, mode === 'baseline-existing' ? 'baseline-existing-skip-tail' : mode);
+}
+
 /** Called from flushPending after writeInput first returns a cliSessionId.
  *  Tries to locate the rollout file immediately; if it's not on disk yet,
  *  remembers the sid so the 1s poller can keep retrying. */
@@ -1655,6 +1732,19 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
     if (source) {
       codexBridgePendingSessionId = undefined;
       mtrBridgeAttach(source, 'fresh-empty');
+    } else {
+      codexBridgePendingSessionId = cliSessionId;
+      codexBridgeStartTimer();
+    }
+    return;
+  }
+  if (codexBridgeIsCursor()) {
+    // Cursor's cliSessionId is the chatId — the same UUID naming the
+    // agent-transcript JSONL, so it resolves the path directly.
+    const cursorPath = findCursorTranscriptByChatId(cliSessionId);
+    if (cursorPath) {
+      codexBridgePendingSessionId = undefined;
+      cursorBridgeAttach(cursorPath, cursorLateAttachMode(cursorPath));
     } else {
       codexBridgePendingSessionId = cliSessionId;
       codexBridgeStartTimer();
@@ -2021,6 +2111,7 @@ let pendingShotTimer: ReturnType<typeof setTimeout> | null = null;
 let lastShotHash = '';
 let larkAppIdForUpload = '';
 let larkAppSecretForUpload = '';
+let larkBrandForUpload: 'feishu' | 'lark' = 'feishu';
 
 function startScreenshotLoop(): void {
   stopScreenshotLoop();
@@ -2113,7 +2204,7 @@ async function captureAndUpload(): Promise<void> {
 
   let imageKey: string;
   try {
-    imageKey = await uploadImageBuffer(larkAppIdForUpload, larkAppSecretForUpload, png);
+    imageKey = await uploadImageBuffer(larkAppIdForUpload, larkAppSecretForUpload, png, larkBrandForUpload);
   } catch (err: any) {
     logError(`Screenshot upload failed: ${err?.message ?? err}`);
     return;
@@ -2335,8 +2426,11 @@ function handleCodexAppMarker(body: string): void {
     const startedAtMs = typeof payload.startedAtMs === 'number' ? payload.startedAtMs : undefined;
     const completedAtMs = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : Date.now();
     if (startedAtMs !== undefined) {
-      const sentByModel = readSendMarkers().some(m =>
-        m.sentAtMs >= startedAtMs && m.sentAtMs <= completedAtMs + 5_000,
+      const sentByModel = shouldSuppressBridgeEmit(
+        { markTimeMs: startedAtMs, isLocal: false, finalText: payload.content },
+        completedAtMs + 5_001,
+        readSendMarkers(),
+        false,
       );
       if (sentByModel) {
         log(`${cliName()} final_output suppressed (model already called botmux send)`);
@@ -2885,6 +2979,32 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
       codexBridgePendingSessionId = undefined;
       mtrBridgeAttach(source, 'split-live');
     } else {
+      codexBridgeStartTimer();
+    }
+  } else if (cfg.cliId === 'cursor') {
+    const adoptStartMs = Date.now();
+    codexAdoptStartMs = adoptStartMs;
+    // Cursor JSONL lacks per-event timestamps, but adopt still needs parity
+    // with other transcript bridges: direct terminal input should be surfaced
+    // as a local-turn card in Lark. Baseline/offset handling above keeps
+    // pre-adopt history out of the queue; worst-case mirror replay is a
+    // duplicate local-turn message rather than lost local input.
+    codexBridgeQueue.setLocalTurns(true, adoptStartMs);
+    // Resolve the transcript: cliSessionId (= Cursor chatId) when discovery
+    // captured it, else the adopt pid via its open store.db fd. Cursor lacks
+    // per-event timestamps, so cursorBridgeAttach baselines by byte offset
+    // rather than the timestamp-cutoff split-live the other CLIs use.
+    let path: string | undefined;
+    if (cfg.cliSessionId) path = findCursorTranscriptByChatId(cfg.cliSessionId);
+    if (!path && cfg.adoptCliPid) {
+      const probed = findCursorTranscriptByPid(cfg.adoptCliPid);
+      if (probed) path = probed.path;
+    }
+    if (path) {
+      cursorBridgeAttach(path);
+    } else {
+      if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
+      codexAdoptPendingPid = cfg.adoptCliPid;
       codexBridgeStartTimer();
     }
   }
@@ -3932,6 +4052,8 @@ process.on('message', async (raw: unknown) => {
       // Capture credentials for direct image upload from worker
       larkAppIdForUpload = msg.larkAppId;
       larkAppSecretForUpload = msg.larkAppSecret;
+      // brand 决定截图上传打哪个域（feishu / larksuite）。缺省 feishu。
+      larkBrandForUpload = msg.brand === 'lark' ? 'lark' : 'feishu';
       // Resolve render dimensions BEFORE startScreenUpdates() — the
       // headless xterm and PNG canvas need to know the source pane size
       // up-front. Setting them later (after the renderer was built at
@@ -3996,8 +4118,17 @@ process.on('message', async (raw: unknown) => {
           // in-flight events from a local-typed prior turn close before
           // this Lark turn's fingerprint window opens. Mark works even
           // pre-attach (queue is path-agnostic).
-          try { codexBridgeIngest(); } catch { /* best effort */ }
-          codexBridgeMarkPendingTurn(content);
+          if (codexBridgeIsCursor()) {
+            // Cursor may append the current Lark/user line to its transcript
+            // before this IPC message is handled. Mark first so that preexisting
+            // current-line can still fingerprint-match instead of being marked
+            // seen as an unmatched event.
+            codexBridgeMarkPendingTurn(content);
+            try { codexBridgeIngest(); } catch { /* best effort */ }
+          } else {
+            try { codexBridgeIngest(); } catch { /* best effort */ }
+            codexBridgeMarkPendingTurn(content);
+          }
         }
         // Adopt mode write:
         //   - codex routes through cliAdapter.writeInput so the adapter's

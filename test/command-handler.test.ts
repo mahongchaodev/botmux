@@ -433,7 +433,7 @@ function mockCodexAppBot(): void {
 
 describe('DAEMON_COMMANDS set', () => {
   it('should contain all expected commands', () => {
-    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card'];
+    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/list-slash-command', '/slash'];
     for (const cmd of expected) {
       expect(DAEMON_COMMANDS.has(cmd), `Expected DAEMON_COMMANDS to contain ${cmd}`).toBe(true);
     }
@@ -454,7 +454,12 @@ describe('DAEMON_COMMANDS set', () => {
   });
 
   it('should have the correct size', () => {
-    expect(DAEMON_COMMANDS.size).toBe(18);
+    expect(DAEMON_COMMANDS.size).toBe(20);
+  });
+
+  it('contains the /list-slash-command lister and its /slash alias', () => {
+    expect(DAEMON_COMMANDS.has('/list-slash-command')).toBe(true);
+    expect(DAEMON_COMMANDS.has('/slash')).toBe(true);
   });
 });
 
@@ -1216,7 +1221,8 @@ describe('handleCommand', () => {
 
       await handleCommand('/login', ROOT_ID, makeLarkMessage('/login'), deps, LARK_APP_ID);
 
-      expect(generateAuthUrl).toHaveBeenCalledWith('app-1', 'secret-1');
+      // brand 第三参：测试 bot 未配 brand → normalizeBrand → 'feishu'
+      expect(generateAuthUrl).toHaveBeenCalledWith('app-1', 'secret-1', 'feishu');
       const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
       expect(replyContent).toContain('飞书用户授权');
       expect(replyContent).toContain('https://open.feishu.cn/auth/v1/test');

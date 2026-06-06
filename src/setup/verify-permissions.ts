@@ -17,8 +17,10 @@
  * - 网络/接口错误一律返回结构化结果, 不抛
  */
 import * as Lark from '@larksuiteoapi/node-sdk';
+import { type Brand, larkHosts } from '../im/lark/lark-hosts.js';
 
-export type Brand = 'feishu' | 'lark';
+// Brand 的单一事实源在 im/lark/lark-hosts.ts；这里 re-export 保持既有导入路径可用。
+export type { Brand };
 
 export interface RequiredScope {
   /** 飞书 scope 名 (`im:message` 等) */
@@ -79,18 +81,15 @@ export interface RemainingStep {
 }
 
 export function buildScopeDeepLink(appId: string, scopeName: string, brand: Brand = 'feishu'): string {
-  const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
-  return `https://${host}/app/${appId}/auth?q=${encodeURIComponent(scopeName)}&op_from=openapi&token_type=tenant`;
+  return `${larkHosts(brand).openApi}/app/${appId}/auth?q=${encodeURIComponent(scopeName)}&op_from=openapi&token_type=tenant`;
 }
 
 export function buildEventSubDeepLink(appId: string, brand: Brand = 'feishu'): string {
-  const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
-  return `https://${host}/app/${appId}/dev-config/event-sub`;
+  return `${larkHosts(brand).openApi}/app/${appId}/dev-config/event-sub`;
 }
 
 export function buildAppHomeDeepLink(appId: string, brand: Brand = 'feishu'): string {
-  const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
-  return `https://${host}/app/${appId}`;
+  return `${larkHosts(brand).openApi}/app/${appId}`;
 }
 
 // ─── Credential validation ─────────────────────────────────────────────────
@@ -115,8 +114,7 @@ export async function validateCredentials(
   opts: { budgetMs?: number; signal?: AbortSignal } = {},
 ): Promise<CredentialValidation> {
   const budgetMs = opts.budgetMs ?? 10_000;
-  const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
-  const url = `https://${host}/open-apis/auth/v3/tenant_access_token/internal`;
+  const url = `${larkHosts(brand).openApi}/open-apis/auth/v3/tenant_access_token/internal`;
 
   // 自家 AbortController 控制总超时; 同时把上层传进来的 signal 也接上.
   const ac = new AbortController();

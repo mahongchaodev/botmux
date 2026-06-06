@@ -224,7 +224,12 @@ export async function renderGroupsPage(root: HTMLElement) {
 
   function renderCreateSuccess(resp: any) {
     const chatId = String(resp.chatId);
-    const appLink = `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(chatId)}`;
+    // 优先用服务端返回的 shareLink（由 Lark/飞书建群 API 给出，天然带正确品牌域名）；
+    // 仅当缺失（share-link API 失败）时回退到 applink。浏览器侧拿不到 brand，这个
+    // 回退默认 feishu host——属极少触发的兜底，不影响 Lark 正常建群（有 shareLink）。
+    const appLink = typeof resp.shareLink === 'string' && resp.shareLink
+      ? resp.shareLink
+      : `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(chatId)}`;
     const invalidBots = (resp.invalidBotIds ?? []) as string[];
     const invalidUsers = (resp.invalidUserIds ?? []) as string[];
     const auto = resp.autoInvitedOpenId as string | null | undefined;

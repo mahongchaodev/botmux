@@ -72,6 +72,18 @@ describe('registerBot', () => {
     expect(client.opts.appSecret).toBe('secret_001');
   });
 
+  it('should default the SDK Client domain to feishu when brand is unset', () => {
+    const state = mod.registerBot(makeCfg());
+    const client = state.client as unknown as { opts: Record<string, unknown> };
+    expect(client.opts.domain).toBe('https://open.feishu.cn');
+  });
+
+  it('should point the SDK Client domain at larksuite.com when brand is lark', () => {
+    const state = mod.registerBot(makeCfg({ brand: 'lark' }));
+    const client = state.client as unknown as { opts: Record<string, unknown> };
+    expect(client.opts.domain).toBe('https://open.larksuite.com');
+  });
+
   it('should set resolvedAllowedUsers from config.allowedUsers', () => {
     const cfg = makeCfg({ allowedUsers: ['u1', 'u2'] });
     const state = mod.registerBot(cfg);
@@ -97,6 +109,37 @@ describe('registerBot', () => {
     const state = mod.getBot('app_test_001');
     expect(state.config.larkAppSecret).toBe('new');
     expect(mod.getAllBots()).toHaveLength(1);
+  });
+});
+
+// ─── brand parsing ──────────────────────────────────────────────────────────
+
+describe('parseBotConfigsFromText — brand', () => {
+  let mod: Awaited<ReturnType<typeof freshImport>>;
+
+  beforeEach(async () => {
+    mod = await freshImport();
+  });
+
+  it('keeps brand "lark" when configured', () => {
+    const [cfg] = mod.parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'a', larkAppSecret: 's', brand: 'lark' },
+    ]));
+    expect(cfg.brand).toBe('lark');
+  });
+
+  it('leaves brand undefined when unset (defaults to feishu downstream)', () => {
+    const [cfg] = mod.parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'a', larkAppSecret: 's' },
+    ]));
+    expect(cfg.brand).toBeUndefined();
+  });
+
+  it('drops bogus brand values to undefined', () => {
+    const [cfg] = mod.parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'a', larkAppSecret: 's', brand: 'wechat' },
+    ]));
+    expect(cfg.brand).toBeUndefined();
   });
 });
 

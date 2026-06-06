@@ -24,6 +24,10 @@ export interface TriggerRequest {
     payload?: unknown;
     rawText?: string;
   };
+  // Trusted task set by the connector owner ("what to do with the event"). Kept
+  // OUTSIDE envelope so it is never serialized into the untrusted event JSON;
+  // the prompt builder renders it as a trusted directive above the event data.
+  instruction?: string;
   options?: {
     dryRun?: boolean;
     dedupKey?: string;

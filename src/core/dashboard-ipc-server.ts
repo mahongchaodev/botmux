@@ -39,6 +39,7 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
+import { getBotBrand } from '../bot-registry.js';
 import type { ScheduledTask, ParsedSchedule } from '../types.js';
 
 export interface IpcServerHandle {
@@ -398,7 +399,7 @@ function composeScheduleRow(t: ScheduledTask): ScheduleRow {
     lastStatus: t.lastStatus,
     lastError: t.lastError,
     repeat: t.repeat,
-    feishuChatLink: feishuChatLink(t.chatId),
+    feishuChatLink: feishuChatLink(t.chatId, getBotBrand(t.larkAppId)),
   };
 }
 

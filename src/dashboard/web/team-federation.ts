@@ -50,7 +50,7 @@ function teamByKey(key: string): Team | undefined { return allTeams().find(t => 
 
 function subNav(active: 'home' | 'manage'): string {
   const tab = (href: string, label: string, on: boolean) =>
-    `<a href="${href}" style="padding:6px 14px;border-radius:8px;text-decoration:none;font-size:14px;${on ? 'background:var(--accent,#3370ff);color:#fff' : 'color:var(--text,#1f2329)'}">${label}</a>`;
+    `<a href="${href}" style="padding:6px 14px;border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;${on ? 'background:var(--accent);color:var(--on-accent)' : 'color:var(--muted);background:var(--surface-muted)'}">${label}</a>`;
   return `<div style="display:flex;gap:8px;margin-bottom:14px">${tab('#/team', '我的团队', active === 'home')}${tab('#/team/manage', '团队管理', active === 'manage')}</div>`;
 }
 
@@ -60,7 +60,7 @@ function homeHtml(): string {
   return `<section class="page">
 <div class="page-heading"><div>
   <p class="eyebrow">团队</p><h1>团队协作（跨部署）</h1>
-  <p>把别的部署（同事自己跑的 botmux）邀请进同一个团队，互相发现机器人、协作拉群。</p>
+  <p class="tf-lede">把别的部署（同事自己跑的 botmux）邀请进同一个团队，互相发现机器人、协作拉群。</p>
 </div></div>
 ${subNav('home')}
 <div class="card" style="margin-bottom:16px">
@@ -82,7 +82,7 @@ ${subNav('home')}
   <div id="tf-teams">加载中…</div>
 </div>
 <div id="tf-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);align-items:center;justify-content:center;z-index:50">
-  <div style="background:var(--card,#fff);color:var(--text,#1f2329);border-radius:10px;padding:18px 20px;width:min(560px,92vw)">
+  <div style="background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:18px 20px;width:min(560px,92vw)">
     <h2 id="tf-modal-title" style="margin-top:0">默认角色</h2>
     <p class="muted" style="font-size:13px">该机器人的默认人设（跨群生效），此处只读。如需修改，请到「Bot 配置」页。</p>
     <textarea id="tf-modal-text" readonly style="width:100%;min-height:200px;font:13px/1.5 ui-monospace,Menlo,monospace;padding:10px;box-sizing:border-box"></textarea>
@@ -317,7 +317,7 @@ function manageHtml(): string {
   return `<section class="page">
 <div class="page-heading"><div>
   <p class="eyebrow">团队</p><h1>团队管理</h1>
-  <p>创建多个团队、给每个团队生成邀请码、或加入别人的团队。一个团队 = 你本部署的机器人 + 加入该团队的其它部署。</p>
+  <p class="tf-lede">创建多个团队、给每个团队生成邀请码、或加入别人的团队。一个团队 = 你本部署的机器人 + 加入该团队的其它部署。</p>
 </div></div>
 ${subNav('manage')}
 <div class="card" style="margin-bottom:16px">

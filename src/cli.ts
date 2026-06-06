@@ -62,8 +62,9 @@ import {
   type BotMentionEntry,
 } from './utils/bot-routing.js';
 import { isLocale, localeForBot, setDefaultLocale, SUPPORTED_LOCALES, type Locale } from './i18n/index.js';
+import { type Brand, chatAppLink, larkHosts, normalizeBrand, sdkDomain } from './im/lark/lark-hosts.js';
 import { readGlobalConfig, setGlobalLocale, globalConfigPath } from './global-config.js';
-import { makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
+import { buildBridgeSendMarkerContent } from './services/bridge-fallback-gate.js';
 
 // Resolve the CLI's UI locale once from the global config file, so subsequent
 // CLI output (and any t() callers that don't pass an explicit locale) honour
@@ -394,9 +395,10 @@ function writeBotsJsonAtomic(bots: any[]): void {
 /**
  * 从 bot 配置里取 brand. 旧的 bots.json (1.0 之前) 没这个字段, default 到 feishu
  * 保留向后兼容. cmdStart 凭证校验 + printRemainingSteps 深链都靠它选 host.
+ * 归一逻辑收口到 lark-hosts 的 {@link normalizeBrand}（单一事实源）。
  */
-function botBrand(b: any): 'feishu' | 'lark' {
-  return b?.brand === 'lark' ? 'lark' : 'feishu';
+function botBrand(b: any): Brand {
+  return normalizeBrand(b?.brand);
 }
 
 /**
@@ -455,8 +457,7 @@ function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
   // PersonalAgent 应用扫码建出来时已默认订阅 im.message.receive_v1 +
   // card.action.trigger, 并开通 bot 能力, 主线只剩两步: 申请权限 + 重定向
   // URL (按需). README "Step 8 收不到消息时" 段提供 fallback 自查链接.
-  const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
-  const home = `https://${host}/app/${appId}`;
+  const home = `${larkHosts(brand).openApi}/app/${appId}`;
   let scopesJsonPath = '';
   try {
     scopesJsonPath = writeScopesJsonToConfigDir();
@@ -533,8 +534,8 @@ async function finishOpenPlatformSetup(appId: string, brand: 'feishu' | 'lark'):
  * - 任何失败都返回结构化对象, 不抛 (调用方根据 ok=false 回退)
  */
 async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promise<
-  | { ok: true; appId: string; appSecret: string; brand: 'feishu' | 'lark'; userOpenId?: string }
-  | { ok: false; reason: 'cancelled' | 'lark_unsupported' }
+  | { ok: true; appId: string; appSecret: string; brand: Brand; userOpenId?: string }
+  | { ok: false; reason: 'cancelled' }
 > {
   console.log('── 飞书应用建立 ──\n');
   console.log('1) 扫码建应用（推荐，一步拿到 AppID/Secret，需要飞书 App 扫码）');
@@ -546,22 +547,12 @@ async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promis
     const { tryRegisterApp } = await import('./setup/register-app.js');
     const result = await tryRegisterApp();
     if (result.ok) {
-      // Lark 国际版需要 daemon 链路全程走 larksuite.com 域 (Client domain /
-      // WSClient / event-dispatcher 的 fetch URL / scope 深链 host). 当前
-      // botmux runtime 这几处都硬编码 feishu.cn, 所以即使扫码成功了也无法
-      // 真正跑起来. 干净做法是 setup 阶段就拒绝, 让用户用 feishu 租户. 单
-      // 独 PR 完整接入 lark 后再去掉这个分支.
-      if (result.brand === 'lark') {
-        console.log(`\n❌ 检测到 Lark 国际版 (larksuite.com) 租户。`);
-        console.log(`   botmux 当前 daemon 运行链路仅支持飞书 (feishu.cn) 租户,`);
-        console.log(`   Lark 国际版完整接入会在单独 PR 跟进 (BotConfig / Client domain /`);
-        console.log(`   WSClient / event-dispatcher 等需要一并支持).`);
-        console.log(`   请用飞书 (feishu.cn) 租户重试 setup。\n`);
-        return { ok: false, reason: 'lark_unsupported' };
-      }
+      // brand 由扫码 device flow 的 tenant_brand 自动识别（registerApp 内部已
+      // 切到对应域名轮询）。feishu / lark 都直接落盘——daemon 链路全程从
+      // BotConfig.brand 派生 host（Client / WSClient domain、裸 fetch、深链）。
       console.log(`\n✅ 应用创建成功`);
       console.log(`   App ID: ${result.appId}`);
-      console.log(`   租户类型: ${result.brand}`);
+      console.log(`   租户类型: ${result.brand === 'lark' ? 'Lark 国际版 (larksuite.com)' : '飞书 (feishu.cn)'}`);
       if (result.userOpenId) {
         console.log(`   扫码人 open_id: ${result.userOpenId}（将默认作为 allowedUsers）`);
       }
@@ -579,12 +570,17 @@ async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promis
       return { ok: false, reason: 'cancelled' };
     }
     console.log('   降级到手动输入 AppID/Secret。\n');
-  } else {
-    console.log('\n请在浏览器打开 https://open.feishu.cn/app 创建应用，然后回来粘 ID/Secret。\n');
   }
 
-  // 手动 fallback. 不再提问租户类型 — 当前 daemon runtime 只支持 feishu,
-  // 让用户选 lark 是误导. 等 lark 完整接入再加回来.
+  // 手动 fallback / 手动选项：扫码路径已用 tenant_brand 自动识别；手动路径
+  // 没有这个信号，兜底让用户手选租户类型（决定建应用 / 运行时的域名）。
+  console.log('\n租户类型：');
+  console.log('  1) 飞书（中国版，open.feishu.cn）');
+  console.log('  2) Lark（国际版，open.larksuite.com）');
+  const brandChoice = (await ask(rl, '选择 [1]: ')).trim();
+  const brand: Brand = brandChoice === '2' ? 'lark' : 'feishu';
+
+  console.log(`\n请在浏览器打开 ${larkHosts(brand).openApi}/app 创建应用，然后回来粘 ID/Secret。\n`);
   const appId = (await ask(rl, 'AppID (cli_xxx): ')).trim();
   const appSecret = (await ask(rl, 'AppSecret: ')).trim();
 
@@ -592,17 +588,18 @@ async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promis
     console.log('\n❌ AppID/AppSecret 不能为空，setup 中止。');
     return { ok: false, reason: 'cancelled' };
   }
-  return { ok: true, appId, appSecret, brand: 'feishu' };
+  return { ok: true, appId, appSecret, brand };
 }
 
 /**
  * 用指定应用凭证把 open_id (ou_) 解析成 union_id (on_，跨应用稳定)。
  * 查询失败（无 contact 权限 / API 错误）则 fallback 返回原 open_id。
  */
-async function resolveOpenIdToUnionId(appId: string, appSecret: string, openId: string): Promise<string> {
+async function resolveOpenIdToUnionId(appId: string, appSecret: string, openId: string, brand: Brand = 'feishu'): Promise<string> {
   try {
     const { Client } = await import('@larksuiteoapi/node-sdk');
-    const client = new Client({ appId, appSecret });
+    // brand → 域名。Lark 扫码人 ou_→on_ 必须打 larksuite.com，否则失败丢掉 cross-app 稳定性。
+    const client = new Client({ appId, appSecret, domain: sdkDomain(brand) });
     const res = await (client as any).contact.v3.user.get({
       path: { user_id: openId },
       params: { user_id_type: 'open_id' },
@@ -677,10 +674,6 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   const workingDir = await ask(rl, '默认工作目录 [~]: ');
   const modelChoice = await promptModel(rl, cliId);
 
-  // 不再持久化 brand 字段: setup 阶段 brand=lark 直接被 obtainCredentials 中止,
-  // 落盘的永远是 'feishu', 写进配置是死字段. 等 lark 完整接入再加回来, 那时
-  // 同步打开 daemon 链路的 brand 透传. botBrand() helper 读不到字段会 default
-  // 到 'feishu', 兼容旧版同时支持将来扩展.
   const bot: Record<string, any> = {
     larkAppId: creds.appId,
     larkAppSecret: creds.appSecret,
@@ -689,6 +682,12 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     // 在哪儿, 不用去 README 查字段名.
     workingDir: workingDir.trim() || '~',
   };
+  // brand 落盘：只在国际版 (lark) 时写字段，feishu 留空——保持旧 bots.json 干净，
+  // 且 botBrand()/normalizeBrand() 读不到时 default 到 feishu，向后兼容。
+  // 下游 finishOpenPlatformSetup(bot, botBrand(bot)) 据此给出正确的 larksuite 深链。
+  if (creds.brand === 'lark') {
+    bot.brand = 'lark';
+  }
   // modelChoice === undefined → 该 CLI 没声明候选 / 用户跳过；不写 model 字段
   if (typeof modelChoice === 'string' && modelChoice) {
     bot.model = modelChoice;
@@ -699,7 +698,7 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   // allowedUsers 为空时虽然"全开放", 但一旦后续加了 allowedChatGroups 就会变成
   // "群成员能对话却没人能做敏感操作 / 用 /grant". setup 阶段强制收口, 不允许没 owner.
   if (creds.userOpenId) {
-    bot.allowedUsers = [await resolveOpenIdToUnionId(creds.appId, creds.appSecret, creds.userOpenId)];
+    bot.allowedUsers = [await resolveOpenIdToUnionId(creds.appId, creds.appSecret, creds.userOpenId, creds.brand)];
   } else {
     bot.allowedUsers = await promptRequiredOwner(rl);
   }
@@ -3076,12 +3075,8 @@ async function cmdSend(rest: string[]): Promise<void> {
     try {
       const markerDir = join(resolveDataDir(), 'turn-sends');
       if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
-      const contentFingerprint = makeFingerprint(sentContent);
       const marker: Record<string, unknown> = { sentAtMs, messageId };
-      if (contentFingerprint) {
-        marker.contentFingerprint = contentFingerprint;
-        marker.contentLength = normaliseForFingerprint(sentContent).length;
-      }
+      Object.assign(marker, buildBridgeSendMarkerContent(sentContent));
       const line = JSON.stringify(marker) + '\n';
       appendFileSync(join(markerDir, `${sid}.jsonl`), line);
     } catch { /* best-effort: marker miss only causes a redundant fallback message */ }
@@ -3919,7 +3914,7 @@ botmux create-group — 用一组机器人新建飞书群
   process.stdout.write(`${result.chatId}\n`);
 
   // Human-readable summary + warnings → stderr.
-  const link = `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(result.chatId)}`;
+  const link = chatAppLink(result.chatId, botBrand(creatorCfg));
   console.error(`✅ 群已创建：${link}`);
   if (result.invalidBotIds.length > 0) {
     console.error(`⚠️  飞书拒绝邀请的 bot: ${result.invalidBotIds.join(', ')}`);

@@ -9,6 +9,7 @@ import {
   type OpenPlatformAutomationResult,
 } from '../setup/open-platform-automation.js';
 import type { CliId } from '../adapters/cli/types.js';
+import { type Brand, sdkDomain } from '../im/lark/lark-hosts.js';
 import * as Lark from '@larksuiteoapi/node-sdk';
 
 const require = createRequire(import.meta.url);
@@ -188,17 +189,8 @@ export class BotOnboardingManager {
       this.patch(id, { status: 'failed', error: result.error, message: result.message });
       return;
     }
-    if (result.brand === 'lark') {
-      this.patch(id, {
-        status: 'failed',
-        appId: result.appId,
-        brand: result.brand,
-        error: 'lark_unsupported',
-        message: 'botmux 当前 daemon 运行链路仅支持飞书 (feishu.cn) 租户',
-      });
-      return;
-    }
-
+    // brand (feishu / lark) 由扫码 tenant_brand 自动识别后落盘；daemon 链路
+    // 全程从 BotConfig.brand 派生域名，feishu / lark 都能直接跑。
     this.patch(id, { status: 'verifying', appId: result.appId, brand: result.brand });
     const validation = await this.validateCredentials(result.appId, result.appSecret, result.brand);
     if (!validation.ok) {
@@ -227,10 +219,14 @@ export class BotOnboardingManager {
       workingDir,
     };
     if (input.model && input.model.trim()) bot.model = input.model.trim();
+    // brand 落盘：只在国际版写字段，feishu 留空（向后兼容，见 normalizeBrand）。
+    if (result.brand === 'lark') {
+      bot.brand = 'lark';
+    }
     if (result.userOpenId) {
       // 优先存 union_id（on_，跨应用稳定），避免 open_id 在其他 bot 下报 cross-app 错误。
       // 用刚注册的应用自身凭证查询；若查询失败（无 contact 权限）则 fallback 到 open_id。
-      bot.allowedUsers = [await resolveToUnionId(result.appId, result.appSecret, result.userOpenId)];
+      bot.allowedUsers = [await resolveToUnionId(result.appId, result.appSecret, result.userOpenId, result.brand)];
     }
     const addedBotIndex = bots.length;
     writeBotsJsonAtomic(this.opts.botsJsonPath, [...bots, normalizeBotConfig(bot)]);
@@ -321,9 +317,9 @@ export class BotOnboardingManager {
  * union_id 跨应用稳定，适合写入 allowedUsers 供多个 bot 共用。
  * 若查询失败（无 contact 权限 / API 错误）则 fallback 返回原 open_id。
  */
-async function resolveToUnionId(appId: string, appSecret: string, openId: string): Promise<string> {
+async function resolveToUnionId(appId: string, appSecret: string, openId: string, brand: Brand = 'feishu'): Promise<string> {
   try {
-    const client = new Lark.Client({ appId, appSecret, disableTokenCache: false });
+    const client = new Lark.Client({ appId, appSecret, domain: sdkDomain(brand), disableTokenCache: false });
     const res = await (client as any).contact.v3.user.get({
       path: { user_id: openId },
       params: { user_id_type: 'open_id' },

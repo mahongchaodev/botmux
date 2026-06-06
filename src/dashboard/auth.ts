@@ -129,28 +129,51 @@ export type AuthDecision =
   | { kind: 'allow+set-cookie'; token: string; redirectTo: string }
   | { kind: 'deny401' };
 
+/** Tokenless-readable API paths when `config.dashboard.publicReadOnly` is on.
+ *  ALLOW-LIST (fail-closed): only the "watch work" surfaces the read-only
+ *  dashboard renders. Anything NOT in this set stays behind the active token
+ *  even in public mode — so a newly-added GET endpoint is private by default
+ *  and can't silently leak (connector configs, webhook-secret metadata,
+ *  trigger logs, role/persona files, per-bot config, onboarding, raw PTY are
+ *  all absent on purpose). Workflow reads + the static SPA shell are public in
+ *  ALL modes and handled separately in decideDashboardAuth.
+ *  口径：公开 = 会话板 / 排程(脱敏) / 设置(只读) / 群名册 / 事件流 / workflow 进度。 */
+const PUBLIC_READ_PATHS: ReadonlySet<string> = new Set([
+  '/api/sessions',    // session board
+  '/api/schedules',   // schedules page — task prompt redacted for anon upstream
+  '/api/settings',    // read-only settings — only public flags + authed:false
+  '/api/groups',      // board name maps: bot friendly name + group name
+  '/events',          // SSE stream — schedule prompt redacted for anon upstream
+]);
+
 export function decideDashboardAuth(opts: {
   method: string;
   pathname: string;
   hasTokenParam: boolean;
   presentedToken: string | undefined;
   activeToken: string;
+  /** When true (config.dashboard.publicReadOnly), the GET/HEAD paths in
+   *  PUBLIC_READ_PATHS (the "watch work" board surfaces) are readable WITHOUT
+   *  a token — a tokenless (or stale-token) visitor gets a read-only dashboard
+   *  instead of a 401 wall. Everything else (management/config reads, raw PTY,
+   *  all writes) still requires the active token. */
+  publicReadOnly?: boolean;
 }): AuthDecision {
-  const { method, pathname, hasTokenParam, presentedToken, activeToken } = opts;
+  const { method, pathname, hasTokenParam, presentedToken, activeToken, publicReadOnly } = opts;
 
-  // Workflow read-only paths + static SPA shell are public — the dashboard
-  // must be linkable from Lark cards without forcing a `botmux dashboard`
-  // round-trip.  Write actions still need a cookie / token.
-  //
-  // Carve-out: `…/terminal-log/raw` streams full PTY bytes (`?stream=pty`) or
-  // worker diagnostic log (`?stream=diag`).  PTY transcript can leak API
-  // keys / env vars / token reads that happened to scroll the terminal, so
-  // we keep both stream variants behind cookie auth even though the rest of
-  // the read-only API is link-shareable.
+  // `…/terminal-log/raw` streams full PTY bytes (`?stream=pty`) or worker
+  // diagnostic log (`?stream=diag`). PTY transcript can leak API keys / env
+  // vars / token reads that happened to scroll the terminal, so both stream
+  // variants stay behind cookie auth in EVERY mode (workflow reads excluded).
+  const isRawTerminalLog = pathname.endsWith('/terminal-log/raw');
+
+  // Workflow read-only paths + static SPA shell are public in EVERY mode — the
+  // dashboard must be linkable from Lark cards without forcing a
+  // `botmux dashboard` round-trip.  Write actions still need a cookie / token.
   const isWorkflowReadOnly =
     method === 'GET' &&
     pathname.startsWith('/api/workflows/') &&
-    !pathname.endsWith('/terminal-log/raw');
+    !isRawTerminalLog;
   // v3 read-only API is link-shareable like the v0.2 one, EXCEPT the per-node
   // raw PTY stream (`…/pty-log`) which — same rationale as terminal-log/raw —
   // can leak secrets that scrolled the terminal, so it stays behind cookie auth.
@@ -161,9 +184,17 @@ export function decideDashboardAuth(opts: {
   const isStaticShell =
     method === 'GET' && (pathname === '/' || pathname.startsWith('/assets/'));
 
+  // Public read-only mode opens ONLY the allow-listed "watch work" reads
+  // (PUBLIC_READ_PATHS) — fail-closed: a path not on the list stays token-gated
+  // even under publicReadOnly, so new endpoints don't silently become public.
+  const isPublicRead =
+    !!publicReadOnly &&
+    (method === 'GET' || method === 'HEAD') &&
+    PUBLIC_READ_PATHS.has(pathname);
+
   const authed = !!presentedToken && presentedToken === activeToken;
 
-  if (!authed && !isWorkflowReadOnly && !isV3ReadOnly && !isStaticShell) {
+  if (!authed && !isWorkflowReadOnly && !isV3ReadOnly && !isStaticShell && !isPublicRead) {
     return { kind: 'deny401' };
   }
 

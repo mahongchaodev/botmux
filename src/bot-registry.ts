@@ -7,6 +7,7 @@ import type { CliId } from './adapters/cli/types.js';
 import { logger } from './utils/logger.js';
 import { isLocale, setBotLookup, type Locale } from './i18n/index.js';
 import type { VoiceConfig } from './services/voice/types.js';
+import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
 
 export interface OncallChat {
   /** Lark chat_id (oc_xxx) the bot was pulled into. */
@@ -35,6 +36,15 @@ export interface BotDefaultOncall {
 export interface BotConfig {
   larkAppId: string;
   larkAppSecret: string;
+  /**
+   * 租户品牌：`'feishu'`（中国版，open.feishu.cn）或 `'lark'`（国际版，
+   * open.larksuite.com）。缺省 / 旧 bots.json 无此字段 → 视为 `'feishu'`
+   * （见 {@link normalizeBrand}），向后兼容。决定 SDK Client / WSClient 的
+   * domain、所有裸 fetch 的 host、OAuth / applink 深链等——全部从这一个字段
+   * 派生（见 im/lark/lark-hosts.ts）。setup 时自动识别后落盘；brand 绑定到
+   * 具体 app/租户，不在运行时切换（要换平台 = 重新配/加一个 bot）。
+   */
+  brand?: Brand;
   /** Optional process-name suffix; the daemon's process name is rendered as `botmux-<name>` (defaults to `botmux-<index>`). */
   name?: string;
   cliId: CliId;
@@ -114,6 +124,15 @@ export interface BotConfig {
    * `/` 开头的文本"，避免误伤讨论命令用法的普通对话）。默认 false（保持现状：被授权人可用透传）。
    */
   restrictGrantCommands?: boolean;
+  /**
+   * 用户自定义、额外放行透传给 CLI 的 slash 命令 —— 在固定的 PASSTHROUGH_COMMANDS
+   * 之上扩展（例如把 CLI 支持但默认不放行的 `/goal`、`/export` 加进来）。每项必须
+   * `/` 开头、小写、仅含 [a-z0-9:_-]；解析时归一化（缺失的 `/` 自动补、转小写、去重、
+   * 丢弃非法项与会遮蔽 botmux daemon 命令的项）。与内置白名单合并后由
+   * {@link resolvePassthroughCommands} 生效；`/list-slash-command` 可查看完整放行清单。
+   * 未配置（undefined）→ 仅用内置白名单（保持现状）。
+   */
+  customPassthroughCommands?: string[];
   /**
    * Custom footer brand label for cards this bot sends. Three states:
    *   • `undefined` (unset)  → default `[botmux](github)` link
@@ -230,6 +249,9 @@ export function registerBot(cfg: BotConfig): BotState {
   const client = new Lark.Client({
     appId: cfg.larkAppId,
     appSecret: cfg.larkAppSecret,
+    // brand → SDK domain。缺省走 feishu，国际版租户走 larksuite.com。
+    // 这一行同时修好了所有经由 SDK 的调用（发消息 / 文件 / contact 等）。
+    domain: sdkDomain(normalizeBrand(cfg.brand)),
     logger: larkLogger,
   });
   const state: BotState = {
@@ -262,6 +284,14 @@ export function getOwnerOpenId(larkAppId: string): string | undefined {
 /** Bot 自身的 open_id（用于在 mention 解析时排除自己）。 */
 export function getBotOpenId(larkAppId: string): string | undefined {
   return bots.get(larkAppId)?.botOpenId;
+}
+
+/**
+ * 安全地按 appId 取 brand。未注册（如跨进程 dashboard 聚合到别的 daemon 的
+ * 会话）→ 归一为 'feishu'。仅用于派生 applink 等 host，缺省 feishu 安全。
+ */
+export function getBotBrand(larkAppId: string | undefined): Brand {
+  return normalizeBrand(larkAppId ? bots.get(larkAppId)?.config.brand : undefined);
 }
 
 export function getAllBots(): BotState[] {
@@ -521,6 +551,21 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       if (Object.keys(out).length > 0) quotaState = out;
     }
 
+    // customPassthroughCommands：用户额外放行透传的 slash 命令。归一化：转小写、
+    // 自动补前导 `/`、按 /^\/[a-z0-9][a-z0-9:_-]*$/ 过滤、去重。非法/缺省 → undefined。
+    // 注意：与 daemon 命令的冲突过滤放在 resolvePassthroughCommands（运行时合并）做，
+    // 这里只保证条目本身格式合法，避免在解析期耦合 command-handler 的命令清单。
+    let customPassthroughCommands: string[] | undefined;
+    if (Array.isArray(entry.customPassthroughCommands)) {
+      const normalized = entry.customPassthroughCommands
+        .filter((x: any): x is string => typeof x === 'string')
+        .map((x: string) => x.trim().toLowerCase())
+        .map((x: string) => (x.startsWith('/') ? x : `/${x}`))
+        .filter((x: string) => /^\/[a-z0-9][a-z0-9:_-]*$/.test(x));
+      const uniq = [...new Set<string>(normalized)];
+      if (uniq.length > 0) customPassthroughCommands = uniq;
+    }
+
     // voice：per-bot 语音引擎覆盖。结构化保留（engine ∈ sami|openai，sami/openai
     // 为对象，speaker/rate 透传）；非对象或 engine 非法 → undefined。深度校验
     // （凭证是否可用）在 resolveVoiceConfig 做，这里只挡明显垃圾。
@@ -544,6 +589,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     configs.push({
       larkAppId: entry.larkAppId,
       larkAppSecret: entry.larkAppSecret,
+      // brand：只认精确的 'lark'，其余 → undefined（下游 normalizeBrand 当
+      // feishu）。feishu 故意存成 undefined，保持旧 bots.json 干净、不写死字段。
+      brand: entry.brand === 'lark' ? 'lark' : undefined,
       name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : undefined,
       cliId: entry.cliId ?? 'claude-code',
       cliPathOverride: entry.cliPathOverride,
@@ -567,6 +615,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       messageQuota,
       quotaState,
       restrictGrantCommands: entry.restrictGrantCommands === true || undefined,
+      customPassthroughCommands,
       lang: isLocale(entry.lang) ? entry.lang : undefined,
       // Preserve '' distinctly from undefined: '' means "brand off", undefined
       // means "use default botmux brand". Don't trim-to-undefined here.

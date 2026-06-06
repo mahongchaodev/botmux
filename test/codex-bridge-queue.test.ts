@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { CodexBridgeQueue } from '../src/services/codex-bridge-queue.js';
-import { shouldSuppressBridgeEmit, type BridgeSendMarker } from '../src/services/bridge-fallback-gate.js';
+import { buildBridgeSendMarkerContent, shouldSuppressBridgeEmit, type BridgeSendMarker } from '../src/services/bridge-fallback-gate.js';
 import type { CodexBridgeEvent } from '../src/services/codex-transcript.js';
 
 let nextUuid = 0;
@@ -9,6 +9,9 @@ function userEv(text: string, uuid?: string, ts = 0): CodexBridgeEvent {
 }
 function asstEv(text: string, uuid?: string, ts = 0): CodexBridgeEvent {
   return { uuid: uuid ?? `a${++nextUuid}`, timestampMs: ts, kind: 'assistant_final', text };
+}
+function markerForContent(sentAtMs: number, content: string): BridgeSendMarker {
+  return { sentAtMs, ...buildBridgeSendMarkerContent(content) };
 }
 
 /** Mirrors emitReadyCodexTurns' boundary computation so the queue + gate can
@@ -66,6 +69,30 @@ describe('CodexBridgeQueue', () => {
     const q = new CodexBridgeQueue();
     q.ingest([userEv('orphan user event'), asstEv('orphan reply')]);
     expect(q.size()).toBe(0);
+    expect(q.drainEmittable()).toEqual([]);
+  });
+
+  it('replays recently buffered unmatched events when a matching mark arrives later', () => {
+    const q = new CodexBridgeQueue();
+    q.ingest([
+      userEv('say hi please', 'u-early', 1_000),
+      asstEv('Hi，收到。', 'a-early', 1_100),
+    ]);
+    q.mark('t1', 'say hi please', 4_000);
+    const ready = q.drainEmittable();
+    expect(ready).toHaveLength(1);
+    expect(ready[0].turnId).toBe('t1');
+    expect(ready[0].finalText).toBe('Hi，收到。');
+  });
+
+  it('does not replay buffered events older than the 5s skew window', () => {
+    const q = new CodexBridgeQueue();
+    q.ingest([
+      userEv('old prompt', 'u-old-buffered', 1_000),
+      asstEv('old answer', 'a-old-buffered', 1_100),
+    ]);
+    q.mark('t1', 'old prompt', 8_000);
+    expect(q.peek()[0].started).toBe(false);
     expect(q.drainEmittable()).toEqual([]);
   });
 
@@ -403,8 +430,8 @@ describe('CodexBridgeQueue + bridge-fallback gate (type-ahead suppression window
     ]);
 
     const markers: BridgeSendMarker[] = [
-      { sentAtMs: 7_000, contentFingerprint: 'I am checking the current repo', contentLength: 30 },
-      { sentAtMs: 10_000, contentFingerprint: 'I found the existing scripts', contentLength: 28 },
+      markerForContent(7_000, 'I am checking the current repo'),
+      markerForContent(10_000, 'I found the existing scripts'),
     ];
     expect(emitDecisions(q, markers)).toEqual([{ turnId: 't1', suppressed: false }]);
   });
