@@ -36,6 +36,23 @@ export interface GlobalConfig {
   /** Machine-wide worker resource policy. Daemon falls back to an
    *  auto-derived live-worker budget when this block is absent. */
   worker?: WorkerConfig;
+  /** Machine-wide auto-update / auto-restart schedule. Off unless explicitly
+   *  enabled. Only the primary daemon (bot-0) acts on it — see core/maintenance.ts. */
+  maintenance?: MaintenanceConfig;
+}
+
+export interface MaintenanceConfig {
+  /** Run `npm install -g botmux@latest` at `time`, restart to apply if the
+   *  version changed. npm-global installs only (disabled for local-dev). */
+  autoUpdate?: MaintenanceTask;
+  /** Restart the daemons at `time` (memory hygiene / recovery). */
+  autoRestart?: MaintenanceTask;
+}
+
+export interface MaintenanceTask {
+  enabled?: boolean;
+  /** Local-time (Asia/Shanghai) "HH:MM", once per day. */
+  time?: string;
 }
 
 export interface DashboardGlobalConfig {
@@ -57,6 +74,62 @@ function readVoice(raw: unknown): VoiceConfig | undefined {
   if (!engineOk) return undefined;
   if (!v.sami && !v.openai && !v.engine) return undefined;
   return v as VoiceConfig;
+}
+
+/** True when `s` is a valid 24h "HH:MM" (leading zero optional on hours).
+ *  Shared by the config reader and the dashboard PUT validator. */
+export function isValidHhMm(s: string): boolean {
+  return /^([01]?\d|2[0-3]):[0-5]\d$/.test(s);
+}
+
+function readMaintenanceTask(raw: unknown): MaintenanceTask | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: MaintenanceTask = {};
+  if (typeof r.enabled === 'boolean') out.enabled = r.enabled;
+  if (typeof r.time === 'string' && isValidHhMm(r.time)) out.time = r.time;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Validate a maintenance patch from the dashboard PUT. Type-strict (rejects a
+ *  bad time / non-boolean enabled / non-object task) but lenient on
+ *  completeness — an enabled task without a time is stored and treated as
+ *  inactive by the timer until a valid time is set. */
+export function parseMaintenancePatch(
+  body: unknown,
+): { ok: true; patch: MaintenanceConfig } | { ok: false; error: string } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'empty' };
+  const b = body as Record<string, unknown>;
+  const patch: MaintenanceConfig = {};
+  for (const key of ['autoUpdate', 'autoRestart'] as const) {
+    if (!(key in b)) continue;
+    const raw = b[key];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'invalid_task' };
+    const t = raw as Record<string, unknown>;
+    const task: MaintenanceTask = {};
+    if ('enabled' in t) {
+      if (typeof t.enabled !== 'boolean') return { ok: false, error: 'invalid_enabled' };
+      task.enabled = t.enabled;
+    }
+    if ('time' in t) {
+      if (typeof t.time !== 'string' || !isValidHhMm(t.time)) return { ok: false, error: 'invalid_time' };
+      task.time = t.time;
+    }
+    patch[key] = task;
+  }
+  if (Object.keys(patch).length === 0) return { ok: false, error: 'empty' };
+  return { ok: true, patch };
+}
+
+function readMaintenance(raw: unknown): MaintenanceConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const m = raw as Record<string, unknown>;
+  const out: MaintenanceConfig = {};
+  const au = readMaintenanceTask(m.autoUpdate);
+  if (au) out.autoUpdate = au;
+  const ar = readMaintenanceTask(m.autoRestart);
+  if (ar) out.autoRestart = ar;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function readDashboard(raw: unknown): DashboardGlobalConfig | undefined {
@@ -134,6 +207,8 @@ export function readGlobalConfig(): GlobalConfig {
   if (voice) out.voice = voice;
   const worker = readWorker(raw.worker);
   if (worker) out.worker = worker;
+  const maintenance = readMaintenance(raw.maintenance);
+  if (maintenance) out.maintenance = maintenance;
   readCache = { path, value: out, at: Date.now() };
   return out;
 }
@@ -174,6 +249,18 @@ export function mergeDashboardConfig(patch: DashboardGlobalConfig): DashboardGlo
     : {};
   mergeGlobalConfig({ dashboard: { ...existing, ...patch } as DashboardGlobalConfig });
   return readGlobalConfig().dashboard ?? {};
+}
+
+/** Merge only the maintenance sub-config, preserving unknown sibling keys.
+ *  Shallow-merges at the task level (autoUpdate / autoRestart): callers send
+ *  the full task object, so a present key replaces it wholesale. */
+export function mergeMaintenanceConfig(patch: MaintenanceConfig): MaintenanceConfig {
+  const raw = readRawConfig();
+  const existing = raw.maintenance && typeof raw.maintenance === 'object' && !Array.isArray(raw.maintenance)
+    ? raw.maintenance as Record<string, unknown>
+    : {};
+  mergeGlobalConfig({ maintenance: { ...existing, ...patch } as MaintenanceConfig });
+  return readGlobalConfig().maintenance ?? {};
 }
 
 /** Convenience: set the global UI locale (or clear it when `null`). */

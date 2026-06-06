@@ -1416,6 +1416,16 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           break;
         }
 
+        // Restart recovery: stay silent in the group. The session was restored
+        // after a daemon restart; don't auto-post/patch a streaming card here.
+        // The owner gets a private DM summary instead, and the surviving card
+        // (if any) is left untouched. The next real user turn clears this flag
+        // (rememberLastCliInput) and the normal card flow resumes.
+        if (ds.suppressRecoveryCard) {
+          logger.info(`[${t}] Restored session — suppressing recovery streaming card (silent restart)`);
+          break;
+        }
+
         // If a previous streaming card survived (e.g. daemon restart), try to
         // PATCH it with the new "starting" state instead of POSTing a fresh card.
         // ds.streamCardPending forces a new card (e.g. mid-session repo switch
@@ -1605,6 +1615,11 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // Bot opted out of the streaming card — dashboard SSE above already got
         // the status patch; just don't touch any Lark card.
         if (streamingCardDisabled(ds)) break;
+
+        // Restart recovery: a restored worker may emit screen updates as the CLI
+        // redraws on resume. Stay silent (no post/patch) until the first real
+        // user turn clears the flag. Dashboard SSE above still reflects status.
+        if (ds.suppressRecoveryCard) break;
 
         const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);

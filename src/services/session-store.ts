@@ -204,6 +204,25 @@ export function findActiveChatScopeSessionsByChat(chatId: string): Session[] {
   return findActiveSessionsMatching(s => s.chatId === chatId && s.scope === 'chat');
 }
 
+/**
+ * Count active sessions across every bot's on-disk session file. A pure disk
+ * read (no in-memory state) so it's correct at daemon startup regardless of
+ * which bot owns this process — used by the restart-report DM after a restart.
+ */
+export function countActiveSessionsOnDisk(dataDir: string = config.session.dataDir): number {
+  let n = 0;
+  try {
+    for (const file of readdirSync(dataDir)) {
+      if (!file.startsWith('sessions') || !file.endsWith('.json')) continue;
+      try {
+        const data: Record<string, Session> = JSON.parse(readFileSync(join(dataDir, file), 'utf-8'));
+        for (const s of Object.values(data)) if (s?.status === 'active') n++;
+      } catch { continue; }
+    }
+  } catch { /* missing dir → 0 */ }
+  return n;
+}
+
 function findActiveSessionsMatching(predicate: (s: Session) => boolean): Session[] {
   load();
   const matches: Session[] = [];

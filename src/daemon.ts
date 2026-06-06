@@ -6,7 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-import { config } from './config.js';
+import { config, getDashboardExternalHost } from './config.js';
+import { writeHeartbeat } from './core/daemon-heartbeat.js';
+import { startMaintenance, stopMaintenance } from './core/maintenance.js';
+import { sendRestartReportIfPending } from './core/restart-report.js';
 import { statSync } from 'node:fs';
 import { getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
 import { chatHasAllowedUser, resolveGroupJoinPrompt } from './core/auto-start.js';
@@ -3021,6 +3024,39 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+/** Owner to DM for the restart report: the bot's first resolved allowedUser
+ *  (open_id). Falls back to a raw `ou_…` entry in the config. */
+function resolvePrimaryOwnerOpenId(larkAppId: string): string | undefined {
+  try {
+    const bot = getBot(larkAppId);
+    const resolved = (bot.resolvedAllowedUsers ?? []).find(u => typeof u === 'string' && u.startsWith('ou_'));
+    if (resolved) return resolved;
+    return (bot.config.allowedUsers ?? []).find(u => typeof u === 'string' && u.startsWith('ou_'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build the current dashboard URL (active token, not a rotation) from the
+ *  dashboard process's persisted `.dashboard-port` / `.dashboard-token`. Falls
+ *  back to a token-less base URL if the dashboard hasn't published a token yet. */
+function dashboardUrlForReport(): string | undefined {
+  try {
+    const dir = join(homedir(), '.botmux');
+    const portFile = join(dir, '.dashboard-port');
+    const tokenFile = join(dir, '.dashboard-token');
+    const port = existsSync(portFile) ? readFileSync(portFile, 'utf8').trim() : String(config.dashboard.port);
+    const base = `http://${getDashboardExternalHost()}:${port}/`;
+    if (existsSync(tokenFile)) {
+      const tok = readFileSync(tokenFile, 'utf8').trim();
+      if (tok) return `${base}?t=${tok}`;
+    }
+    return base;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function startDaemon(botIndex?: number): Promise<void> {
   // 首次启动时后台尝试安装 CJK 字体（Debian/Ubuntu），避免截图中文显示豆腐块。
   // 不阻塞：首张截图可能仍是豆腐块，装完重启 daemon 即可正常。
@@ -3275,6 +3311,39 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   scheduler.setOwnerFilter(cfg.larkAppId, idx === 0);
   scheduler.startScheduler();
 
+  // Cross-daemon busy heartbeat: each daemon reports how many of its sessions
+  // are mid-CLI-turn so the primary daemon's maintenance gate sees activity
+  // across all bots (one daemon per bot). See core/daemon-heartbeat.ts.
+  const writeBusyHeartbeat = () => {
+    try {
+      let busy = 0;
+      for (const [, ds] of activeSessions) {
+        if (ds.worker && !ds.worker.killed && ds.lastScreenStatus === 'working') busy++;
+      }
+      writeHeartbeat(cfg.larkAppId, busy);
+    } catch { /* best-effort */ }
+  };
+  writeBusyHeartbeat();
+  const maintenanceHeartbeat = setInterval(writeBusyHeartbeat, 15_000);
+  maintenanceHeartbeat.unref?.();
+
+  // Auto-update / auto-restart and the restart-report DM run only on the
+  // primary daemon (bot-0) — a restart is host-wide.
+  if (idx === 0) {
+    startMaintenance();
+    // After an intentional restart, DM the owner a summary. Delayed a few
+    // seconds so the dashboard process can publish its token first.
+    setTimeout(() => {
+      void sendRestartReportIfPending({
+        primaryLarkAppId: cfg.larkAppId,
+        ownerOpenId: resolvePrimaryOwnerOpenId(cfg.larkAppId),
+        dashboardUrl: dashboardUrlForReport(),
+        sendCard: (openId, card) => sendUserMessage(cfg.larkAppId, openId, card, 'interactive').then(() => undefined),
+        log: (m) => logger.info(`[restart-report] ${m}`),
+      });
+    }, 5_000).unref?.();
+  }
+
   // Graceful shutdown. Sends SIGTERM (or `{type:'close'}` IPC via killWorker)
   // to every worker, then waits up to SHUTDOWN_GRACE_MS for them to exit
   // before sending SIGKILL to stragglers. Without the wait, daemon
@@ -3291,6 +3360,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     setSessionLifecycleShutdown(true);
     logger.info(`Daemon shutting down... (active: ${getActiveCount()})`);
     scheduler.stopScheduler();
+    stopMaintenance();
+    clearInterval(maintenanceHeartbeat);
     for (const watcher of workflowEventWatchers.values()) watcher.close();
     workflowEventWatchers.clear();
     workflowRuns.clear();

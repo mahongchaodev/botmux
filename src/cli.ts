@@ -69,6 +69,7 @@ import { type Brand, chatAppLink, larkHosts, normalizeBrand, sdkDomain } from '.
 import { mergeGlobalConfig, readGlobalConfig, setGlobalLocale, globalConfigPath, type WorkerConfig } from './global-config.js';
 import { detectWorkerResources, resolveWorkerBudget } from './core/worker-budget.js';
 import { buildBridgeSendMarkerContent } from './services/bridge-fallback-gate.js';
+import { writeManualIntentIfAbsentTo } from './services/restart-intent-store.js';
 
 // Resolve the CLI's UI locale once from the global config file, so subsequent
 // CLI output (and any t() callers that don't pass an explicit locale) honour
@@ -1301,6 +1302,15 @@ async function cmdRestart(): Promise<void> {
     process.exit(1);
   }
   ensureConfigDir();
+  // Drop a restart-intent breadcrumb so the fresh daemon knows this was an
+  // intentional restart and DMs the owner a summary. `IfAbsent` preserves a
+  // richer breadcrumb (update / auto-restart) already written by the
+  // maintenance timer that spawned this very `botmux restart`. A pm2
+  // crash-autorestart bypasses this path → no breadcrumb → silent.
+  try {
+    const now = Date.now();
+    writeManualIntentIfAbsentTo(resolveDataDir(), now, new Date(now).toISOString());
+  } catch { /* breadcrumb is best-effort */ }
   killDuplicatePm2GodDaemons();
   preflightNodeSanity();
   await ensureSystemDependencies();

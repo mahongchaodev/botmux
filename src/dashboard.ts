@@ -28,7 +28,8 @@ import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { CLI_OPTIONS, resolveCliId } from './setup/bot-config-editor.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
-import { mergeDashboardConfig, readGlobalConfig, type DashboardGlobalConfig } from './global-config.js';
+import { mergeDashboardConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, type DashboardGlobalConfig, type MaintenanceConfig } from './global-config.js';
+import { isLocalDevInstall } from './utils/install-info.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
 
@@ -71,6 +72,11 @@ const attaching = new Set<string>();   // dedup concurrent attaches per appId
 interface ResolvedDashboardSettings {
   publicReadOnly: boolean;
   openTerminalInFeishu: boolean;
+  /** Auto-update / auto-restart schedule (off by default). */
+  maintenance: MaintenanceConfig;
+  /** True when running from a source checkout — the Settings UI greys out the
+   *  auto-update toggle (npm-global only). */
+  localDevInstall: boolean;
 }
 
 function resolveDashboardSettings(): ResolvedDashboardSettings {
@@ -78,6 +84,8 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
   return {
     publicReadOnly: dashboard.publicReadOnly ?? config.dashboard.publicReadOnly,
     openTerminalInFeishu: dashboard.openTerminalInFeishu === true,
+    maintenance: readGlobalConfig().maintenance ?? {},
+    localDevInstall: isLocalDevInstall(),
   };
 }
 
@@ -466,8 +474,19 @@ const server = createServer(async (req, res) => {
         if (typeof body.openTerminalInFeishu !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_openTerminalInFeishu' });
         patch.openTerminalInFeishu = body.openTerminalInFeishu;
       }
-      if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'empty_patch' });
-      mergeDashboardConfig(patch);
+      let touched = false;
+      if (Object.keys(patch).length > 0) { mergeDashboardConfig(patch); touched = true; }
+      if ('maintenance' in body) {
+        const r = parseMaintenancePatch(body.maintenance);
+        if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.error });
+        // Auto-update is npm-global only; refuse enabling it on a source checkout.
+        if (r.patch.autoUpdate?.enabled && isLocalDevInstall()) {
+          return jsonRes(res, 400, { ok: false, error: 'local_dev_no_autoupdate' });
+        }
+        mergeMaintenanceConfig(r.patch);
+        touched = true;
+      }
+      if (!touched) return jsonRes(res, 400, { ok: false, error: 'empty_patch' });
       return jsonRes(res, 200, { ok: true, settings: resolveDashboardSettings() });
     }
 

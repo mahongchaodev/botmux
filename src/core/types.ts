@@ -62,6 +62,12 @@ export interface DaemonSession {
   streamCardId?: string;         // message_id of the streaming card in group (PATCHed with live output)
   streamCardNonce?: string;       // unique nonce for the current streaming card — embedded in button values to distinguish old vs current card
   streamCardPending?: boolean;    // true when a new turn started, next screen_update creates a new card
+  /** Set on sessions restored after a daemon restart: suppresses the automatic
+   *  card post/patch from the recovery re-fork so a restart stays silent in the
+   *  group (the owner gets a private DM summary instead). Cleared on the first
+   *  real CLI input (rememberLastCliInput) — the next turn posts a card normally.
+   *  In-memory only. See core/restart-report.ts. */
+  suppressRecoveryCard?: boolean;
   /** Session-scoped override: when true, the streaming card is posted/patched
    *  even if the bot has `disableStreamingCard` set. Flipped on by the `/card`
    *  command so a user can manually summon a live card in an otherwise-quiet
