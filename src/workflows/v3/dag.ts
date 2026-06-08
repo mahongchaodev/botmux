@@ -171,6 +171,17 @@ export const RESULT_ENUM_MAX_VALUE_LENGTH = 64;
  *  extra iterations one at a time once the loop blocks. */
 export const MAX_LOOP_ITERATIONS = 20;
 
+/** Cross-node revisit budgets (anti-infinite-loop).  Two tiers:
+ *  - PER-PAIR (source→target): how many times one node may revisit one ancestor
+ *    before the run blocks — default 1 (a node sends each ancestor back once;
+ *    expected multi-round rework belongs in a structured loop, not ad-hoc
+ *    revisit).  Pinpoints which edge is ping-ponging.
+ *  - PER-RUN: total revisits across the whole run — a generous backstop so many
+ *    distinct pairs (or many nodes revisiting) can't run away.
+ *  Exhaustion blocks the run; a human grants +1 (revisitBudgetGranted). */
+export const DEFAULT_REVISIT_BUDGET_PER_PAIR = 1;
+export const DEFAULT_REVISIT_BUDGET_PER_RUN = 8;
+
 // ─── Loop schema ─────────────────────────────────────────────────────────
 
 /**

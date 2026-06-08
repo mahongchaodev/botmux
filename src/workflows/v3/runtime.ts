@@ -22,6 +22,8 @@ import { join, dirname, relative, isAbsolute } from 'node:path';
 
 import {
   DEFAULT_NODE_TIMEOUT_SEC,
+  DEFAULT_REVISIT_BUDGET_PER_PAIR,
+  DEFAULT_REVISIT_BUDGET_PER_RUN,
   isGoalNode,
   isLoopNode,
   loopInstanceId,
@@ -249,6 +251,40 @@ export interface ResultValidation {
  *  malformed revisit (missing/blank revisitTo, non-string reason) → `ok:false`
  *  so the runtime blocks it as resultInvalid.  The ancestor membership check
  *  (toNodeId ∈ node.revisitTo) is the caller's (it has the node). */
+/** Two-tier revisit budget check (anti-infinite-loop): a source→target pair may
+ *  revisit `DEFAULT_REVISIT_BUDGET_PER_PAIR` times, and the whole run
+ *  `DEFAULT_REVISIT_BUDGET_PER_RUN` times, each extendable by a
+ *  `revisitBudgetGranted` event.  Counts revisits ALREADY made; returns
+ *  `{ok:false, detail}` when this next revisit would exceed either tier. */
+export function revisitBudgetStatus(
+  events: StoredEvent[],
+  sourceNodeId: string,
+  toNodeId: string,
+): { ok: true } | { ok: false; detail: string } {
+  let pairUsed = 0;
+  let runUsed = 0;
+  let pairGranted = 0;
+  let runGranted = 0;
+  for (const e of events) {
+    if (e.type === 'nodeRevisitRequested') {
+      runUsed++;
+      if (e.nodeId === sourceNodeId && e.toNodeId === toNodeId) pairUsed++;
+    } else if (e.type === 'revisitBudgetGranted') {
+      if (e.sourceNodeId === sourceNodeId && e.toNodeId === toNodeId) pairGranted++;
+      else if (e.sourceNodeId === undefined && e.toNodeId === undefined) runGranted++;
+    }
+  }
+  const pairLimit = DEFAULT_REVISIT_BUDGET_PER_PAIR + pairGranted;
+  const runLimit = DEFAULT_REVISIT_BUDGET_PER_RUN + runGranted;
+  if (pairUsed >= pairLimit) {
+    return { ok: false, detail: `revisit budget exhausted for ${sourceNodeId}->${toNodeId} (${pairUsed}/${pairLimit}) — grant +1 (this pair) to continue` };
+  }
+  if (runUsed >= runLimit) {
+    return { ok: false, detail: `run-wide revisit budget exhausted (${runUsed}/${runLimit}) — grant +1 (run) to continue` };
+  }
+  return { ok: true };
+}
+
 export function readRevisitRequest(
   manifest: Manifest,
   outputDir: string,
@@ -796,6 +832,17 @@ export async function runWorkflow(
                 type: 'nodeBlocked', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId,
                 errorClass: 'resultInvalid',
                 message: `result.json requests revisit to "${revisit.request.toNodeId}", not in node "${node.id}".revisitTo`,
+              });
+              return;
+            }
+            // Anti-infinite-loop: a revisit consumes per-pair + per-run budget.
+            // Exhausted → block this node (recoverable) instead of superseding;
+            // a human grants +1 (revisitBudgetGranted) then retries.
+            const budget = revisitBudgetStatus(readJournal(journalPath), node.id, revisit.request.toNodeId);
+            if (!budget.ok) {
+              appendEvent(journalPath, {
+                type: 'nodeBlocked', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId,
+                errorClass: 'resultInvalid', errorCode: 'REVISIT_BUDGET_EXHAUSTED', message: budget.detail,
               });
               return;
             }

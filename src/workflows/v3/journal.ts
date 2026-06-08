@@ -181,6 +181,18 @@ export type V3Event =
       byNodeId: string;
       reason: 'refresh';
     }
+  // A human granted extra revisit budget after the run blocked on exhaustion
+  // (the revisit analogue of loopIterationGranted).  A PAIR grant (both
+  // sourceNodeId + toNodeId set) bumps one source→target edge's allowance by 1;
+  // a RUN grant (neither set) bumps the run-wide allowance by 1.  Consumed by
+  // the next budget check in the runtime's revisit recognition.
+  | {
+      type: 'revisitBudgetGranted';
+      sourceNodeId?: string;
+      toNodeId?: string;
+      by: string;
+      reason?: string;
+    }
   // ── structured loop lifecycle ──
   // A loop is a composite node: its body expands into REAL journal-level nodes
   // per iteration (instance ids via loopInstanceId), so dispatch/settle/retry

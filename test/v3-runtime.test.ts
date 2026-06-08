@@ -16,7 +16,8 @@ import { createHash } from 'node:crypto';
 
 import { validateDag } from '../src/workflows/v3/dag.js';
 import { appendEvent, readJournal } from '../src/workflows/v3/journal.js';
-import { runWorkflow, type V3RuntimeDeps } from '../src/workflows/v3/runtime.js';
+import { runWorkflow, revisitBudgetStatus, type V3RuntimeDeps } from '../src/workflows/v3/runtime.js';
+import { requestRevisitGrant } from '../src/workflows/v3/daemon-run.js';
 import { readAndValidateManifest, ManifestValidationError } from '../src/workflows/v3/manifest.js';
 import {
   createFileGate,
@@ -775,6 +776,66 @@ describe('runWorkflow — 跨节点 revisit A→B→C', () => {
       expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
       // 关键:按 effective instance(A#002)取产物,不被迟到的 A#001 success 污染。
       expect(bSawA).toBe('A-v2');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('回溯预算:per-pair 默认 1,第二次 C→A 回溯耗尽 → run blocked(防无限回溯)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-budget-'));
+    try {
+      const dag = validateDag({
+        runId: 'budget-abc',
+        nodes: [
+          { id: 'A', type: 'goal', goal: 'a', depends: [], inputs: [] },
+          { id: 'C', type: 'goal', goal: 'c', depends: ['A'], inputs: [{ from: 'A' }], revisitTo: ['A'] },
+        ],
+      });
+      let cRuns = 0;
+      const runNode: RunNode = async (req) => {
+        if (req.node.id === 'A') {
+          return { status: 'ok', manifestPath: writeManifest(req, {
+            schemaVersion: 1, status: 'ok', summary: 'a', files: [product(req.outputDir, 'a.md', 'A')],
+          }) };
+        }
+        // C 每次都请求回溯到 A（永不满意）。
+        cRuns++;
+        const rj = jsonProduct(req.outputDir, 'result.json', { status: 'revisit', revisitTo: 'A', reason: '还是不行' });
+        return { status: 'ok', manifestPath: writeManifest(req, {
+          schemaVersion: 1, status: 'ok', summary: 'revisit', files: [rj],
+        }) };
+      };
+      const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
+      const outcome = await runWorkflow(dag, deps, { baseDir: base });
+
+      // C#001 回溯(允许)→ A#002 + C#002 → C#002 再回溯(pair 1/1 耗尽)→ C#002 blocked → run blocked
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'blocked' });
+      const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
+      expect(events.filter((e) => e.type === 'nodeRevisitRequested').length).toBe(1); // 只放行了 1 次
+      expect(events.some((e) => e.type === 'nodeBlocked' && (e as any).errorCode === 'REVISIT_BUDGET_EXHAUSTED')).toBe(true);
+      expect(cRuns).toBe(2); // C#001(放行) + C#002(被预算挡下)
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('回溯预算:grant +1 后预算解锁(revisitBudgetStatus + requestRevisitGrant)', () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-grant-'));
+    try {
+      const runDir = join(base, 'g');
+      const jp = join(runDir, 'journal.ndjson');
+      // 模拟 C→A 已回溯 1 次(达到 per-pair 默认 1)
+      appendEvent(jp, { type: 'runStarted', runId: 'g' });
+      appendEvent(jp, { type: 'nodeRevisitRequested', nodeId: 'C', instanceId: 'C#001', attemptId: 'C#001/attempts/001', toNodeId: 'A' });
+      // 此时 C→A 已耗尽
+      expect(revisitBudgetStatus(readJournal(jp), 'C', 'A').ok).toBe(false);
+      // 人工 grant +1（pair 维度）
+      const out = requestRevisitGrant(base, 'g', { sourceNodeId: 'C', toNodeId: 'A', by: 'ou_user' });
+      expect(out).toEqual({ kind: 'granted', scope: 'pair' });
+      // grant 后预算解锁
+      expect(revisitBudgetStatus(readJournal(jp), 'C', 'A').ok).toBe(true);
+      // 但别的 pair / run 维度不受这条 pair grant 影响（D→A 仍按默认）
+      expect(revisitBudgetStatus(readJournal(jp), 'D', 'A').ok).toBe(true); // D 还没回溯过
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

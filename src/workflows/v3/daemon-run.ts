@@ -423,6 +423,33 @@ export function requestV3Retry(
   return { kind: 'requested', nodeId, previousAttemptId, nextAttemptId };
 }
 
+export type V3RevisitGrantOutcome =
+  | { kind: 'granted'; scope: 'pair' | 'run' }
+  | { kind: 'stale-run'; reason: 'missing' };
+
+/** Grant +1 revisit budget after a run blocked on exhaustion (the revisit
+ *  analogue of a loop-iteration grant).  A PAIR grant (both sourceNodeId +
+ *  toNodeId) bumps one source→target edge; a RUN grant (neither) bumps the
+ *  run-wide allowance.  The granted budget is consumed when the blocked node is
+ *  retried and re-attempts its revisit. */
+export function requestRevisitGrant(
+  baseDir: string,
+  runId: string,
+  input: { sourceNodeId?: string; toNodeId?: string; by: string; reason?: string },
+): V3RevisitGrantOutcome {
+  const runDir = safeRunDir(baseDir, runId);
+  const journalPath = join(runDir, 'journal.ndjson');
+  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+  const pair = !!(input.sourceNodeId && input.toNodeId);
+  appendEvent(journalPath, {
+    type: 'revisitBudgetGranted',
+    ...(pair ? { sourceNodeId: input.sourceNodeId, toNodeId: input.toNodeId } : {}),
+    by: input.by,
+    ...(input.reason ? { reason: input.reason } : {}),
+  });
+  return { kind: 'granted', scope: pair ? 'pair' : 'run' };
+}
+
 export type V3LoopGrantOutcome =
   | { kind: 'granted'; loopId: string; fromIteration: number; nextIteration: number }
   | { kind: 'already-granted'; loopId: string }
