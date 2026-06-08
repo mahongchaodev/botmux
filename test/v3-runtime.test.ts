@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -705,6 +705,58 @@ describe('runWorkflow — 跨节点 revisit A→B→C', () => {
       expect(bSawAContent).toBe('A-v2');
       // C 一共跑了 2 次（#001 回溯 + #002 成功）
       expect(cRuns).toBe(2);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('buildInputs 抗旧实例迟到成功：journal 里 A 最后一条 success 是迟到的 A#001,B 仍读 A#002', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-rt-latestale-'));
+    try {
+      const dag = validateDag({
+        runId: 'late',
+        nodes: [
+          { id: 'A', type: 'goal', goal: 'a', depends: [], inputs: [] },
+          { id: 'B', type: 'goal', goal: 'b', depends: ['A'], inputs: [{ from: 'A' }] },
+        ],
+      });
+      const runDir = join(base, 'late');
+      const writeA = (inst: string, content: string): string => {
+        const work = join(runDir, inst, 'attempts', '001', 'work');
+        mkdirSync(work, { recursive: true });
+        const file = product(work, 'a.md', content);
+        const mp = join(runDir, inst, 'attempts', '001', 'manifest.json');
+        writeFileSync(mp, JSON.stringify({ schemaVersion: 1, status: 'ok', summary: 'a', files: [file] }));
+        return mp;
+      };
+      const m1 = writeA('A#001', 'A-v1');
+      const m2 = writeA('A#002', 'A-v2');
+      const jp = join(runDir, 'journal.ndjson');
+      appendEvent(jp, { type: 'runStarted', runId: 'late' });
+      appendEvent(jp, { type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001' });
+      appendEvent(jp, { type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001', manifestPath: m1 });
+      appendEvent(jp, { type: 'nodeInstanceSuperseded', nodeId: 'A', instanceId: 'A#001', byNodeId: 'A', reason: 'refresh' });
+      appendEvent(jp, { type: 'nodeDispatched', nodeId: 'A', instanceId: 'A#002', attemptId: 'A#002/attempts/001' });
+      appendEvent(jp, { type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#002', attemptId: 'A#002/attempts/001', manifestPath: m2 });
+      // 旧 A#001 worker 迟到再写一次 success → journal 里 A 的“最后一条” success 是 A#001（nodeId-latest 会被它骗到）
+      appendEvent(jp, { type: 'nodeSucceeded', nodeId: 'A', instanceId: 'A#001', attemptId: 'A#001/attempts/001', manifestPath: m1 });
+
+      let bSawA = '';
+      const runNode: RunNode = async (req) => {
+        if (req.node.id === 'B') {
+          const inputs = JSON.parse(readFileSync(req.inputsPath, 'utf-8')) as GoalInputs;
+          const fromA = inputs.inputs.find((i) => i.from === 'A');
+          bSawA = fromA ? readFileSync(fromA.path, 'utf-8') : '(none)';
+        }
+        return { status: 'ok', manifestPath: writeManifest(req, {
+          schemaVersion: 1, status: 'ok', summary: 'b', files: [product(req.outputDir, 'b.md', 'B-out')],
+        }) };
+      };
+      const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
+      const outcome = await runWorkflow(dag, deps, { baseDir: base });
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
+      // 关键:按 effective instance(A#002)取产物,不被迟到的 A#001 success 污染。
+      expect(bSawA).toBe('A-v2');
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

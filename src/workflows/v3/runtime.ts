@@ -1208,6 +1208,11 @@ export async function runWorkflow(
   ): GoalInputs {
     const inputs: GoalInputs['inputs'] = [];
     const omittedFrom = new Set((omitted ?? []).map((o) => o.from));
+    // Resolve upstream products by the source's CURRENT effective instance, NOT
+    // by nodeId-latest (菲菲 blocker): after a revisit, a stale `A#001` worker
+    // can settle LATE; nodeId-latest would then hand `A#001`'s old product to
+    // `B#002`.  Keying by effectiveInstanceId pins it to `A#002`.
+    const snap = materialize(events);
 
     // Runtime human-ask answer: when THIS dispatch is the retry a human-ask was
     // answered into, inject the persisted answer as a `human/answer` input so the
@@ -1227,18 +1232,23 @@ export async function runWorkflow(
       });
     }
 
-    const latestSuccess = (nodeId: string) =>
+    // Latest success for a dispatch `key` (an effective instance `A#002`, a loop
+    // body expansion, or a legacy nodeId), matched by `(instanceId ?? nodeId)`.
+    const latestSuccess = (key: string) =>
       [...events]
         .reverse()
         .find((e): e is StoredEvent & { type: 'nodeSucceeded' } =>
-          e.type === 'nodeSucceeded' && e.nodeId === nodeId);
+          e.type === 'nodeSucceeded' && (e.instanceId ?? e.nodeId) === key);
 
     const pushFrom = (
       label: string,
       nodeId: string,
       filter?: (f: Manifest['files'][number]) => boolean,
     ): void => {
-      const succ = latestSuccess(nodeId);
+      // Pin to the source's current effective instance (falls back to nodeId for
+      // loop bodies / legacy with no instance).
+      const key = snap.nodes.get(nodeId)?.effectiveInstanceId ?? nodeId;
+      const succ = latestSuccess(key);
       if (!succ) return; // deps are gated upstream — defensive skip
       const upstreamOutputDir = join(dirname(succ.manifestPath), 'work');
       const manifest = JSON.parse(readFileSync(succ.manifestPath, 'utf-8')) as Manifest;
@@ -1246,6 +1256,7 @@ export async function runWorkflow(
         if (filter && !filter(f)) continue;
         inputs.push({
           from: label,
+          ...(succ.instanceId ? { instanceId: succ.instanceId } : {}),
           name: f.name,
           path: join(upstreamOutputDir, f.path),
           kind: f.kind,
