@@ -7,6 +7,7 @@ import {
   isPendingResponseCardOpen,
   markPendingResponseCardPatched,
   markPendingResponseCardPatchedIfCurrent,
+  mergePendingResponseState,
   shouldMarkPendingAsMentionedSend,
   shouldPatchPendingOnExplicitSend,
   shouldWithdrawPreviousPendingOnNewTurn,
@@ -136,5 +137,71 @@ describe('pending response state', () => {
     await Promise.all([first, second]);
     expect(events).toEqual(['first:start', 'first:end', 'second:start']);
     expect(queue.size()).toBe(0);
+  });
+});
+
+// mergePendingResponseState reconciles a worker's incoming Session save against
+// the daemon's freshly-persisted pending-card state. It is the race guard that
+// keeps a placeholder card (and therefore the 完成 emoji) from being lost or
+// double-opened when worker and daemon write the same session out of order.
+// Used by services/session-store.ts on every persist; previously untested.
+type PR = {
+  marker?: string;
+  pendingResponseCardId?: string;
+  pendingResponseCardState?: 'open' | 'patched';
+  lastPatchedResponseCardId?: string;
+};
+
+describe('mergePendingResponseState', () => {
+  it('returns incoming verbatim when there is no existing persisted record', () => {
+    const incoming: PR = { marker: 'in', pendingResponseCardId: 'om_x', pendingResponseCardState: 'open' };
+    expect(mergePendingResponseState(incoming, undefined)).toBe(incoming);
+  });
+
+  it('returns incoming when the existing record carries no pending-card fields', () => {
+    const incoming: PR = { marker: 'in', pendingResponseCardId: 'om_x', pendingResponseCardState: 'open' };
+    const existing: PR = { marker: 'old' };
+    expect(mergePendingResponseState(incoming, existing)).toBe(incoming);
+  });
+
+  it('lets a worker that opened a brand-new card win over stale persisted state', () => {
+    const incoming: PR = { pendingResponseCardId: 'om_new', pendingResponseCardState: 'open' };
+    const existing: PR = { pendingResponseCardState: 'patched', lastPatchedResponseCardId: 'om_old' };
+    expect(mergePendingResponseState(incoming, existing)).toBe(incoming);
+  });
+
+  it('does NOT re-open a card the persisted state already patched (incoming.open id === existing.lastPatched)', () => {
+    const incoming: PR = { pendingResponseCardId: 'om_dup', pendingResponseCardState: 'open' };
+    const existing: PR = { pendingResponseCardState: 'patched', lastPatchedResponseCardId: 'om_dup' };
+    const merged = mergePendingResponseState(incoming, existing);
+    expect(merged.pendingResponseCardId).toBeUndefined();
+    expect(merged.pendingResponseCardState).toBe('patched');
+    expect(merged.lastPatchedResponseCardId).toBe('om_dup');
+  });
+
+  it('accepts an incoming patch when the existing record has no newer open card', () => {
+    const incoming: PR = { pendingResponseCardState: 'patched', lastPatchedResponseCardId: 'om_a' };
+    const existing: PR = { pendingResponseCardState: 'patched', lastPatchedResponseCardId: 'om_a' };
+    expect(mergePendingResponseState(incoming, existing)).toBe(incoming);
+  });
+
+  it('protects a newer open card from being clobbered by an older finalizer marking patched', () => {
+    const incoming: PR = { pendingResponseCardState: 'patched', lastPatchedResponseCardId: 'om_a' };
+    const existing: PR = { pendingResponseCardId: 'om_b', pendingResponseCardState: 'open' };
+    const merged = mergePendingResponseState(incoming, existing);
+    expect(merged.pendingResponseCardId).toBe('om_b');
+    expect(merged.pendingResponseCardState).toBe('open');
+    expect(merged.lastPatchedResponseCardId).toBeUndefined();
+  });
+
+  it('preserves a persisted open card when the incoming save has no pending intent, keeping incoming\'s other fields', () => {
+    const incoming: PR = { marker: 'keep' };
+    const existing: PR = { pendingResponseCardId: 'om_b', pendingResponseCardState: 'open' };
+    const merged = mergePendingResponseState(incoming, existing);
+    expect(merged.marker).toBe('keep');
+    expect(merged.pendingResponseCardId).toBe('om_b');
+    expect(merged.pendingResponseCardState).toBe('open');
+    expect(merged).not.toBe(incoming);
+    expect(merged).not.toBe(existing);
   });
 });

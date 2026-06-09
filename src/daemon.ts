@@ -39,8 +39,9 @@ import { startTerminalProxy, type TerminalProxyHandle } from './core/terminal-pr
 import type { CliId } from './adapters/cli/types.js';
 import * as scheduler from './core/scheduler.js';
 import { scanProjects, scanMultipleProjects } from './services/project-scanner.js';
-import { buildQuotaExhaustedCard, buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
-import { createPendingResponseQueue, markPendingResponseCardPatched, syncPendingResponseState } from './core/pending-response.js';
+import { buildPendingResponseCard, buildQuotaExhaustedCard, buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
+import { createPendingResponseQueue, markPendingResponseCardPatched, shouldTreatPendingCardAsPatchedByMarker, startPendingResponseTurn, syncPendingResponseState } from './core/pending-response.js';
+import { readPendingResponsePatchMarker } from './services/pending-response-transaction-store.js';
 import { t as tr, botLocale, localeForBot } from './i18n/index.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
 import {
@@ -345,19 +346,38 @@ function readSessionFreshFromDisk(sessionId: string, larkAppId: string): import(
   return undefined;
 }
 
-async function postPendingResponseCard(ds: DaemonSession, replyToMessageId: string, prompt: string, sender?: { name?: string }, turnId?: string): Promise<void> {
-  // Card-off means no visible botmux cards at all. If a prior build left an
-  // open pending-response placeholder on this session, clear its state so a
-  // later `botmux send --mention...` cannot patch it to “final reply sent via
-  // new message”. Do not call any Lark send/update API here.
+export async function postPendingResponseCard(ds: DaemonSession, replyToMessageId: string, prompt: string, sender?: { name?: string }, turnId?: string): Promise<void> {
+  // Card-off path (streaming card disabled for this session): post a lightweight
+  // 「处理中」 placeholder. The final reply / `botmux send` patches this card in
+  // place — and that patch is also what lets the 完成 emoji land on the user's
+  // original message. When streaming cards are ON the streaming card itself is
+  // the placeholder, so this is a no-op for those sessions.
+  if (!streamingCardDisabledFor(ds)) return;
   await pendingResponseQueue.run(ds.session.sessionId, async () => {
     const fresh = readSessionFreshFromDisk(ds.session.sessionId, ds.larkAppId);
     syncPendingResponseState(ds, fresh);
     if (fresh) syncReplyTargetState(ds, fresh);
-    if (ds.pendingResponseCardId || ds.session.pendingResponseCardId) {
+    // Reconcile a PATCH that committed at Feishu but whose session save lost the
+    // race, so a stale prior card isn't left dangling as "open".
+    const marker = readPendingResponsePatchMarker(ds.session.sessionId);
+    if (shouldTreatPendingCardAsPatchedByMarker(ds.pendingResponseCardId, marker)) {
       markPendingResponseCardPatched(ds);
-      markPendingResponseCardPatched(ds.session);
+    }
+    syncPendingResponseState(ds.session, ds);
+    const card = buildPendingResponseCard(localeForBot(ds.larkAppId));
+    try {
+      // Route the placeholder to the same target the final reply will use: a
+      // topic-alias turn (chat-scope + matching turnId) lands in the topic
+      // thread; otherwise it's a plain chat message / thread-scope reply.
+      const target = resolveSessionReplyTarget(ds, turnId);
+      const messageId = target.mode === 'thread'
+        ? await replyMessage(ds.larkAppId, target.rootMessageId, card, 'interactive', true)
+        : await sendMessage(ds.larkAppId, target.chatId, card, 'interactive');
+      startPendingResponseTurn(ds, messageId);
+      startPendingResponseTurn(ds.session, messageId);
       sessionStore.updateSession(ds.session);
+    } catch (err) {
+      logger.warn(`[${tag(ds)}] failed to post pending response card: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 }
