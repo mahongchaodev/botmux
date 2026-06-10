@@ -426,6 +426,9 @@ describe('decideDashboardAuth — publicReadOnly mode', () => {
       '/api/roles/cli_app/oc_chat',
       '/api/bots',
       '/api/cli-options',
+      // Mints a token-bearing writable terminal URL — never public, even in
+      // publicReadOnly (the daemon IPC behind it is also loopback-HMAC gated).
+      '/api/sessions/sess-1/write-link',
       // A path that doesn't exist yet must also default to private.
       '/api/some-future-read',
     ]) {
