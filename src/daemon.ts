@@ -12,7 +12,7 @@ import { startMaintenance, stopMaintenance } from './core/maintenance.js';
 import { sendRestartReportIfPending } from './core/restart-report.js';
 import { statSync } from 'node:fs';
 import { getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
-import { chatHasAllowedUser, resolveGroupJoinPrompt } from './core/auto-start.js';
+import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
 import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
@@ -2382,16 +2382,26 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
   if (priorAnchorKey) groupJoinAnchorByChat.delete(chatLiveKey); // stale entry, will re-register below
   autoStartJoinInFlight.add(lockKey);
   try {
-    // D7 gate: an allowedUser must be a member of the chat.
-    let memberOpenIds: string[];
+    // D7 gate: an allowedUser must be a member of the chat. Alarm/oncall
+    // platforms (e.g. Nexus) create the chat, add bots first and the human
+    // members moments later — a one-shot membership snapshot here races
+    // against that and loses, so re-check with backoff before giving up
+    // (the in-flight lock above keeps duplicate bot.added events deduped
+    // while we wait).
+    let hasAllowedUser: boolean;
     try {
-      memberOpenIds = await listChatMemberOpenIds(larkAppId, chatId);
+      hasAllowedUser = await waitForAllowedUserInChat({
+        listMembers: () => listChatMemberOpenIds(larkAppId, chatId),
+        allowedUsers: bot.resolvedAllowedUsers,
+        onRetry: (attempt, delayMs) =>
+          logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 暂无 allowedUser 成员，${delayMs}ms 后重查（第 ${attempt} 次）`),
+      });
     } catch (err: any) {
       logger.warn(`[auto-start:入群] ${chatId.substring(0, 12)} 拉群成员失败：${err?.message ?? err}`);
       await warnGroupJoinScopeOnce(larkAppId, String(err?.message ?? err));
       return;
     }
-    if (!chatHasAllowedUser(memberOpenIds, bot.resolvedAllowedUsers)) {
+    if (!hasAllowedUser) {
       logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 群内无 allowedUser 成员，忽略`);
       return;
     }
