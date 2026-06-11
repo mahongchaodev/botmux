@@ -105,6 +105,14 @@ let consecutiveInWorkerRestarts = 0;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
+/** The effectiveResume flag used by the most recent spawnCli call. Written
+ *  immediately after the two-tier fallback check so late-attach timers
+ *  (hermes, cursor, etc.) can read THE SAME semantics the spawn used,
+ *  instead of re-deriving from lastInitConfig.resume (which never reflects
+ *  Tier-1/Tier-2 fresh demotion). Updated in spawnCli BEFORE any bridge
+ *  setup so even the tick that fires between spawnCli-start and the
+ *  adapter's hermesBridgeAttach reads the correct mode. */
+let lastSpawnEffectiveResume = false;
 let idleDetector: IdleDetector | null = null;
 let isTmuxMode = false;
 /** Adopt-bridge mode using TmuxPipeBackend: not a tmux attach client, all
@@ -1518,7 +1526,11 @@ function codexBridgeStartTimer(): void {
   codexBridgeTimer = setInterval(() => {
     try {
       if (structuredBridgeIsHermes()) {
-        if (!hermesBridgeBaselineDone) hermesBridgeAttach(lastInitConfig?.resume ? 'baseline-existing' : 'fresh-empty');
+        // Use lastSpawnEffectiveResume (written by spawnCli AFTER the
+        // two-tier fallback), NOT lastInitConfig.resume. Otherwise a
+        // Tier-1/Tier-2 demotion to fresh would still baseline the empty
+        // hermes store as "existing" and swallow the first turn.
+        if (!hermesBridgeBaselineDone) hermesBridgeAttach(lastSpawnEffectiveResume ? 'baseline-existing' : 'fresh-empty');
         hermesBridgeIngest();
         if (isPromptReady) emitReadyCodexTurns();
         return;
@@ -3468,6 +3480,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     (backend as TmuxBackend | PtyBackend | ZellijBackend).claudeJsonlPath =
       claudeJsonlPathForSession(bridgeWatchId, cfg.workingDir, claudeDataDir);
   }
+  // Publish the resolved resume semantics so any late-attach timer (hermes,
+  // cursor, …) driven by codexBridgeStartTimer sees the SAME mode the spawn
+  // used. Without this, Tier-1/Tier-2 fresh demotion would still use
+  // `lastInitConfig.resume` (= true) and baseline an empty store, swallowing
+  // the fresh session's first turn.
+  lastSpawnEffectiveResume = effectiveResume;
 
   const args = cliAdapter.buildArgs({
     sessionId: effectiveAdapterSessionId,
