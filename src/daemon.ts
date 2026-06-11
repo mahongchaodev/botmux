@@ -2751,7 +2751,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       // /term only hands out a writable link for an ALREADY-live session — it must
       // never pre-create one. Special-case it before the canOperate gate + the
       // pre-create block below (mirrors the new-topic route + /card). Its own
-      // owner gate (stricter than canOperate) is the sole authority; without this,
+      // canOperate gate (inside the handler) is the sole authority; without this,
       // /term in a thread with no existingDs would spawn a worker:null phantom
       // session and pollute the dashboard before replying not_ready/owner_only.
       if (cmd === '/term') {

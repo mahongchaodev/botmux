@@ -473,13 +473,14 @@ describe('opencode buildArgs', () => {
 describe('pi buildArgs', () => {
   const adapter = createPiAdapter('/usr/bin/pi');
 
-  it('launches Pi native TUI with session id and tools', () => {
+  it('launches Pi native TUI with session id, no --tools restriction (keeps MCP usable)', () => {
     const args = adapter.buildArgs({ sessionId: 'sess-pi', resume: false, initialPrompt: 'hello pi' });
     expect(adapter.resolvedBin).toBe('/usr/bin/pi');
     expect(args).toContain('--session-id');
     expect(args[args.indexOf('--session-id') + 1]).toBe('sess-pi');
-    expect(args).toContain('--tools');
-    expect(args[args.indexOf('--tools') + 1]).toBe('read,bash,edit,write,grep,find,ls');
+    // Pi must NOT receive a --tools allowlist: pinning the built-in tools shadows
+    // MCP tools. Let Pi use its default tool set so MCP servers stay usable.
+    expect(args).not.toContain('--tools');
     expect(args.at(-1)).toBe('hello pi');
     expect(adapter.passesInitialPromptViaArgs).toBe(true);
     expect(adapter.altScreen).toBe(true);
