@@ -1227,13 +1227,16 @@ async function processCommentEvent(
   if (!handlers.handleDocComment) return;
   const { fileToken, commentId } = parsed;
   if (!fileToken || !commentId) {
-    logger.debug(`[doc-comment] event missing fileToken/commentId; raw keys=${Object.keys(parsed).filter(k => (parsed as any)[k] !== undefined).join(',')}`);
+    logger.info(`[doc-comment] event dropped: missing fileToken/commentId (fileToken=${fileToken ?? '?'} commentId=${commentId ?? '?'}) — payload 字段路径可能与解析不符`);
     return;
   }
 
   // 1) 必须是已订阅的文档（per-文档订阅 → 主键命中才处理）
   const sub = getDocSubscription(config.session.dataDir, larkAppId, fileToken);
-  if (!sub) return;
+  if (!sub) {
+    logger.info(`[doc-comment] event dropped: file_token=${fileToken.slice(0, 12)} 不在订阅表（已订阅的可 /subscribe-lark-doc list 查；注意 wiki 链接会解析成底层 obj_token）`);
+    return;
+  }
 
   // 2) 拉评论 thread 取权威正文 / 作者 / @ 列表（事件 payload 不保证带全），
   //    同时用最新一条回复作为"触发回复"。
@@ -1691,6 +1694,24 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       }, 'message event');
     },
   });
+
+  // 诊断：包一层 invoke，记录长连接收到的**每一个**事件类型（含未注册的）。
+  // 排查云文档评论事件是否真送达 / 实际事件名用——comment 类一律连 payload 关键字段
+  // 一起打。日常其它事件只在 DEBUG 下打，避免刷屏。
+  const __origInvoke = (eventDispatcher as any).invoke.bind(eventDispatcher);
+  (eventDispatcher as any).invoke = (data: any) => {
+    try {
+      const et: string = data?.header?.event_type ?? data?.event_type ?? data?.type ?? 'unknown';
+      const isCommentish = typeof et === 'string' && et.includes('comment');
+      if (isCommentish) {
+        const ev = data?.event ?? data;
+        logger.info(`[ws-event] ${larkAppId} event_type=${et} file_token=${ev?.file_token ?? '?'} comment_id=${ev?.comment_id ?? '?'} notice=${ev?.notice_type ?? '?'} keys=${Object.keys(ev ?? {}).join(',')}`);
+      } else if (process.env.DEBUG) {
+        logger.info(`[ws-event] ${larkAppId} event_type=${et}`);
+      }
+    } catch { /* 诊断不阻断分发 */ }
+    return __origInvoke(data);
+  };
 
   // Start WSClient
   const wsClient = new Lark.WSClient({
