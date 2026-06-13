@@ -11,10 +11,10 @@
  *   - Antigravity history  (`antigravity`):          <home>/history.jsonl (flat submit log)
  *
  * All scans are daemon-side, pure filesystem (no PTY / subprocess), and run
- * only on an explicit `/adopt` — so we favour correctness + bounded I/O over
- * cleverness: take the most-recent files by mtime, read a bounded prefix of
- * each (session id / cwd / first prompt all live near the top), parse line by
- * line, stop early.
+ * only on an explicit `/adopt` — so we favour correctness over cleverness: take
+ * the most-recent files by mtime, then stream each line by line (NOT a bounded
+ * byte prefix, which truncates oversized records and hides an append-only log's
+ * fresh tail), stopping early once the needed metadata is in hand.
  */
 import { promises as fs, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
