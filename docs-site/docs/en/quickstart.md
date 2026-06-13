@@ -46,9 +46,31 @@ You can also **DM the bot** to start chatting directly, or use `botmux dashboard
 
 ## Not receiving messages? Self-check
 
-PersonalAgent has subscriptions pre-configured, so normally you don't need to touch anything. If the bot **receives no messages at all**:
+Most "no messages" cases are **local config or network issues**, not a botmux bug. botmux already wires up an AI agent — so **run a one-shot headless self-check with your CLI** and let it read the logs, check the config, and give you a verdict.
 
-- **Event subscriptions**: Open Platform → Events & callbacks → should subscribe to `im.message.receive_v1` + `card.action.trigger`, with the delivery method set to "Long connection (WebSocket)", and the daemon should be running.
-- **Bot capability**: Open Platform → App features → Bot should be enabled.
+First save the diagnostic task into a variable (single line, so you don't have to paste it repeatedly):
+
+```bash
+DIAG='botmux is not receiving messages in the Lark group. Diagnose read-only (do NOT change anything), run these in order and give the most likely cause + fix: botmux status (is the daemon running); botmux logs --lines 150 (look for WebSocket connection failures, token/auth errors, permission errors 401/403/411/400, CLI spawn failures); cat ~/.botmux/bots.json (check AppID/Secret/CLI config); judge whether the long-lived WebSocket is blocked by a corporate network/proxy/firewall. Conclude at the end.'
+```
+
+Pick one line for the CLI you have installed (all non-interactive; they print the verdict and exit):
+
+```bash
+claude -p "$DIAG" --allowedTools "Bash"   # Claude Code
+codex exec "$DIAG"                         # Codex
+gemini -p "$DIAG" --yolo                   # Gemini
+coco  -p "$DIAG" --yolo                    # Trae / CoCo (aliases trae-agent / ta)
+cursor-agent -p "$DIAG"                    # Cursor
+```
+
+> The trailing flags (`--allowedTools` / `--yolo`, etc.) just let the agent actually run commands and read logs — it's a read-only check. `botmux logs` can pinpoint almost any problem; it's the gold standard.
+
+Still stuck? Check manually (usually local-side):
+
+- **Daemon not running / config changed without restart** → `botmux status`, then `botmux restart`.
+- **Incomplete bot permissions / reusing a bot created from an old app** (most common) → see [Common Pitfalls](/en/pitfalls); recreate via the latest `botmux setup` QR flow.
+- **Event subscriptions / bot capability** (only needed for manually-created apps): in the Open Platform, subscribe to `im.message.receive_v1` + `card.action.trigger` (long-lived WebSocket), and enable App features → Bot.
+- **Network**: the long-lived WebSocket can't get out (corporate network / proxy / firewall) → the agent will see the connection errors in the logs.
 
 After confirming, run `botmux restart`. See [FAQ / Troubleshooting](/en/faq) for more.
