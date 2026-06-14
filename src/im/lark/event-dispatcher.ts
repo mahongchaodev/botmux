@@ -1188,21 +1188,31 @@ export async function decideRouting(
   return { scope, anchor };
 }
 
-/** 从评论事件 payload 里尽量挖出 { fileToken, fileType, commentId, replyId,
- *  noticeType, operatorOpenId }。飞书评论事件的字段路径在不同版本/命名下不完全
- *  一致，故多路径兜底，并 debug 打出原始 shape 方便真机定位。 */
+/** 从评论事件 payload 里挖出 { fileToken, fileType, commentId, replyId,
+ *  noticeType, isMentioned, operatorOpenId }。
+ *
+ *  真机实测 drive.notice.comment_add_v1 的 event 体形如
+ *  `{ comment_id, is_mentioned, notice_meta, reply_id }` —— **file_token 不在顶层，
+ *  藏在 notice_meta 里**（notice_meta 可能是对象或 JSON 字符串）。故这里展开
+ *  notice_meta 并多路径兜底；file_type 拿不到无妨（后续用订阅表里的）。 */
 function parseCommentEvent(data: any): {
   fileToken?: string; fileType?: string; commentId?: string; replyId?: string;
-  noticeType?: string; operatorOpenId?: string;
+  noticeType?: string; isMentioned?: boolean; operatorOpenId?: string; meta?: any;
 } {
-  const d = data ?? {};
+  const d = data?.event ?? data ?? {};
+  let meta = d.notice_meta ?? d.noticeMeta;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { /* 保留原字符串 */ } }
+  const m = (meta && typeof meta === 'object') ? meta : {};
+  const pick = (k: string) => d[k] ?? m[k] ?? m[k.replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase())];
   return {
-    fileToken: d.file_token ?? d.token ?? d.event?.file_token,
-    fileType: d.file_type ?? d.event?.file_type,
-    commentId: d.comment_id ?? d.event?.comment_id,
-    replyId: d.reply_id ?? d.event?.reply_id,
-    noticeType: d.notice_type ?? d.subscriber_type ?? d.event?.notice_type,
-    operatorOpenId: d.operator_id?.open_id ?? d.user_id?.open_id ?? d.event?.operator_id?.open_id,
+    fileToken: pick('file_token') ?? pick('token') ?? pick('obj_token'),
+    fileType: pick('file_type') ?? pick('obj_type'),
+    commentId: pick('comment_id'),
+    replyId: pick('reply_id'),
+    noticeType: pick('notice_type'),
+    isMentioned: d.is_mentioned === true || m.is_mentioned === true,
+    operatorOpenId: d.operator_id?.open_id ?? d.user_id?.open_id ?? m.operator_id?.open_id,
+    meta,
   };
 }
 
@@ -1250,10 +1260,15 @@ async function processCommentEvent(
   //    用 reply_id 集合 + 文本隐形哨兵双保险跳过自己的评论，防死循环。
   if (isBotAuthoredReply(trigger.replyId) || hasBotSentinel(trigger.text)) return;
 
-  // 4) 触发范围：mention-only 要求评论 @ 到本 bot
-  const botOpenId = getBot(larkAppId).botOpenId;
+  // 4) 触发范围：mention-only 要求评论 @ 到本 bot。优先用事件自带的 is_mentioned
+  //    （飞书已判好），拿不到再回退按评论正文里的 @person 列表比对 bot open_id。
   if (sub.commentTriggerMode === 'mention-only') {
-    if (!botOpenId || !trigger.mentions.includes(botOpenId)) return;
+    const botOpenId = getBot(larkAppId).botOpenId;
+    const mentioned = parsed.isMentioned === true || (!!botOpenId && trigger.mentions.includes(botOpenId));
+    if (!mentioned) {
+      logger.info(`[doc-comment] event dropped: mention-only 但未 @ 本 bot (comment=${commentId.slice(0, 12)})`);
+      return;
+    }
   }
 
   const text = trigger.text.trim();
@@ -1705,7 +1720,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       const isCommentish = typeof et === 'string' && et.includes('comment');
       if (isCommentish) {
         const ev = data?.event ?? data;
-        logger.info(`[ws-event] ${larkAppId} event_type=${et} file_token=${ev?.file_token ?? '?'} comment_id=${ev?.comment_id ?? '?'} notice=${ev?.notice_type ?? '?'} keys=${Object.keys(ev ?? {}).join(',')}`);
+        const p = parseCommentEvent(data);
+        logger.info(`[ws-event] ${larkAppId} event_type=${et} → parsed fileToken=${p.fileToken ?? '?'} commentId=${p.commentId ?? '?'} replyId=${p.replyId ?? '?'} isMentioned=${p.isMentioned} | notice_meta=${JSON.stringify(ev?.notice_meta ?? ev?.noticeMeta ?? null)}`);
       } else if (process.env.DEBUG) {
         logger.info(`[ws-event] ${larkAppId} event_type=${et}`);
       }
