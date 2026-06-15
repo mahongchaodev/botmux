@@ -1118,6 +1118,12 @@ export type ChatBotMember = {
 };
 
 export async function listChatBotMembers(larkAppId: string, chatId: string): Promise<ChatBotMember[]> {
+  // Single name-key normalizer used for EVERY cross-source name match below
+  // (cross-ref ⇄ bots-info ⇄ observed). Trim-only: strips incidental leading/
+  // trailing whitespace but stays case-sensitive, so two genuinely distinct bots
+  // whose names differ only in case ("Claude" vs "claude") never collide.
+  const norm = (s: string) => s.trim();
+
   // Read per-bot cross-reference: other bots' open_ids as seen by larkAppId's app.
   // This is populated from @mention data in Lark events (the only reliable source,
   // since Lark open_id is per-app scoped — a bot's self-reported open_id is
@@ -1128,7 +1134,7 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
     if (existsSync(crossRefPath)) {
       const data: Record<string, string> = JSON.parse(readFileSync(crossRefPath, 'utf-8'));
       for (const [name, openId] of Object.entries(data)) {
-        crossRef.set(name.toLowerCase(), openId);
+        crossRef.set(norm(name), openId);
       }
     }
   } catch { /* ignore */ }
@@ -1153,7 +1159,7 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
         if (res.code === 0 && res.data?.is_in_chat) {
           const info = appIdToInfo.get(appId);
           // Prefer cross-reference (correct per-app open_id), fall back to self-seen
-          const crossHit = info?.botName ? crossRef.get(info.botName.toLowerCase()) : undefined;
+          const crossHit = info?.botName ? crossRef.get(norm(info.botName)) : undefined;
           const openId = crossHit ?? info?.botOpenId ?? appId;
           const isSelf = appId === larkAppId;
           // Reliable @-mention only when the per-app open_id was learned via
@@ -1196,12 +1202,12 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
     const observedList = listObservedBots(config.session.dataDir, larkAppId, chatId);
     const latestObservedByName = new Map<string, (typeof observedList)[number]>();
     for (const o of observedList) {
-      const existing = latestObservedByName.get(o.name);
+      const k = norm(o.name);
+      const existing = latestObservedByName.get(k);
       if (!existing || o.lastSeenAt > existing.lastSeenAt) {
-        latestObservedByName.set(o.name, o);
+        latestObservedByName.set(k, o);
       }
     }
-    const norm = (s: string) => s.trim().toLowerCase();
     const seenOpenIds = new Set(configured.map(b => b.openId));
     const byName = new Map<string, number[]>();
     configured.forEach((b, i) => {
