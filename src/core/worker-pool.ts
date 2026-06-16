@@ -5,7 +5,7 @@
 import { fork, execSync, type ChildProcess } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { readFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 import { fileURLToPath } from 'node:url';
 import { ensureSkills, ensureAskSkill, ensurePluginSkills, removeGlobalBotmuxSkills } from '../skills/installer.js';
@@ -2589,6 +2589,106 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   // Adopted CLIs come with pre-botmux history — anchor it out of the ledger.
   anchorUsageForDaemonSession(ds);
   recordOwnershipForDaemonSession(ds);
+}
+
+// ─── Reap orphan workers ────────────────────────────────────────────────────
+
+/** A live process, reduced to what orphan detection needs. */
+export interface ProcSnapshot {
+  pid: number;
+  ppid: number;
+  /** Full command line (argv joined by spaces). */
+  cmd: string;
+}
+
+/**
+ * Enumerate live processes as {pid, ppid, cmd}. Linux reads `/proc` directly
+ * (the rest of the worker code already relies on /proc); other POSIX shells out
+ * to `ps`. Returns `[]` on Windows or on any failure — callers then reap
+ * nothing, so "can't tell" can never escalate into a wrong kill.
+ */
+export function listProcesses(): ProcSnapshot[] {
+  if (process.platform === 'win32') return [];
+  try {
+    if (process.platform === 'linux') {
+      const procs: ProcSnapshot[] = [];
+      for (const entry of readdirSync('/proc')) {
+        if (!/^\d+$/.test(entry)) continue;
+        const pid = Number(entry);
+        try {
+          // /proc/<pid>/stat = "<pid> (comm) <state> <ppid> ...". `comm` can
+          // contain spaces and ')', so read ppid from after the LAST ')'.
+          const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+          const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+          const ppid = Number(after[1]); // after = [state, ppid, ...]
+          const cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim();
+          if (Number.isFinite(ppid)) procs.push({ pid, ppid, cmd });
+        } catch { /* exited mid-scan / unreadable — skip */ }
+      }
+      return procs;
+    }
+    // macOS / other POSIX. `-ww` defeats command-column truncation.
+    const raw = execSync('ps -axww -o pid=,ppid=,command=', { encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024 });
+    const procs: ProcSnapshot[] = [];
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+      if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] });
+    }
+    return procs;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Reap worker processes orphaned by a previous daemon that died WITHOUT running
+ * its graceful shutdown — SIGKILL, OOM, or an uncaught crash. The shutdown()
+ * path in daemon.ts already SIGKILLs stragglers on SIGTERM, but a hard kill
+ * skips it entirely: the workers get re-parented to init (ppid==1), and because
+ * a fresh worker's pid overwrites `session.pid`, killStalePids can never reach
+ * them again. Each leaks ~0.5 GB and they pile up across restarts (observed:
+ * 22 orphans / 3.3 GB on a dev box; daemon.ts records a prior 841-orphan /
+ * ~65 GB incident).
+ *
+ * Identification is deliberately conservative — a process is reaped only if it
+ * BOTH:
+ *   1. has ppid==1 — its forking daemon is gone. A live daemon's workers are
+ *      parented to that daemon, so this never touches a running worker, even
+ *      under the one-daemon-per-bot layout or when several daemons start at
+ *      once; and
+ *   2. references THIS install's worker script in its command line — so we
+ *      never touch another botmux install or an unrelated `worker.js`.
+ *
+ * Process listing and the kill syscall are injectable for tests. Returns the
+ * number of orphans actually reaped.
+ */
+export function reapOrphanWorkers(opts: {
+  procs?: ProcSnapshot[];
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  workerPath?: string;
+} = {}): number {
+  if (process.platform === 'win32') return 0;
+  const procs = opts.procs ?? listProcesses();
+  const kill = opts.kill ?? ((pid, signal) => { process.kill(pid, signal); });
+  const workerPath = opts.workerPath ?? join(__dirname, '..', 'worker.js');
+
+  let reaped = 0;
+  for (const p of procs) {
+    if (p.ppid !== 1) continue;                 // parent still alive → not an orphan
+    if (!p.cmd.includes(workerPath)) continue;  // not OUR worker script
+    try {
+      // SIGKILL, not SIGTERM: an orphan can be wedged in a sync code path (the
+      // very failure mode that produced it) where SIGTERM is lost. It holds no
+      // active session and no IPC channel, so there is nothing to flush.
+      kill(p.pid, 'SIGKILL');
+      reaped++;
+      logger.info(`Reaped orphan worker pid=${p.pid} (forking daemon gone)`);
+    } catch { /* already exited, or another daemon won the race — fine */ }
+  }
+  if (reaped > 0) {
+    logger.warn(`Reaped ${reaped} orphan worker(s) leaked by a previous daemon that didn't shut down cleanly.`);
+  }
+  return reaped;
 }
 
 // ─── Kill stale PIDs ────────────────────────────────────────────────────────

@@ -51,6 +51,7 @@ import {
   setActiveSessionsRegistry,
   forkWorker,
   killWorker,
+  reapOrphanWorkers,
   scheduleCardPatch,
   setCurrentCliVersion,
   getCurrentCliVersion,
@@ -3721,6 +3722,13 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       },
     }, normalizeBrand(cfg.brand));
   }
+
+  // Reap workers orphaned by a previous daemon that was hard-killed (SIGKILL /
+  // OOM / crash) and so skipped graceful shutdown — they're re-parented to init
+  // (ppid==1) and untracked by any session.pid, so killStalePids can't reach
+  // them. Without this they leak ~0.5 GB each and accumulate across restarts.
+  // See reapOrphanWorkers() in worker-pool.ts.
+  reapOrphanWorkers();
 
   // Restore active sessions from previous run
   await restoreActiveSessions(activeSessions);
