@@ -172,6 +172,12 @@ export interface CliAdapter {
   /** Completion marker regex (beyond generic quiescence). undefined = quiescence only. */
   readonly completionPattern?: RegExp;
 
+  /** Busy marker regex — matches when the CLI is explicitly rendering a
+   *  still-running state. Used for re-attached persistent sessions where there
+   *  may be no new PTY output: if the current screen does NOT match this marker,
+   *  the worker may safely let quiescence mark the session idle. */
+  readonly busyPattern?: RegExp;
+
   /** Ready marker regex — matches when the CLI's input prompt is rendered and
    *  functional.  When set, the idle detector suppresses quiescence-based idle
    *  until this pattern appears in the PTY output.  Checked every cycle (reset
@@ -209,6 +215,11 @@ export interface CliAdapter {
    *  assistant_final). CodexBridgeQueue's HOL-block-drop keeps attribution
    *  correct for both shapes. */
   readonly supportsTypeAhead?: boolean;
+
+  /** When true, worker may squash additional queued Lark messages into the
+   *  pending tail instead of preserving one botmux turn per queued message.
+   *  Keep this opt-in: most adapters rely on distinct turnId / card routing. */
+  readonly mergeQueuedInput?: boolean;
 
   /** Whether CLI uses alternate screen buffer */
   readonly altScreen: boolean;

@@ -131,6 +131,8 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       const baseArgs = [
         ...(!disableCliBypass ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
         '--no-alt-screen',
+        '-c',
+        `shell_environment_policy.set.BOTMUX_SESSION_ID=${JSON.stringify(sessionId)}`,
       ];
       if (model && model.trim()) {
         // Codex 接受 `--model <id>` / `-m <id>`，写全名最稳，错的会在 codex 自己启动时报。
@@ -140,11 +142,13 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       const freshArgs = workingDir
         ? [...baseArgs, '-C', workingDir]
         : baseArgs;
-      if (!resume) return freshArgs;
-
-      const codexSessionId = resumeSessionId ?? latestCodexSessionForBotmuxSession(sessionId);
-      if (!codexSessionId) return freshArgs;
-      return ['resume', ...baseArgs, codexSessionId];
+      const codexSessionId = resume
+        ? resumeSessionId ?? latestCodexSessionForBotmuxSession(sessionId)
+        : undefined;
+      const codexArgs = codexSessionId
+        ? ['resume', ...baseArgs, codexSessionId]
+        : freshArgs;
+      return codexArgs;
     },
 
     buildResumeCommand({ sessionId, cliSessionId }) {

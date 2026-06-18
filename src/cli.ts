@@ -2613,6 +2613,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
 定时任务（可在 CLI 会话内自动推断 chat）:
   schedule list                        列出所有任务
   schedule add <schedule> <prompt>     添加任务（ex: "30m" / "every 2h" / "每日9:00" / "0 9 * * *"）
+       --new-topic                     每次触发在同群开一个新话题、起独立会话（不续旧话题）
   schedule remove <id>                 删除任务
   schedule pause|resume <id>           暂停/恢复
   schedule run <id>                    标记立即执行
@@ -2792,9 +2793,9 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
   }
 
   if (sub === 'add') {
-    const [rawSchedule, ...promptParts] = positionals(rest);
+    const [rawSchedule, ...promptParts] = positionals(rest, ['--new-topic']);
     if (!rawSchedule) {
-      console.error('用法: botmux schedule add <schedule> <prompt> [--name NAME] [--chat-id CHAT] [--root-msg-id ROOT] [--lark-app-id APP] [--workdir DIR]');
+      console.error('用法: botmux schedule add <schedule> <prompt> [--name NAME] [--chat-id CHAT] [--root-msg-id ROOT] [--lark-app-id APP] [--workdir DIR] [--new-topic]');
       process.exit(1);
     }
     // prompt may come from positional or --prompt flag
@@ -2810,7 +2811,10 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     const larkAppId = argValue(rest, '--lark-app-id') ?? cur?.larkAppId;
     const workingDir = argValue(rest, '--workdir') ?? cur?.workingDir ?? process.cwd();
     const name = argValue(rest, '--name') ?? (promptArg.length > 20 ? promptArg.slice(0, 20) + '…' : promptArg);
-    const deliver = (argValue(rest, '--deliver') as 'origin' | 'local' | undefined) ?? 'origin';
+    // --new-topic: every fire opens a brand-new topic in a fresh session.
+    const deliver: 'origin' | 'local' | 'new-topic' = rest.includes('--new-topic')
+      ? 'new-topic'
+      : ((argValue(rest, '--deliver') as 'origin' | 'local' | 'new-topic' | undefined) ?? 'origin');
 
     if (!chatId) {
       console.error('无法推断 chat-id。请加上 --chat-id <CHAT_ID>，或从 Lark 话题内的 CLI 会话中运行本命令。');
@@ -2845,7 +2849,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     console.log(`   规则: ${parsed.display}`);
     console.log(`   下次执行: ${next}`);
     console.log(`   工作目录: ${workingDir}`);
-    console.log(`   话题: ${rootMessageId ?? '(将新开)'}`);
+    console.log(`   话题: ${deliver === 'new-topic' ? '(每次新开话题，独立会话)' : rootMessageId ?? '(将新开)'}`);
     return;
   }
 
@@ -3088,9 +3092,9 @@ function argValues(args: string[], ...flags: string[]): string[] {
 
 // Card v2 body builder helpers — extracted to im/lark/md-card.ts so the
 // daemon's bridge fallback path can produce identical cards. cmdSend
-// keeps using `buildCardBodyElements` from there.
+// keeps using `buildImageCardElements` from there.
 import { buildMentionedPendingResponseCard } from './im/lark/card-builder.js';
-import { buildCardBodyElements, brandFooterSegment } from './im/lark/md-card.js';
+import { buildImageCardElements, brandFooterSegment } from './im/lark/md-card.js';
 import { COMPLETED_REACTION_EMOJI_TYPE, claimPendingResponseCard, isPendingResponseCardOpen, markPendingResponseCardPatchedIfCurrent, mergePendingResponseState, shouldMarkPendingAsMentionedSend, shouldPatchPendingOnExplicitSend } from './core/pending-response.js';
 import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
@@ -3745,26 +3749,11 @@ async function cmdSend(rest: string[]): Promise<void> {
       // body bottom — they're consolidated onto the footer `发送给：` line below
       // (human addressee first, then explicit targets). See orderedFooterRecipients.
 
-      // Inline images into the markdown via ![](img_key). If caller used an
-      // `![alt](img:N)` placeholder, substitute by 0-based index; any remaining
-      // images get appended at the end so they flow with the text.
-      let mdWithImages = md;
-      const usedImgIdx = new Set<number>();
-      if (imageKeys.length > 0) {
-        mdWithImages = mdWithImages.replace(/!\[([^\]]*)\]\(img:(\d+)\)/g, (full, alt: string, idxStr: string) => {
-          const idx = Number(idxStr);
-          if (idx < 0 || idx >= imageKeys.length) return full;
-          usedImgIdx.add(idx);
-          return `![${alt}](${imageKeys[idx]})`;
-        });
-        const trailing = imageKeys
-          .map((k, i) => (usedImgIdx.has(i) ? '' : `![](${k})`))
-          .filter(Boolean)
-          .join('\n\n');
-        if (trailing) mdWithImages = mdWithImages ? `${mdWithImages}\n\n${trailing}` : trailing;
-      }
-
-      const elements = mdWithImages ? buildCardBodyElements(mdWithImages) : [];
+      // Resolve image placeholders into card elements. A single-index
+      // `![alt](img:N)` inlines a full-width image; a grouped `![](img:0,1[,2…])`
+      // renders one row of images side by side (2/row, 3/row …); any image not
+      // referenced by a placeholder is appended full-width at the end.
+      const elements = (md || imageKeys.length > 0) ? buildImageCardElements(md, imageKeys) : [];
 
       // Footer: de-emphasized markdown (v2 dropped the `note` tag). Use small
       // text size + grey font tag so it reads like a footnote below the hr.

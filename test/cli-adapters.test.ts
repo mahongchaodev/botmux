@@ -24,6 +24,7 @@ import { createAidenAdapter } from '../src/adapters/cli/aiden.js';
 import { createCocoAdapter } from '../src/adapters/cli/coco.js';
 import { createCodexAdapter } from '../src/adapters/cli/codex.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
+import { createCursorAdapter } from '../src/adapters/cli/cursor.js';
 import { createGeminiAdapter } from '../src/adapters/cli/gemini.js';
 import { createOpenCodeAdapter } from '../src/adapters/cli/opencode.js';
 import { createAntigravityAdapter } from '../src/adapters/cli/antigravity.js';
@@ -72,11 +73,12 @@ describe('createCliAdapterSync factory', () => {
 // ---------------------------------------------------------------------------
 
 describe('lazy binary resolution', () => {
-  // Adapters whose resolvedBin is the resolved CLI (codex-app/mira use
-  // process.execPath and never probe, so they're excluded).
-  const PROBING_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'traex', 'copilot'];
+  // Direct CLI adapters resolve their actual executable lazily. Runner-backed
+  // adapters (codex-app/mira) intentionally use process.execPath and are covered
+  // by their own buildArgs tests below.
+  const DIRECT_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'traex', 'copilot'];
 
-  it.each(PROBING_IDS)('"%s": construction does not probe; first resolvedBin read does', async (id) => {
+  it.each(DIRECT_CLI_IDS)('"%s": construction does not probe; first resolvedBin read does', async (id) => {
     const { spawnSync } = await import('node:child_process');
     const probe = vi.mocked(spawnSync);
     probe.mockClear();
@@ -96,6 +98,19 @@ describe('lazy binary resolution', () => {
     void adapter.resolvedBin; // resolve + cache
     probe.mockClear();
     void adapter.resolvedBin; // cached → no probe
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('codex buildArgs reuses the lazily resolved CLI path', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const probe = vi.mocked(spawnSync);
+    probe.mockClear();
+    const adapter = createCliAdapterSync('codex');
+    expect(probe).not.toHaveBeenCalled();
+    void adapter.resolvedBin;
+    expect(probe).toHaveBeenCalled();
+    probe.mockClear();
+    adapter.buildArgs({ sessionId: 's', resume: false });
     expect(probe).not.toHaveBeenCalled();
   });
 
@@ -252,7 +267,32 @@ describe('coco buildArgs', () => {
 describe('codex buildArgs', () => {
   const adapter = createCodexAdapter('/usr/bin/codex');
 
-  it('always returns fixed args regardless of session/resume', () => {
+  it('spawns the Codex binary directly', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-4', resume: false });
+    expect(adapter.resolvedBin).toBe('/usr/bin/codex');
+    expect(args[0]).toBe('--dangerously-bypass-approvals-and-sandbox');
+    expect(args).not.toContain('--codex-bin');
+  });
+
+  it('injects botmux session id through Codex shell environment policy', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-4', resume: false });
+    const idx = args.indexOf('-c');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('shell_environment_policy.set.BOTMUX_SESSION_ID="sess-4"');
+  });
+
+  it('does not inject a stale turn id into Codex shell environment policy', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-4', resume: false });
+    expect(args.join('\n')).not.toContain('BOTMUX_TURN_ID');
+  });
+
+  it('keeps Codex home untouched', () => {
+    expect(adapter.buildSpawnEnv).toBeUndefined();
+    expect(adapter.authPaths).toEqual(['~/.codex/auth.json']);
+    expect(adapter.skillsDir).toBe('~/.codex/skills');
+  });
+
+  it('passes fixed Codex args regardless of session/resume when no resume target is known', () => {
     const args1 = adapter.buildArgs({ sessionId: 'sess-4', resume: false });
     const args2 = adapter.buildArgs({ sessionId: 'sess-4', resume: true });
     expect(args1).toEqual(args2);
@@ -260,9 +300,10 @@ describe('codex buildArgs', () => {
     expect(args1).toContain('--no-alt-screen');
   });
 
-  it('does not include session id', () => {
-    const args = adapter.buildArgs({ sessionId: 'sess-4', resume: false });
-    expect(args).not.toContain('sess-4');
+  it('TOML-quotes session id values for Codex config override', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess with "quote"', resume: false });
+    const idx = args.indexOf('-c');
+    expect(args[idx + 1]).toBe('shell_environment_policy.set.BOTMUX_SESSION_ID="sess with \\"quote\\""');
   });
 
   it('passes the effective working directory as Codex agent root', () => {
@@ -270,6 +311,8 @@ describe('codex buildArgs', () => {
     expect(args).toEqual([
       '--dangerously-bypass-approvals-and-sandbox',
       '--no-alt-screen',
+      '-c',
+      'shell_environment_policy.set.BOTMUX_SESSION_ID="sess-4"',
       '-C',
       '/repo/root',
     ]);
@@ -277,7 +320,13 @@ describe('codex buildArgs', () => {
 
   it('omits approval/sandbox bypass flag when disableCliBypass is true', () => {
     const args = adapter.buildArgs({ sessionId: 'sess-4', resume: false, workingDir: '/repo/root', disableCliBypass: true });
-    expect(args).toEqual(['--no-alt-screen', '-C', '/repo/root']);
+    expect(args).toEqual([
+      '--no-alt-screen',
+      '-c',
+      'shell_environment_policy.set.BOTMUX_SESSION_ID="sess-4"',
+      '-C',
+      '/repo/root',
+    ]);
   });
 
   it('passes configured model with --model', () => {
@@ -390,6 +439,38 @@ describe('copilot buildArgs', () => {
   it('surfaces curated model choices for setup', () => {
     expect(adapter.modelChoices).toContain('claude-sonnet-4');
     expect(adapter.modelChoices).toContain('gpt-5');
+  });
+});
+
+describe('cursor buildArgs', () => {
+  const adapter = createCursorAdapter('/usr/bin/cursor-agent');
+
+  it('fresh session passes force/model flags without resume flags', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cursor', resume: false, model: 'gpt-5' });
+    expect(args).toContain('--force');
+    expect(args).toContain('--model');
+    expect(args).toContain('gpt-5');
+    expect(args).not.toContain('--resume');
+    expect(args).not.toContain('--continue');
+  });
+
+  it('resume with persisted Cursor chatId passes --resume <chatId>', () => {
+    const chatId = 'c8c78608-0eef-4930-8007-c41ba71ba05d';
+    const args = adapter.buildArgs({
+      sessionId: 'sess-cursor',
+      resume: true,
+      resumeSessionId: chatId,
+    });
+    expect(args).toContain('--resume');
+    const idx = args.indexOf('--resume');
+    expect(args[idx + 1]).toBe(chatId);
+    expect(args).not.toContain('--continue');
+  });
+
+  it('resume without a persisted chatId falls back to --continue', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cursor', resume: true });
+    expect(args).toContain('--continue');
+    expect(args).not.toContain('--resume');
   });
 });
 
