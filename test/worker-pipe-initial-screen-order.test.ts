@@ -37,4 +37,17 @@ describe('worker pipe initial screen ordering', () => {
     expect(helper).toContain('if (backend !== be || !awaitingFirstPrompt || isPromptReady) return;');
     expect(helper).not.toContain('pendingMessages.length > 0');
   });
+
+  it('checks for an existing tmux session before falling back to pty', () => {
+    const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
+    const guardStart = source.indexOf('let effectiveBackend = cfg.backendType;');
+    const guardEnd = source.indexOf("if (effectiveBackend === 'herdr'", guardStart);
+    const guard = source.slice(guardStart, guardEnd);
+
+    expect(guardStart).toBeGreaterThan(-1);
+    expect(guardEnd).toBeGreaterThan(guardStart);
+    expect(guard).toContain('const hasExistingSession = TmuxBackend.hasSession(existingSessionName);');
+    expect(guard).toContain('!hasExistingSession && !TmuxBackend.isAvailable()');
+    expect(guard.indexOf('TmuxBackend.hasSession')).toBeLessThan(guard.indexOf('TmuxBackend.isAvailable'));
+  });
 });

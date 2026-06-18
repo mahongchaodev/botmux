@@ -3571,13 +3571,18 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   cliAdapter = createCliAdapterSync(cfg.cliId as any, cfg.cliPathOverride);
   // backendType=tmux trust-but-verify: an explicit per-bot config (or
   // BACKEND_TYPE=tmux env override) bypasses config.ts's auto-detect, so
-  // the worker re-probes here. If tmux can't start a server we silently
-  // fall back to PTY rather than letting attach-session / new-session spam
-  // the daemon error log every poll cycle.
+  // the worker re-probes here. Existing botmux tmux sessions are more
+  // authoritative than the disposable "can we create a new server?" probe:
+  // abandoning one after a transient probe failure would spawn a duplicate CLI
+  // under raw PTY and make later submits invisible to the real Codex history.
   let effectiveBackend = cfg.backendType;
-  if (effectiveBackend === 'tmux' && !TmuxBackend.isAvailable()) {
-    log('tmux backend requested but functional probe failed — falling back to PTY backend');
-    effectiveBackend = 'pty';
+  if (effectiveBackend === 'tmux') {
+    const existingSessionName = TmuxBackend.sessionName(cfg.sessionId);
+    const hasExistingSession = TmuxBackend.hasSession(existingSessionName);
+    if (!hasExistingSession && !TmuxBackend.isAvailable()) {
+      log('tmux backend requested but functional probe failed and no existing session is available — falling back to PTY backend');
+      effectiveBackend = 'pty';
+    }
   }
   if (effectiveBackend === 'herdr' && !HerdrBackend.isAvailable()) {
     log('herdr backend requested but probe failed — falling back to PTY backend');
