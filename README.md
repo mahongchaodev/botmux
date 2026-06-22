@@ -191,6 +191,7 @@ CLI 进入 botmux 会话时自动获得 `~/.botmux/bin` 在 PATH 中，以及一
 - 一键定位回飞书话题 / 跳 Web 终端 / 多选批量关闭会话
 - 拉新群、自动转让群主、@ 提醒
 - 解散群聊、bot 退群（关联会话自动清理）
+- **会话洞察**（owner-only，只读）：解析各会话 transcript，看动作 span / 工作时序 / 上下文曲线 / 失败聚合 + 诊断建议；聊天里发 `/insight` 可取当前会话摘要卡
 - **Workflows 管控面**：
   - Run List 5s 轮询；Run Detail 看 summary / dangling 红区 / node-activity 表 / event timeline / **并发执行 timeline**（attempt 级时序），到 terminal 自动停轮询
   - **Dashboard 内可直接 cancel run**、批准/拒绝 humanGate（approve/reject + 评论）

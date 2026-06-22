@@ -306,6 +306,7 @@ Gemini / OpenCode / Antigravity / GitHub Copilot), with no MCP protocol support 
 - One-click locate back to the Feishu thread / open Web Terminal / multi-select batch close
 - Create a new group with auto owner-transfer + @-mention notification
 - Disband or leave a chat (associated sessions auto-closed)
+- **Session Insights** (owner-only, read-only): parse each session's transcript to view action spans / work timeline / context curve / failure aggregates + diagnostic suggestions; send `/insight` in chat for the current session's summary card
 - **Workflows console**:
   - Run List (5 s poll) + Run Detail with summary, dangling-work red panel, node/activity table, event timeline, and a **parallel-execution timeline** (attempt-level), auto-stopping polling once the run reaches a terminal state
   - **Cancel a run directly from the dashboard**; approve / reject `humanGate` with reviewer comments
