@@ -2866,7 +2866,7 @@ function readStdinUtf8(): string {
   // a TTY as "no stdin input" so the caller's empty-content guard surfaces a
   // real error instead of an indefinite hang.
   if (process.stdin.isTTY) return '';
-  try { return readFileSync(0, 'utf-8'); } catch { return ''; }
+  try { return decodeStdinBytes(readFileSync(0)); } catch { return ''; }
 }
 
 function currentWhiteboardContext(args: string[]): { session?: SessionData; larkAppId?: string; chatId?: string; workingDir?: string; sessionId?: string } {
@@ -3418,9 +3418,33 @@ function readStdin(): Promise<string> {
     if (process.stdin.isTTY) { resolve(''); return; }
     const chunks: Buffer[] = [];
     process.stdin.on('data', (c) => chunks.push(c));
-    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    process.stdin.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      resolve(decodeStdinBytes(raw));
+    });
     process.stdin.on('error', () => resolve(''));
   });
+}
+
+/**
+ * Decode raw stdin bytes with platform-aware encoding detection.
+ *
+ * On Windows, PowerShell 5.1 converts UTF-16LE to the active code page
+ * (e.g. CP936/GBK on Chinese systems) when piping to native executables.
+ * Node.js reading those bytes as UTF-8 produces mojibake and truncation
+ * after newlines. We detect this by trying GBK first and checking for CJK
+ * characters — if present, the pipe used a non-UTF-8 code page.
+ */
+function decodeStdinBytes(raw: Buffer): string {
+  if (process.platform !== 'win32') return raw.toString('utf-8');
+  const utf8 = raw.toString('utf-8');
+  try {
+    const gbk = new TextDecoder('gbk', { fatal: false }).decode(raw);
+    const hasCJK = /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/.test(gbk);
+    return hasCJK ? gbk : utf8;
+  } catch {
+    return utf8;
+  }
 }
 
 /** Collect all values for a repeatable flag: --flag v1 --flag v2 */
