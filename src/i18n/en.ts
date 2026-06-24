@@ -433,6 +433,7 @@ export const messages: Record<string, string> = {
   'help.card': '/card       - Manually post the streaming card for this session (summons it even when streaming is off, and resumes live updates; with private-card mode on, sends a static snapshot visible only to authorized users instead)',
   'help.term': '/term       - Get the operable (write-enabled) terminal link for this session, delivered privately to the owner (visible-to-you in-chat, falling back to DM in topic/p2p — never exposed in the group)',
   'help.subscribe_doc': '/subscribe-lark-doc <doc link|list|off> - Subscribe a Feishu doc: its comments feed into this session, my replies go back into the comment (needs /login first)',
+  'help.summary': '@bot /summary - Read the current topic or configured regular-group history range and generate a summary (default: latest 50 messages / 24 hours)',
   'help.heading_passthrough': '🔀 Passthrough to {cliName} (forwarded verbatim to its built-in slash commands):',
   'help.heading_schedule': '⏰ Scheduled tasks:',
   'help.schedule_create': '/schedule daily 17:50 summarize AI news  - create a scheduled task (natural language)',

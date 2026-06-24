@@ -142,6 +142,7 @@
 - `match.type`: `keyword` 或 `regex`；非法正则会被丢弃并写日志，不会导致 daemon 崩溃。
 - `history.topic.mode`: 当前仅支持 `current-thread`，读取当前话题/thread。
 - `history.regularGroup.mode`: 当前支持 `recent-messages`。`limit` 表示最近 N 条，`sinceHours` 表示最近 N 小时；任一参数为 `0` 表示该维度不限。未配置 `limit` 时默认 50。
+- 显式命令：群聊中 `@机器人 /summary` 会按 dashboard 默认总结配置的 `limit` / `sinceHours` 读取历史并总结；即使未开启关键词触发也可用。未配置时默认最近 50 条 / 最近 24 小时。
 
 ## 语音
 

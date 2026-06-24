@@ -2587,6 +2587,127 @@ describe('im.message.receive_v1 — content triggers', () => {
     expect(mockListThreadMessages).not.toHaveBeenCalled();
   });
 
+  it('routes @bot /summary without content trigger config using default 50 messages and 24 hours', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      contentTriggers: undefined,
+    });
+    const triggerMs = 100 * 60 * 60_000;
+    mockListChatMessages.mockResolvedValue([
+      {
+        message_id: 'old',
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: '二十五小时前的旧消息' }) },
+        sender: { id: 'ou_old', sender_type: 'user' },
+        create_time: String(triggerMs - 25 * 60 * 60_000),
+      },
+      {
+        message_id: 'fresh',
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: '一小时前的新消息' }) },
+        sender: { id: 'ou_fresh', sender_type: 'user' },
+        create_time: String(triggerMs - 60 * 60_000),
+      },
+    ]);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@_bot_a /summary' }),
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+      messageId: 'msg-summary-command',
+      chatId: 'chat-summary-command',
+      chatType: 'group',
+    });
+    (event.message as any).create_time = String(triggerMs);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockListChatMessages).toHaveBeenCalledWith(MY_APP_ID, 'chat-summary-command', 50);
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-summary-command',
+      contentTrigger: { name: 'summary-command', chatKind: 'regularGroup' },
+      promptOverride: expect.stringContaining('请根据当前会话历史生成总结。'),
+    }));
+    const ctx = handlers.handleNewTopic.mock.calls[0][1] as any;
+    expect(ctx.promptOverride).toContain('一小时前的新消息');
+    expect(ctx.promptOverride).not.toContain('二十五小时前的旧消息');
+  });
+
+  it('uses configured dashboard summary range for @bot /summary even when keyword trigger is disabled', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      contentTriggers: [{
+        name: 'dashboard-default-summary-trigger',
+        enabled: false,
+        scope: 'both',
+        match: { type: 'keyword', pattern: '总结', caseSensitive: false },
+        history: {
+          topic: { mode: 'current-thread' },
+          regularGroup: { mode: 'recent-messages', limit: 0, sinceHours: 0 },
+        },
+        action: { type: 'start-or-wake-session', prompt: '请根据当前会话历史生成总结。' },
+      }],
+    });
+    const triggerMs = 100 * 60 * 60_000;
+    mockListChatMessages.mockResolvedValue([
+      {
+        message_id: 'old',
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: '很久以前的消息' }) },
+        sender: { id: 'ou_old', sender_type: 'user' },
+        create_time: String(triggerMs - 200 * 60 * 60_000),
+      },
+      {
+        message_id: 'fresh',
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: '最近消息' }) },
+        sender: { id: 'ou_fresh', sender_type: 'user' },
+        create_time: String(triggerMs - 60 * 60_000),
+      },
+    ]);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@_bot_a /summary' }),
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+      messageId: 'msg-summary-command-configured',
+      chatId: 'chat-summary-command',
+      chatType: 'group',
+    });
+    (event.message as any).create_time = String(triggerMs);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockListChatMessages).toHaveBeenCalledWith(MY_APP_ID, 'chat-summary-command', 0);
+    const ctx = handlers.handleNewTopic.mock.calls[0][1] as any;
+    expect(ctx.promptOverride).toContain('很久以前的消息');
+    expect(ctx.promptOverride).toContain('最近消息');
+  });
+
+  it('keeps non-@ /summary silent', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      contentTriggers: undefined,
+    });
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 1 });
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '/summary' }),
+      messageId: 'msg-summary-no-mention',
+      chatId: 'chat-summary-no-mention',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(mockListChatMessages).not.toHaveBeenCalled();
+    expect(mockListThreadMessages).not.toHaveBeenCalled();
+  });
+
   it('routes a matching regular group message without @ and reads configured full group history', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],

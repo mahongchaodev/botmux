@@ -30,6 +30,7 @@ import { chatQuotaKey, globalQuotaKey } from '../../services/grant-store.js';
 import { ensureDefaultOncallBound } from '../../services/oncall-store.js';
 import { resolveRegularGroupMode, resolveGroupMentionMode } from '../../services/chat-reply-mode-store.js';
 import { buildContentTriggerPrompt, findMatchingContentTrigger, type ContentTriggerChatKind, type ContentTriggerRuntimeContext, type MatchedContentTrigger } from './content-trigger.js';
+import { buildDashboardSummaryTrigger, summaryTriggerFromContentTriggers } from '../../services/content-trigger-preset-store.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -1296,6 +1297,38 @@ async function resolveContentTriggerMatch(input: {
   return findMatchingContentTrigger(triggers, text, chatKind);
 }
 
+const SUMMARY_COMMAND_RE = /^\/summary(?:\s|$)/i;
+
+function summaryCommandText(message: any): string | undefined {
+  const text = extractMessageTextForRouting(message);
+  if (!text) return undefined;
+  const stripped = stripLeadingMentions(text.trim(), message?.mentions ?? []).trim();
+  return SUMMARY_COMMAND_RE.test(stripped) ? stripped : undefined;
+}
+
+async function resolveSummaryCommandMatch(input: {
+  larkAppId: string;
+  chatId: string;
+  chatType: 'group' | 'p2p';
+  routingSource: RoutingSource;
+  message: any;
+  senderOpenId: string | undefined;
+}): Promise<MatchedContentTrigger | undefined> {
+  if (input.chatType !== 'group') return undefined;
+  if (!isBotMentioned(input.larkAppId, input.message, input.senderOpenId)) return undefined;
+  const triggerText = summaryCommandText(input.message);
+  if (!triggerText) return undefined;
+  const chatKind = await classifyContentTriggerChatKind(input);
+  if (!chatKind) return undefined;
+  const prefs = summaryTriggerFromContentTriggers(getBot(input.larkAppId).config.contentTriggers);
+  const trigger = {
+    ...buildDashboardSummaryTrigger({ ...prefs, enabled: true }),
+    name: 'summary-command',
+    match: { type: 'keyword' as const, pattern: '/summary', caseSensitive: false },
+  };
+  return { trigger, chatKind, triggerText };
+}
+
 /** 从评论事件 payload 里挖出 { fileToken, fileType, commentId, replyId,
  *  noticeType, isMentioned, operatorOpenId }。
  *
@@ -1754,7 +1787,16 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           routingSource,
           message,
         });
+        const summaryCommandMatch = await resolveSummaryCommandMatch({
+          larkAppId,
+          chatId,
+          chatType,
+          routingSource,
+          message,
+          senderOpenId,
+        });
         const contentTriggered = !!contentTriggerMatch && isAllowed;
+        const summaryCommandTriggered = !!summaryCommandMatch && isAllowed;
 
         // Permission gating — same shape as before, just keyed on
         // `ownsSession` (anchor-aware) instead of "rootId presence":
@@ -1823,13 +1865,18 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           return;
         }
 
-        const promptOverride = contentTriggered && contentTriggerMatch
-          ? await buildContentTriggerPrompt({ larkAppId, chatId, message, match: contentTriggerMatch })
+        const promptMatch = summaryCommandTriggered && summaryCommandMatch
+          ? summaryCommandMatch
+          : contentTriggered && contentTriggerMatch
+            ? contentTriggerMatch
+            : undefined;
+        const promptOverride = promptMatch
+          ? await buildContentTriggerPrompt({ larkAppId, chatId, message, match: promptMatch })
           : undefined;
-        if (promptOverride && contentTriggerMatch) {
+        if (promptOverride && promptMatch) {
           logger.info(
-            `[content-trigger] "${contentTriggerMatch.trigger.name}" matched msg=${messageId.substring(0, 12)} ` +
-            `chat=${chatId.substring(0, 12)} kind=${contentTriggerMatch.chatKind}`,
+            `[content-trigger] "${promptMatch.trigger.name}" matched msg=${messageId.substring(0, 12)} ` +
+            `chat=${chatId.substring(0, 12)} kind=${promptMatch.chatKind}`,
           );
         }
         const ctx: RoutingContext = {
@@ -1840,8 +1887,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           ...routing,
           replyRootId,
           promptOverride,
-          contentTrigger: contentTriggerMatch
-            ? { name: contentTriggerMatch.trigger.name, chatKind: contentTriggerMatch.chatKind }
+          contentTrigger: promptMatch
+            ? { name: promptMatch.trigger.name, chatKind: promptMatch.chatKind }
             : undefined,
         };
         // Serialize per anchor so two messages to the same thread/chat are

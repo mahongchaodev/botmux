@@ -436,6 +436,7 @@ export const messages: Record<string, string> = {
   'help.card': '/card       - 手动弹出当前会话的流式卡片（关流式时也能临时召唤，并恢复实时刷新；开了私密卡片则改发仅授权人可见的静态快照）',
   'help.term': '/term       - 获取当前会话的「可操作终端」（带写权限）链接，私密发给 owner（群内仅你可见，话题/单聊回退私信，不在群里暴露）',
   'help.subscribe_doc': '/subscribe-lark-doc <文档链接|list|off> - 订阅飞书文档：文档评论喂进本会话，我的回复发回评论（首次需 /login）',
+  'help.summary': '@机器人 /summary - 读取当前话题或普通群配置范围内的历史消息并生成总结（默认最近 50 条 / 24 小时）',
   'help.heading_passthrough': '🔀 透传给 {cliName}（字面送达，供其内置 slash 命令处理）：',
   'help.heading_schedule': '⏰ 定时任务：',
   'help.schedule_create': '/schedule 每日17:50 帮我看AI新闻   - 创建定时任务（自然语言）',

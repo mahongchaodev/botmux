@@ -2691,6 +2691,7 @@ export async function handleCommand(
           t('help.card', undefined, loc),
           t('help.term', undefined, loc),
           t('help.subscribe_doc', undefined, loc),
+          t('help.summary', undefined, loc),
           '',
           t('help.heading_passthrough', { cliName }, loc),
           // 直接从集合渲染，保证文案与 PASSTHROUGH_COMMANDS 不漂移

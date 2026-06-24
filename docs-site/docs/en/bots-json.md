@@ -142,6 +142,7 @@ Example:
 - `match.type`: `keyword` or `regex`; invalid regexes are dropped with a log message and do not crash the daemon.
 - `history.topic.mode`: currently `current-thread`, reading the current topic/thread.
 - `history.regularGroup.mode`: currently `recent-messages`. `limit` means the latest N messages; `sinceHours` means the latest N hours. A value of `0` means unlimited for that dimension. If `limit` is omitted, it defaults to 50.
+- Explicit command: `@bot /summary` in a group uses the dashboard default-summary `limit` / `sinceHours` range to read history and summarize, even when keyword triggering is disabled. If no range is configured, it defaults to the latest 50 messages / 24 hours.
 
 ## Voice
 
