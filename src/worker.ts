@@ -271,7 +271,16 @@ async function sendRawCommandLine(be: NonNullable<typeof backend>, content: stri
     await new Promise(r => setTimeout(r, 200));
     (be as any).sendSpecialKeys('Enter');
   } else {
-    be.write(content + '\r');
+    // PtyBackend has no sendText/sendSpecialKeys, so write the keystrokes
+    // directly — but still beat between the text and the Enter. Writing
+    // `content + '\r'` in one chunk submits before the CLI's slash-command
+    // parser has registered the `/cmd` match, so the command is left
+    // unsent in the input box (observed with `/goal <text>` on a pty
+    // workflow worker: typed but never executed). Mirror the tmux path's
+    // 200ms beat.
+    be.write(content);
+    await new Promise(r => setTimeout(r, 200));
+    be.write('\r');
   }
 }
 

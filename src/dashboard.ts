@@ -21,6 +21,8 @@ import { Aggregator, subscribeDaemon } from './dashboard/aggregator.js';
 import { pickCreatorForGroup } from './dashboard/operator-selector.js';
 import { planGroupCreator } from './dashboard/team-group.js';
 import { handleWorkflowApi, jsonRes } from './dashboard/workflow-api.js';
+import { handleV3RunsApi } from './dashboard/v3-runs-api.js';
+import { defaultRunsDir as v3RunsDir } from './workflows/v3/ops-projection.js';
 import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
 import { handleConnectorApi } from './dashboard/connector-api.js';
 import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/public-redact.js';
@@ -1658,6 +1660,12 @@ const server = createServer(async (req, res) => {
       runsDir: getRunsDir(),
       proxyToDaemon,
     }, authed)) {
+      return;
+    }
+
+    // v3 workflow runs (read-only DAG + per-node terminal projection).  Reads
+    // the v3 run dirs directly; no daemon proxy (v3 runs are plain files).
+    if (await handleV3RunsApi(req, res, url, { runsDir: v3RunsDir() }, authed)) {
       return;
     }
 

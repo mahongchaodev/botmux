@@ -27,6 +27,13 @@ describe('ensurePluginSkills', () => {
     }
   });
 
+  it('botmux-goal-ask 文案和 GoalInputs answer 结构一致', () => {
+    const skill = BUILTIN_SKILLS.find((s) => s.name === 'botmux-goal-ask');
+    expect(skill?.content).toContain('"from": "human"');
+    expect(skill?.content).toContain('"name": "answer"');
+    expect(skill?.content).not.toContain('from: "human/answer"');
+  });
+
   it('幂等：重复调用不报错且内容稳定', () => {
     ensurePluginSkills('claude-code', dir);
     const sample = join(dir, 'skills', BUILTIN_SKILLS[0].name, 'SKILL.md');

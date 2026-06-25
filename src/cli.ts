@@ -2464,6 +2464,112 @@ function findDaemon(larkAppId?: string): { ipcPort: number; larkAppId: string } 
   return all[0] ?? null;
 }
 
+/** `botmux workflow start <runId>` — POST the daemon's v3 start IPC so the run
+ *  is daemon-driven (humanGate → 飞书审批卡).  The grill skill calls this after
+ *  approve-dag instead of the standalone `botmux v3 run` (which has no card
+ *  layer).  Defaults the bot to the grill worker's BOTMUX_LARK_APP_ID env. */
+async function cmdWorkflowStart(runId: string | undefined, rest: string[]): Promise<void> {
+  if (!runId) {
+    console.error('用法: botmux workflow start <runId> [--bot <larkAppId>]');
+    process.exit(1);
+  }
+  const larkAppId = argValue(rest, '--bot') ?? process.env.BOTMUX_LARK_APP_ID;
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    console.error('❌ 没有在线 daemon；v3 humanGate run 需要 daemon 驱动（审批卡是 daemon 的活）。');
+    process.exit(1);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+  } catch (err: any) {
+    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    process.exit(1);
+  }
+  const txt = await res.text();
+  if (!res.ok) {
+    console.error(`❌ start 失败 (HTTP ${res.status}): ${txt}`);
+    process.exit(1);
+  }
+  console.log(`✅ v3 run "${runId}" 已交 daemon 驱动；humanGate 会在话题里弹审批卡，点了才继续。`);
+}
+
+/** `botmux workflow retry <runId> [--node <id>]` — blocked 节点重试入口（CLI 侧）。
+ *  走 daemon 的 retry IPC（journal 写入留在 daemon 进程内，单写者），daemon append
+ *  `nodeRetryRequested` 后以新 attempt 重驱动。`resume` 动词归 v0.2，v3 用 retry 避撞。 */
+async function cmdWorkflowRetry(runId: string | undefined, rest: string[]): Promise<void> {
+  if (!runId) {
+    console.error('用法: botmux workflow retry <runId> [--node <nodeId>] [--bot <larkAppId>]');
+    process.exit(1);
+  }
+  const larkAppId = argValue(rest, '--bot') ?? process.env.BOTMUX_LARK_APP_ID;
+  const nodeId = argValue(rest, '--node');
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    console.error('❌ 没有在线 daemon；blocked 重试需要 daemon 驱动。');
+    process.exit(1);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/retry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(nodeId ? { nodeId } : {}),
+    });
+  } catch (err: any) {
+    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    process.exit(1);
+  }
+  const txt = await res.text();
+  if (!res.ok) {
+    if (txt.includes('loop_node_use_grant')) {
+      console.error(`❌ 该受阻的是一个 loop（轮数耗尽），不是节点 attempt——用 \`botmux workflow grant ${runId}\` 追加一轮。`);
+    } else {
+      console.error(`❌ retry 失败 (HTTP ${res.status}): ${txt}`);
+    }
+    process.exit(1);
+  }
+  console.log(`🔄 v3 run "${runId}" 重试已受理，节点将以新 attempt 重跑。`);
+}
+
+/** `botmux workflow grant <runId> [--loop <id>]` — 耗尽 loop 追加一轮入口（CLI 侧）。
+ *  与 retry 同构：走 daemon 的 grant IPC（单写者），daemon append
+ *  `loopIterationGranted` 后重驱动，loop 带上一轮反馈再跑一轮。 */
+async function cmdWorkflowGrant(runId: string | undefined, rest: string[]): Promise<void> {
+  if (!runId) {
+    console.error('用法: botmux workflow grant <runId> [--loop <loopId>] [--bot <larkAppId>]');
+    process.exit(1);
+  }
+  const larkAppId = argValue(rest, '--bot') ?? process.env.BOTMUX_LARK_APP_ID;
+  const loopId = argValue(rest, '--loop');
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    console.error('❌ 没有在线 daemon；loop 追加需要 daemon 驱动。');
+    process.exit(1);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/grant`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(loopId ? { loopId } : {}),
+    });
+  } catch (err: any) {
+    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    process.exit(1);
+  }
+  const txt = await res.text();
+  if (!res.ok) {
+    console.error(`❌ grant 失败 (HTTP ${res.status}): ${txt}`);
+    process.exit(1);
+  }
+  console.log(`➕ v3 run "${runId}" 已追加一轮，loop 将带上一轮反馈重跑。`);
+}
+
 async function cmdResume(): Promise<void> {
   const target = process.argv[3];
   if (!target) {
@@ -5597,8 +5703,33 @@ switch (command) {
     break;
   }
   case 'workflow': {
+    const wfSub = process.argv[3] ?? '';
+    if (wfSub === 'start') {
+      // `botmux workflow start <runId>` — kick a daemon-driven v3 run (so
+      // humanGate posts approval cards).  Needs a live daemon; findDaemon is
+      // cli.ts-local so this case handles it instead of cmdWorkflow.
+      await cmdWorkflowStart(process.argv[4], process.argv.slice(5));
+      break;
+    }
+    if (wfSub === 'retry') {
+      // v3 blocked-node retry (the `resume` verb belongs to v0.2).
+      await cmdWorkflowRetry(process.argv[4], process.argv.slice(5));
+      break;
+    }
+    if (wfSub === 'grant') {
+      // v3 exhausted-loop grant (+1 iteration).
+      await cmdWorkflowGrant(process.argv[4], process.argv.slice(5));
+      break;
+    }
     const { cmdWorkflow } = await import('./cli/workflow.js');
-    await cmdWorkflow(process.argv[3] ?? '', process.argv.slice(4));
+    await cmdWorkflow(wfSub, process.argv.slice(4));
+    break;
+  }
+  case 'v3': {
+    // `botmux v3 run <dag.json>` — run a hand-written next-gen (v3) DAG on the
+    // real ephemeral worker pool, daemon-independent (dogfood path).
+    const { cmdV3 } = await import('./workflows/v3/cli-run.js');
+    await cmdV3(process.argv[3] ?? '', process.argv.slice(4));
     break;
   }
   case 'send':     await cmdSend(process.argv.slice(3)); break;

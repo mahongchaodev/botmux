@@ -173,7 +173,7 @@ export interface BotConfig {
   /**
    * 开启后：仅靠 per-user 授权（chatGrants / globalGrants）放行的发送者，禁止使用**任何
    * 斜杠命令**——botmux 自身的 DAEMON 命令、透传（PASSTHROUGH）命令、全部 `/workflow`
-   * 子命令、`/introduce`、`/t`/`/topic` —— 只能普通对话。owner / allowedUsers / oncall /
+   * （即兴 grill）/ `/template`（跑模板）子命令、`/introduce`、`/t`/`/topic` —— 只能普通对话。owner / allowedUsers / oncall /
    * allowedChatGroup 整群成员不受影响。判定以 slash-command invocation 命中为准（不是"凡以
    * `/` 开头的文本"，避免误伤讨论命令用法的普通对话）。默认 false（保持现状：被授权人可用透传）。
    */

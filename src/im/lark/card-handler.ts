@@ -22,6 +22,30 @@ import {
   isWorkflowApprovalAction,
   type WorkflowApprovalHandlerDeps,
 } from './workflow-card-handler.js';
+import {
+  handleV3GateAction,
+  isV3GateAction,
+  type V3GateCardHandlerDeps,
+} from './v3-gate-card-handler.js';
+import type { V3GateActionValue } from './v3-gate-card.js';
+import {
+  handleV3BlockedAction,
+  isV3BlockedAction,
+  type V3BlockedCardHandlerDeps,
+} from './v3-blocked-card-handler.js';
+import type { V3BlockedActionValue, V3AskAnswerActionValue } from './v3-blocked-card.js';
+import {
+  handleV3LoopGrantAction,
+  isV3LoopGrantAction,
+  type V3LoopGrantCardHandlerDeps,
+} from './v3-loop-grant-card-handler.js';
+import type { V3LoopGrantActionValue } from './v3-loop-grant-card.js';
+import {
+  handleV3RevisitGrantAction,
+  isV3RevisitGrantAction,
+  type V3RevisitGrantCardHandlerDeps,
+} from './v3-revisit-grant-card-handler.js';
+import type { V3RevisitGrantActionValue } from './v3-revisit-grant-card.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { buildClosedSessionCard } from '../../core/closed-session-card.js';
@@ -51,6 +75,14 @@ export interface CardHandlerDeps {
   lastRepoScan: Map<string, ProjectInfo[]>;
   workflowApprovalDeps?: WorkflowApprovalHandlerDeps;
   workflowApprovalResolved?: (runId: string) => void | Promise<void>;
+  /** v3 humanGate 审批卡点击处理（driveRun 由 daemon 接的 v3 gate runner 提供）. */
+  v3GateDeps?: V3GateCardHandlerDeps;
+  /** v3 blocked 重试卡点击处理（同一个 runner 的 driveRun）. */
+  v3BlockedDeps?: V3BlockedCardHandlerDeps;
+  /** v3 loop 追加一轮卡点击处理（同一个 runner 的 driveRun）. */
+  v3LoopGrantDeps?: V3LoopGrantCardHandlerDeps;
+  /** v3 回溯预算准许卡点击处理（同一个 runner 的 driveRun）. */
+  v3RevisitGrantDeps?: V3RevisitGrantCardHandlerDeps;
 }
 
 /**
@@ -1042,6 +1074,32 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       deleteMessage(larkAppId, cardMessageId).catch(() => { /* leave it */ });
     }
     return { toast: { type: 'success', content: t('card.relay.toast_success', undefined, loc) } };
+  }
+
+  // v3 humanGate 审批卡（独立 namespace，不混 v0.2 wait path）。**在通用 sensitive
+  // 权限门之前**处理（codex medium）：v3 卡 value 没有 root_id/session_id，通用门只能
+  // 用 chatId=undefined 做粗判，可能误拦；v3 自己的 `canResolve(binding, operator)`
+  // 才有 run binding 的 chatId，是权威权限门。
+  if (isV3GateAction(value?.action)) {
+    if (!deps.v3GateDeps) return;
+    return await handleV3GateAction(value as unknown as V3GateActionValue, operatorOpenId, deps.v3GateDeps);
+  }
+  if (isV3BlockedAction(value?.action)) {
+    if (!deps.v3BlockedDeps) return;
+    return await handleV3BlockedAction(
+      value as unknown as V3BlockedActionValue | V3AskAnswerActionValue,
+      operatorOpenId,
+      deps.v3BlockedDeps,
+      action?.form_value,
+    );
+  }
+  if (isV3RevisitGrantAction(value?.action)) {
+    if (!deps.v3RevisitGrantDeps) return;
+    return await handleV3RevisitGrantAction(value as unknown as V3RevisitGrantActionValue, operatorOpenId, deps.v3RevisitGrantDeps);
+  }
+  if (isV3LoopGrantAction(value?.action)) {
+    if (!deps.v3LoopGrantDeps) return;
+    return await handleV3LoopGrantAction(value as unknown as V3LoopGrantActionValue, operatorOpenId, deps.v3LoopGrantDeps);
   }
 
   const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'repo_manual_submit', 'repo_worktree_submit', 'worktree_toggle_mode', 'retry_last_task', 'get_write_link', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_reject', 'wf_cancel'].includes(value.action);
