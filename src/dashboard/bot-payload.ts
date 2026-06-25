@@ -31,6 +31,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     brandLabel: j?.brandLabel ?? null,
     sandbox: j?.sandbox === true,
     disableStreamingCard: j?.disableStreamingCard === true,
+    silentTurnReactions: j?.silentTurnReactions === true,
     writableTerminalLinkInCard: j?.writableTerminalLinkInCard === true,
     privateCard: j?.privateCard === true,
     autoStartOnGroupJoin: j?.autoStartOnGroupJoin === true,
@@ -39,7 +40,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     summaryRange: j?.summaryRange
       ?? summaryRangeFromLegacyContentTriggers(j?.contentTriggers)
       ?? defaultSummaryRangePrefs(),
-    regularGroupReplyMode: (j?.regularGroupReplyMode === 'new-topic' || j?.regularGroupReplyMode === 'shared')
+    regularGroupReplyMode: (j?.regularGroupReplyMode === 'new-topic' || j?.regularGroupReplyMode === 'shared' || j?.regularGroupReplyMode === 'chat-topic')
       ? j.regularGroupReplyMode
       : 'chat',
     regularGroupMentionMode: (j?.regularGroupMentionMode === 'topic' || j?.regularGroupMentionMode === 'never')

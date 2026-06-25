@@ -17,7 +17,7 @@
  * `notifyOwnerOpenId` MUST be in `creatorLarkAppId`'s app scope. Enforcing
  * this is the decision layer's job — the service trusts its inputs.
  */
-import { createChat, transferChatOwner, getChatOwner, getChatShareLink, addUsersToChatByUnionId } from './groups-store.js';
+import { createChat, transferChatOwner, getChatOwner, getChatShareLink, addUsersToChatByUnionId, addBotToChat } from './groups-store.js';
 import { listChatBotMembers, sendMessage } from '../im/lark/client.js';
 import { bindOncall } from './oncall-store.js';
 import { isValidRoleProfileId, readRoleProfileEntry } from './role-profile-store.js';
@@ -73,11 +73,21 @@ export async function createGroupWithBots(opts: CreateGroupOpts): Promise<Create
   // too, but doing it here makes the service contract explicit and keeps
   // invalidBotIds reporting stable across underlying API changes.
   const otherBots = opts.larkAppIds.filter(id => id !== opts.creatorLarkAppId);
+  // 飞书 chat.create 的 bot_id_list 有数量上限（实测 >15 个直接 400）。分批：首批随 create 建群，
+  // 其余 bot 用 chatMembers.create 增量加入，同样按批，避免再次触顶。失败的并入 invalidBotIds。
+  const BOT_BATCH = 10;
+  const firstBatch = otherBots.slice(0, BOT_BATCH);
+  const restBots = otherBots.slice(BOT_BATCH);
   const r = await createChat(opts.creatorLarkAppId, {
     name: opts.name,
-    botIds: otherBots,
+    botIds: firstBatch,
     userIds: opts.userOpenIds ?? [],
   });
+  for (let i = 0; i < restBots.length; i += BOT_BATCH) {
+    const batch = restBots.slice(i, i + BOT_BATCH);
+    const added = await addBotToChat(opts.creatorLarkAppId, r.chatId, batch);
+    for (const a of added) if (!a.ok) r.invalidBotIds.push(a.id);
+  }
 
   // Fetch the shareable join link BEFORE transferring ownership: the creator bot
   // is the chat owner right after createChat, so it can always read the link. If

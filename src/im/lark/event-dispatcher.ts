@@ -1171,9 +1171,12 @@ async function maybeFoldMentionedRegularGroupThreadToChat(input: {
   // would otherwise fork a brand-new thread-scope session every time another
   // human/bot @mentions us inside that topic. Keep the visible reply in the
   // same topic (replyRootId=rootId), but route the turn through the group
-  // chat-scope session. `new-topic` is the only mode that intentionally keeps
-  // per-topic independent sessions.
-  if (resolveRegularGroupMode(larkAppId, chatId) === 'new-topic') return undefined;
+  // chat-scope session. `new-topic` and `chat-topic` are the modes that
+  // intentionally keep per-topic independent sessions — they must NOT fold:
+  // new-topic forks every top-level @ too, while chat-topic keeps top level
+  // flat but lets each native Lark topic run its own session.
+  const mode = resolveRegularGroupMode(larkAppId, chatId);
+  if (mode === 'new-topic' || mode === 'chat-topic') return undefined;
   const freshMode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
   if (freshMode !== 'group') return undefined;
   routing.scope = 'chat';
@@ -1211,10 +1214,12 @@ type RoutingDecision = {
 };
 
 function regularGroupRouting(larkAppId: string, messageId: string, chatId: string): RoutingDecision {
-  // tri-state: only `new-topic` forks a fresh thread-scope session. `shared`
-  // stays chat-scope here (the topic fold happens post-routing, see
-  // maybeApplySharedTopicSeed); `chat` is the flat default. resolveRegularGroupMode
-  // is the single decision point so new-topic and shared never both fire.
+  // Only `new-topic` forks a fresh thread-scope session for a TOP-LEVEL @.
+  // `shared` stays chat-scope here (the topic fold happens post-routing, see
+  // maybeApplySharedTopicSeed); `chat` is the flat default; `chat-topic` is also
+  // flat at top level (it only diverges for native topics, where the fold is
+  // skipped — see maybeFoldMentionedRegularGroupThreadToChat). resolveRegularGroupMode
+  // is the single decision point so the modes never both fire.
   if (resolveRegularGroupMode(larkAppId, chatId) === 'new-topic') {
     return { scope: 'thread', anchor: messageId, source: 'regular-group-thread' };
   }

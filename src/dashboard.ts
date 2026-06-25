@@ -1,5 +1,5 @@
 // src/dashboard.ts
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, get as httpGet, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import {
   readFileSync, existsSync, mkdirSync, statSync, createReadStream,
@@ -92,7 +92,7 @@ import { isValidRoleProfileId } from './services/role-profile-store.js';
 import { mergeSafeInsightOverviews } from './services/insight/report.js';
 import type { SafeInsightOverview } from './services/insight/types.js';
 import { readPlatformBinding } from './platform/binding.js';
-import { startPlatformTunnelClient } from './platform/tunnel-client.js';
+import { startPlatformTunnelClient, type PlatformBotInfo } from './platform/tunnel-client.js';
 import { cleanupIdleSessions, parseIdleCleanupHours } from './dashboard/session-cleanup.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
@@ -161,6 +161,37 @@ function dashboardPortAvailable(port: number): Promise<boolean> {
   // binds wildcard. On macOS another process can hold 127.0.0.1:port while a
   // wildcard bind still succeeds, causing CLI HMAC calls to hit that process.
   return tcpPortAvailable('127.0.0.1', port);
+}
+
+// Per-process random marker served at /__selfcheck. Lets verifyDashboardBinding
+// confirm a loopback request to our just-bound wildcard port reaches THIS
+// process and not a shadow holding 127.0.0.1:port. The value is meaningless to
+// anyone else, so exposing it is safe.
+const DASHBOARD_SELF_NONCE = randomBytes(16).toString('hex');
+
+/**
+ * Post-bind loopback identity check handed to listenWithProbe (verifyBound).
+ * dashboardPortAvailable is a PRE-bind gate, but on macOS a loopback occupant
+ * can appear in the race window between that check and the wildcard listen, and
+ * a 0.0.0.0 bind succeeds anyway while loopback routing favours the occupant —
+ * so the dashboard would advertise a port it doesn't actually own on loopback.
+ * This runs AFTER listen: dial 127.0.0.1:port/__selfcheck and require OUR nonce
+ * back. A shadow answers with its own body/404 → reject → listenWithProbe steps
+ * up. Number-independent: it works no matter which port or who is shadowing.
+ * Loopback-host binds can't be shadowed, so they short-circuit to true.
+ */
+function verifyDashboardBinding(port: number): Promise<boolean> {
+  if (!isWildcardBindHost(config.dashboard.host)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const req = httpGet({ host: '127.0.0.1', port, path: '/__selfcheck', agent: false }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; if (body.length > 128) req.destroy(); });
+      res.on('end', () => resolve(res.statusCode === 200 && body === DASHBOARD_SELF_NONCE));
+    });
+    req.setTimeout(2000, () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
 }
 
 /** Sign a loopback request to a daemon's write-link route. The daemon verifies
@@ -897,6 +928,14 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { ok: true });
     }
 
+    // Loopback self-identification (no auth): echoes this process's nonce so the
+    // post-bind shadow check (listen-with-probe verifyBound) can distinguish our
+    // server from a process shadowing 127.0.0.1:port. Returns only the nonce.
+    if (url.pathname === '/__selfcheck') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end(DASHBOARD_SELF_NONCE);
+    }
+
     if (await handleWebhookRoute(req, res, url, {
       proxyToDaemon,
       createLifecycleGroup: createLifecycleGroupForWebhook,
@@ -949,6 +988,21 @@ const server = createServer(async (req, res) => {
       if (!gate.ok) return jsonRes(res, gate.status, gate.body);
       if (!activeToken) return jsonRes(res, 404, { error: 'no_active_token' });
       return jsonRes(res, 200, { url: dashboardUrlFor(activeToken) });
+    }
+
+    // CLI 通知绑定变化（HMAC + loopback）——`botmux bind` 写完绑定后捅一下，立即重连平台，
+    // 无需重启 daemon，也不依赖 fs.watch。
+    if (req.method === 'POST' && url.pathname === '/__cli/reload-binding') {
+      const gate = verifyCliRequest(req, url.pathname);
+      if (!gate.ok) return jsonRes(res, gate.status, gate.body);
+      try {
+        platformTunnel?.stop();
+      } catch {
+        /* ignore */
+      }
+      platformTunnel = null;
+      startPlatformTunnelIfBound();
+      return jsonRes(res, 200, { ok: true });
     }
 
     const presentedToken = authedToken(req, url);
@@ -2098,7 +2152,7 @@ const server = createServer(async (req, res) => {
     // are app-scoped, so creator daemon and operator open_id come from the
     // SAME bot by construction. See dashboard/operator-selector.ts.
     if (req.method === 'POST' && url.pathname === '/api/groups/create') {
-      let parsed: { name?: unknown; larkAppIds?: unknown; userOpenIds?: unknown; bindWorkingDir?: unknown; roleProfileId?: unknown };
+      let parsed: { name?: unknown; larkAppIds?: unknown; userOpenIds?: unknown; ownerUnionIds?: unknown; bindWorkingDir?: unknown; roleProfileId?: unknown };
       try {
         const chunks: Buffer[] = [];
         for await (const c of req) chunks.push(c as Buffer);
@@ -2133,6 +2187,11 @@ const server = createServer(async (req, res) => {
       }
       const creator = registry.getByAppId(pick.creatorLarkAppId)!;
       const merged = new Set<string>([...explicit, ...pick.userOpenIds]);
+      // 跨 app 邀请通道：按 union_id 加人（open_id 是 app 作用域的，union_id 稳定，
+      // 由 creator daemon 解析成本 app 的 open_id 再加）。平台「拉群」即走这条。
+      const ownerUnionIds = Array.isArray(parsed.ownerUnionIds)
+        ? (parsed.ownerUnionIds as unknown[]).filter((x): x is string => typeof x === 'string')
+        : [];
       // Auto-invite/transfer/notify target: prefer the explicit open_id passed
       // by the caller (rare API consumer use), else the creator bot's first
       // resolved allowlist entry.
@@ -2142,6 +2201,7 @@ const server = createServer(async (req, res) => {
         name: typeof parsed.name === 'string' ? parsed.name : undefined,
         larkAppIds: selectedIds,
         userOpenIds: [...merged],
+        ownerUnionIds,
         // Auto-transfer ownership to the auto-invited operator. Scope-safe
         // because the open_id was sourced from the creator bot's own allowlist.
         transferOwnerTo: autoInvited ?? undefined,
@@ -2353,6 +2413,7 @@ listenWithProbe({
   port: config.dashboard.port,
   host: config.dashboard.host,
   portAvailable: dashboardPortAvailable,
+  verifyBound: verifyDashboardBinding,
   log: (m) => logger.warn(`[dashboard] ${m}`),
 }).then((port) => {
   boundDashboardPort = port;
@@ -2380,13 +2441,41 @@ federationSync.unref();
 // 中心化平台隧道（已绑定才启动；每台机器一个，跑在 dashboard 进程里）
 let platformTunnel: { stop(): void } | null = null;
 function readBotmuxVersion(): string {
+  // 与本地 dashboard「版本与更新」卡同源：源码 checkout 的 package.json 是占位的 0.0.0，
+  // resolveCurrentVersion() 会用 git describe 推出真实版本（如 2.91.1），npm 安装则用 package.json。
   try {
-    const pkg = JSON.parse(readFileSync(join(dirname(__dirname), 'package.json'), 'utf8'));
-    return pkg.version || 'unknown';
+    return resolveCurrentVersion();
   } catch {
     return 'unknown';
   }
 }
+/** 读本机 bots-info.json，转成上报给平台的 bot 概要（人→机器→bot + 拉群用）。 */
+function readPlatformBotsInfo(): PlatformBotInfo[] {
+  try {
+    const fp = join(config.session.dataDir, 'bots-info.json');
+    if (!existsSync(fp)) return [];
+    const entries = JSON.parse(readFileSync(fp, 'utf8')) as Array<{
+      larkAppId?: string;
+      botOpenId?: string | null;
+      botName?: string | null;
+      botAvatarUrl?: string | null;
+      cliId?: string;
+    }>;
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .map((e) => ({
+        appId: e.larkAppId || '',
+        openId: e.botOpenId ?? null,
+        name: e.botName || e.larkAppId || 'bot',
+        avatar: e.botAvatarUrl || undefined,
+        cli: e.cliId,
+      }))
+      .filter((b) => b.appId);
+  } catch {
+    return [];
+  }
+}
+
 function startPlatformTunnelIfBound(): void {
   try {
     const binding = readPlatformBinding();
@@ -2397,6 +2486,7 @@ function startPlatformTunnelIfBound(): void {
       getDashboardPort: () => boundDashboardPort,
       getDashboardToken: () => activeToken,
       getVersion: () => version,
+      getBots: () => readPlatformBotsInfo(),
       log: (msg, extra) => logger.info(`[platform-tunnel] ${msg}${extra ? ' ' + JSON.stringify(extra) : ''}`),
     });
     logger.info(`[platform-tunnel] 绑定到 ${binding.platformUrl}，启动隧道`);

@@ -16,7 +16,7 @@ import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
 import { getSessionPersistentBackendType, persistentSessionName, probePersistentSession, probePersistentBackendServer, killPersistentSession, type PersistentBackendType } from './persistent-backend.js';
 import { adoptTargetLabel, validateAdoptTargetState } from './session-discovery.js';
-import { getBot, getAllBots, getOwnerOpenId, findOncallChatForAnyBot } from '../bot-registry.js';
+import { getBot, getAllBots, getOwnerOpenId, findOncallChat } from '../bot-registry.js';
 import type { CliId } from '../adapters/cli/types.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
@@ -1349,7 +1349,7 @@ export async function executeScheduledTask(
  *  表示「不钉目录」，交给 forkOrShowRepoCard 弹 /repo 卡片让用户在群里选。与普通新话题
  *  的 resolvePinnedWorkingDir 同口径（少了 sibling 继承那层，新群无 sibling 可继承）。*/
 function resolveDashboardSpawnWorkingDir(larkAppId: string, chatId: string): string | undefined {
-  const oncall = findOncallChatForAnyBot(chatId)?.workingDir;
+  const oncall = findOncallChat(larkAppId, chatId)?.workingDir;
   if (oncall) return oncall;
   const raw = getBot(larkAppId).config.defaultWorkingDir;
   if (!raw) return undefined;

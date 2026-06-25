@@ -1076,6 +1076,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     if (effectiveAppId) {
       if (!pendingRepoOwnerException && !canOperate(effectiveAppId, chatId, operatorOpenId)) {
         logger.info(`Card action "${value.action}" blocked for non-operator user: ${operatorOpenId} (chat=${chatId})`);
+        // get_write_link 显式破例：其余敏感动作沿用「静默 block（仅日志）」的既有设计
+        // （test/card-handler-repo-select.test.ts 把这点 pin 住了），但「获取操作链接」是
+        // 用户主动点的取权动作，静默会让人以为按钮坏了——给一条明确的「无操作权限」toast。
+        if (value.action === 'get_write_link') {
+          return { toast: { type: 'warning', content: t('card.action.write_link_no_permission', undefined, localeForBot(effectiveAppId)) } };
+        }
         return;
       }
     } else {
@@ -1089,6 +1095,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         || bots.some(b => (b.config.globalGrants?.length ?? 0) > 0);
       if (hasAllowlist && (!operatorOpenId || !allowedUsers.includes(operatorOpenId))) {
         logger.info(`Card action "${value.action}" blocked for non-allowed user: ${operatorOpenId}`);
+        // 与上面 non-operator 分支同理：仅 get_write_link 破例给 toast，其余保持静默。
+        if (value.action === 'get_write_link') {
+          return { toast: { type: 'warning', content: t('card.action.write_link_no_permission', undefined, localeForBot(larkAppId)) } };
+        }
         return;
       }
     }
@@ -1189,7 +1199,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       }
     }
 
-    if (actionType === 'close' && ds) {
+    if (actionType === 'close') {
+      if (!ds) {
+        // 会话已不在 activeSessions（已关过 / 卡片过期 / daemon 重启丢失）——点「关闭
+        // 会话」却静默无反应会让人以为按钮坏了，给一条失败 toast（成功路径不弹，已关卡即反馈）。
+        return { toast: { type: 'warning', content: t('card.action.session_gone', undefined, localeForBot(larkAppId)) } };
+      }
       const botCfg = getBot(ds.larkAppId).config;
       // Build the closed card BEFORE killWorker/closeSession — it reads the
       // live session's identity off `ds`.
@@ -1439,6 +1454,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         // 普通群发「仅自己可见」私密卡，话题群 / 单聊自动回退私聊 DM（两条通道都私密，
         // 不泄露写入 token）。fire-and-forget，保持卡片回调快速返回。
         void deliverWriteLinkCard(ds, operatorOpenId, cardJson);
+        // 乐观回执：投递是异步的（话题群要先 ephemeral 失败再 DM，两次往返 await 容易
+        // 超过 2500ms 的 ACK 窗口而被丢弃），点完立即弹 toast，让用户知道链接已私密发出。
+        return { toast: { type: 'success', content: t('card.action.write_link_sent', undefined, locDs) } };
       } else {
         // 普通群发「仅自己可见」私密卡；话题群 / 单聊不支持 ephemeral，回退为同样内容的
         // 卡片回复（而非纯文本），三种场景都渲染成卡片，行为不变。
@@ -1452,7 +1470,11 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
 
     // Display toggle: hidden ↔ screenshot. 'toggle_stream' is the legacy alias
     // from pre-screenshot cards and is mapped to toggle_display semantics.
-    if ((actionType === 'toggle_display' || actionType === 'toggle_stream') && ds) {
+    if (actionType === 'toggle_display' || actionType === 'toggle_stream') {
+      if (!ds) {
+        // 同 close：会话已不在线时「显示 / 隐藏输出」静默无反应 → 给失败 toast（成功不弹）。
+        return { toast: { type: 'warning', content: t('card.action.session_gone', undefined, localeForBot(larkAppId)) } };
+      }
       const clickedNonce: string | undefined = value?.card_nonce;
       const isFrozenClick = clickedNonce && ds.streamCardNonce && clickedNonce !== ds.streamCardNonce;
 

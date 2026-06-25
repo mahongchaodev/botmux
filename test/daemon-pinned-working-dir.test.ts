@@ -131,4 +131,56 @@ describe('resolvePinnedWorkingDir', () => {
     expect(result.pinnedWorkingDir).toBeUndefined();
     expect(result.inheritedFrom).toBeNull();
   });
+
+  it('does NOT let another bot\'s oncall binding pin this bot (per-bot pin)', async () => {
+    const { botRegistry, daemon } = await loadFreshModules();
+    const peerOncallDir = tempDir('peer-oncall-repo');
+    const selfDefaultDir = tempDir('self-default-repo');
+    // app-peer is oncall-bound to peerOncallDir for this chat; app-self is NOT.
+    // Pre-fix this leaked across bots (findOncallChatForAnyBot) and pinned
+    // app-self to peerOncallDir. Per-bot, app-self must ignore it and fall
+    // through to its own defaultWorkingDir.
+    botRegistry.registerBot({
+      larkAppId: 'app-peer', larkAppSecret: 's', cliId: 'claude-code',
+      oncallChats: [{ chatId: 'oc_chat', workingDir: peerOncallDir }],
+    });
+    botRegistry.registerBot({
+      larkAppId: 'app-self', larkAppSecret: 's', cliId: 'claude-code',
+      defaultWorkingDir: selfDefaultDir,
+    });
+
+    const result = await daemon.__testOnly_resolvePinnedWorkingDir({
+      scope: 'thread',
+      anchor: 'om_root',
+      chatId: 'oc_chat',
+      chatType: 'group',
+      larkAppId: 'app-self',
+    });
+
+    expect(result.oncallEntry).toBeFalsy();
+    expect(result.inheritedFrom).toBeNull();
+    expect(result.pinnedWorkingDir).toBe(selfDefaultDir);
+  });
+
+  it('honors THIS bot\'s own oncall binding above inherit/default', async () => {
+    const { botRegistry, daemon } = await loadFreshModules();
+    const selfOncallDir = tempDir('self-oncall-repo');
+    const selfDefaultDir = tempDir('self-default-repo');
+    botRegistry.registerBot({
+      larkAppId: 'app-self', larkAppSecret: 's', cliId: 'claude-code',
+      oncallChats: [{ chatId: 'oc_chat', workingDir: selfOncallDir }],
+      defaultWorkingDir: selfDefaultDir,
+    });
+
+    const result = await daemon.__testOnly_resolvePinnedWorkingDir({
+      scope: 'thread',
+      anchor: 'om_root',
+      chatId: 'oc_chat',
+      chatType: 'group',
+      larkAppId: 'app-self',
+    });
+
+    expect(result.oncallEntry?.workingDir).toBe(selfOncallDir);
+    expect(result.pinnedWorkingDir).toBe(selfOncallDir);
+  });
 });

@@ -65,6 +65,8 @@ vi.mock('../src/bot-registry.js', () => ({
   })),
   getAllBots: vi.fn(() => []),
   getOwnerOpenId: vi.fn(() => 'ou_owner'),
+  // oncall pin is per-bot now (resolveDashboardSpawnWorkingDir → findOncallChat).
+  findOncallChat: vi.fn(() => undefined),
   findOncallChatForAnyBot: vi.fn(() => undefined),
 }));
 

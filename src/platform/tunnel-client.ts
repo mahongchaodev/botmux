@@ -6,6 +6,15 @@ import { hostname } from 'node:os';
 import { WebSocket, createWebSocketStream } from 'ws';
 import { setPlatformTeams, type PlatformBinding, type PlatformTeam } from './binding.js';
 
+/** 本机一个 botmux bot 的概要（上报给平台，供团队页「人→机器→bot」展示 + 拉群）。 */
+export interface PlatformBotInfo {
+  appId: string;
+  openId: string | null;
+  name: string;
+  avatar?: string;
+  cli?: string;
+}
+
 export interface TunnelClientOptions {
   binding: PlatformBinding;
   /** 实际绑定的 dashboard 端口（探测后可能与配置不同） */
@@ -13,6 +22,8 @@ export interface TunnelClientOptions {
   /** 当前 dashboard token（会轮转，每次读最新） */
   getDashboardToken: () => string | null;
   getVersion: () => string;
+  /** 本机的 bot 清单（每次读最新；随心跳上报） */
+  getBots?: () => PlatformBotInfo[];
   log: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -105,6 +116,7 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
       dashboardToken: opts.getDashboardToken() || '',
       dashboardPort: opts.getDashboardPort(),
       memberships: teams,
+      bots: opts.getBots?.() ?? [],
     });
   }
 
@@ -114,6 +126,7 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
       botmuxVersion: opts.getVersion(),
       dashboardToken: opts.getDashboardToken() || '',
       memberships: teams,
+      bots: opts.getBots?.() ?? [],
     });
   }
 

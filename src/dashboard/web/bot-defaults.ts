@@ -317,11 +317,14 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
     </section>`;
   }
 
-  // Two per-bot card-behaviour toggles. Both auto-save on change (no explicit
-  // save button — each checkbox PUTs immediately). The writable-link toggle is
-  // moot while the streaming card is disabled, so we disable it in that state.
+  // Per-bot card-behaviour toggles. Each auto-saves on change (no explicit save
+  // button — each checkbox PUTs immediately). Two are gated on the streaming-card
+  // state: the writable-link toggle is moot WHILE the card is disabled; the
+  // status-reactions toggle only matters WHILE the card is disabled (the ✋→✅
+  // reactions only appear in card-off sessions), so it's editable only then.
   function renderCardBehaviorSection(b: any): string {
     const disableStreaming = b.disableStreamingCard === true;
+    const silentReactions = b.silentTurnReactions === true;
     const writableLink = b.writableTerminalLinkInCard === true;
     const privateCard = b.privateCard === true;
     return `<section class="bd-section">
@@ -331,6 +334,12 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         <span class="switch" aria-hidden="true"></span>
         <span class="toggle-tx"><strong>${t('botDefaults.disableStreaming')}</strong>
         <small>${t('botDefaults.disableStreamingHelp')}</small></span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" data-action="toggle-silent-reactions" ${silentReactions ? 'checked' : ''} ${disableStreaming ? '' : 'disabled'}>
+        <span class="switch" aria-hidden="true"></span>
+        <span class="toggle-tx"><strong>${t('botDefaults.silentTurnReactions')}</strong>
+        <small>${t('botDefaults.silentTurnReactionsHelp')}</small></span>
       </label>
       <label class="toggle-row">
         <input type="checkbox" data-action="toggle-writable-link" ${writableLink ? 'checked' : ''} ${disableStreaming ? 'disabled' : ''}>
@@ -379,11 +388,11 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
   // 放在同一板块，各自一个下拉、一改即保存。
   //   • p2pMode             → PUT /api/bots/:appId/p2p-mode（走 applyConfigField，与 /botconfig 同路径）
   //   • 普通群默认模式 mode  → PUT /api/bots/:appId/card-prefs 的 regularGroupReplyMode
-  //                           （chat | new-topic | shared，默认 chat）
+  //                           （chat | chat-topic | new-topic | shared，默认 chat）
   // per-chat 的 /reply-mode 可覆盖此 per-bot 默认。
   function renderSessionModeSection(b: any): string {
     const p2p: string = b.p2pMode === 'chat' ? 'chat' : 'thread';
-    const regular: string = (b.regularGroupReplyMode === 'new-topic' || b.regularGroupReplyMode === 'shared')
+    const regular: string = (b.regularGroupReplyMode === 'new-topic' || b.regularGroupReplyMode === 'shared' || b.regularGroupReplyMode === 'chat-topic')
       ? b.regularGroupReplyMode : 'chat';
     const mention: string = (b.regularGroupMentionMode === 'topic' || b.regularGroupMentionMode === 'never')
       ? b.regularGroupMentionMode : 'always';
@@ -414,6 +423,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           <span>${t('botDefaults.regularGroupMode')}</span>
           <select data-input="regularGroupMode">
             ${opt('chat', t('botDefaults.regularGroupModeChat'))}
+            ${opt('chat-topic', t('botDefaults.regularGroupModeChatTopic'))}
             ${opt('new-topic', t('botDefaults.regularGroupModeNewTopic'))}
             ${opt('shared', t('botDefaults.regularGroupModeShared'))}
           </select>
@@ -816,6 +826,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
 
       // ── Card behaviour toggles (auto-save on change) ──────────────────────
       const disableStreamingCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-disable-streaming]');
+      const silentReactionsCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-silent-reactions]');
       const writableLinkCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-writable-link]');
       const privateCardCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-private-card]');
       const cardPrefStatusEl = card.querySelector<HTMLSpanElement>('[data-card-pref-status]');
@@ -847,6 +858,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
             const cached = cache.bots.find((bb: any) => bb.larkAppId === appId);
             if (cached) {
               cached.disableStreamingCard = body.disableStreamingCard;
+              cached.silentTurnReactions = body.silentTurnReactions;
               cached.writableTerminalLinkInCard = body.writableTerminalLinkInCard;
               cached.privateCard = body.privateCard;
               cached.autoStartOnGroupJoin = body.autoStartOnGroupJoin;
@@ -866,6 +878,8 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         } finally {
           // The writable-link checkbox stays disabled while streaming is off.
           if (selfEl === writableLinkCb) selfEl.disabled = !!disableStreamingCb?.checked;
+          // The status-reactions checkbox is only editable while streaming is off.
+          else if (selfEl === silentReactionsCb) selfEl.disabled = !disableStreamingCb?.checked;
           else selfEl.disabled = false;
         }
       }
@@ -875,8 +889,16 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
           const off = disableStreamingCb.checked;
           // Streaming off → the writable-link toggle has nothing to attach to.
           if (writableLinkCb) writableLinkCb.disabled = off;
+          // Status reactions only exist in card-off sessions, so this toggle is
+          // editable only while streaming is off.
+          if (silentReactionsCb) silentReactionsCb.disabled = !off;
           if (cardPrefMootEl) cardPrefMootEl.hidden = !off;
           putCardPref({ disableStreamingCard: off }, disableStreamingCb);
+        });
+      }
+      if (silentReactionsCb) {
+        silentReactionsCb.addEventListener('change', () => {
+          putCardPref({ silentTurnReactions: silentReactionsCb.checked }, silentReactionsCb);
         });
       }
       if (writableLinkCb) {

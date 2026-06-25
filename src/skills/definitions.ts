@@ -1055,7 +1055,7 @@ botmux dispatch --title "<子项目标题>" --bot "<coder_open_id>:名字:coder"
 - coder 写完先 @ reviewer 在本话题 review，过了再标完成。
 
 > repo 预设：\`--repo\` 让子 bot 起会话直接进该目录、免手点「选仓库」卡。注意**跨 owner 的 repo 预设可能受授权限制**——若子 bot 已配 defaultWorkingDir，可省略 \`--repo\`。
-> **OnCall 群可省 \`--repo\`**：群若开了 OnCall 并绑了工作目录（\`/oncall <仓库路径>\` 或 dashboard），所有 dispatch 都不用再传 \`--repo\`——子 bot spawn 时按群查 OnCall 绑定（写在共享 bots.json，跨 bot/跨 daemon 都读得到）自动继承该目录，子话题同理。只有当某子项目要用**和群目录不同的仓库**时才单独传 \`--repo\` 覆盖。
+> **OnCall 省 \`--repo\` 现按 bot 计**：OnCall 绑定是 per-bot 的——只有**目标子 bot 自己**在该群绑了 OnCall（\`@该bot /oncall bind <仓库路径>\`，多个 bot 一起绑用 \`@bot1 @bot2 /oncall bind <路径>\`）或配了 \`defaultWorkingDir\` 时，dispatch 才可省 \`--repo\`。否则子 bot **不会**跨 bot 继承群目录（除非同话题已有 sibling 在跑可继承），dispatch 仍应显式传 \`--repo\`，不然子 bot 会弹「选仓库」卡。
 > 想「先把 bot 拉起待命、稍后再派具体任务」：用 \`--standby\`（只定目录不派简报），之后用 \`botmux dispatch --into <话题root> --bot ... --brief ...\` 激活。
 
 ### 6. 收结果 + 推进

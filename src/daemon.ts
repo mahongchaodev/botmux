@@ -16,7 +16,7 @@ import { sendRestartReportIfPending } from './core/restart-report.js';
 import { statSync } from 'node:fs';
 import { addReaction, getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
 import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
-import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
+import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChat, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import { ensureDefaultOncallBound } from './services/oncall-store.js';
@@ -59,6 +59,7 @@ import {
   parkStreamCard,
   closeSession as closeSessionHelper,
   ensureCliEnv,
+  sweepGlobalBotmuxSkills,
   writableTerminalLinkFor,
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
@@ -89,7 +90,7 @@ import {
   ensureTerminalWorkerPort,
   ensureSessionWhiteboard,
 } from './core/session-manager.js';
-import { beginReplyTargetTurn, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
+import { beginReplyTargetTurn, fallbackTurnId, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
 import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
 import { sweepIdleWorkers, DEFAULT_MAX_LIVE_WORKERS } from './core/idle-worker-sweeper.js';
 import { handleCardAction } from './im/lark/card-handler.js';
@@ -341,6 +342,12 @@ function streamingCardDisabledFor(ds: DaemonSession): boolean {
   } catch { return false; }
 }
 
+function silentTurnReactionsFor(ds: DaemonSession): boolean {
+  try {
+    return getBot(ds.larkAppId).config.silentTurnReactions === true;
+  } catch { return false; }
+}
+
 function readSessionFreshFromDisk(sessionId: string, larkAppId: string): import('./types.js').Session | undefined {
   const paths = [
     join(config.session.dataDir, `sessions-${larkAppId}.json`),
@@ -366,13 +373,14 @@ export async function noteTurnReceived(ds: DaemonSession, triggerMessageId: stri
   // This call site is the per-message acceptance point, so it also drives the
   // two-phase turn reaction. It's auto-enabled exactly for card-off sessions
   // (streaming card disabled): those have no live status card, so the ✋→✅ on
-  // the user's message is the only lightweight progress signal. When the
-  // streaming card is on it already shows status, so we stay silent.
+  // the user's message is the only lightweight progress signal. Bots can opt
+  // out via silentTurnReactions for low-noise observer scenarios.
   // React 冲! on the triggering message the instant it's accepted. Binding to the
   // message — not a worker status edge — means type-ahead / busy-batched messages
   // each get their own ✋. `finishTurnReactions` flips every pending ✋ to ✅ when
   // the worker next goes idle.
   if (!streamingCardDisabledFor(ds)) return;
+  if (silentTurnReactionsFor(ds)) return;
   // Only Lark messages carry reactions — doc-comment ids / chat anchors can't.
   if (!triggerMessageId.startsWith('om_')) return;
   if ((ds.pendingAckReactions ??= []).some(a => a.messageId === triggerMessageId)) return;
@@ -428,7 +436,18 @@ async function sessionReply(anchor: string, content: string, msgType: string = '
     if (ds?.scope === 'chat') {
       const fresh = readSessionFreshFromDisk(ds.session.sessionId, ds.larkAppId);
       if (fresh) syncReplyTargetState(ds, fresh);
-      const target = resolveSessionReplyTarget(ds, turnId);
+      // Resolve through fallbackTurnId so daemon-side sends that carry no turn of
+      // their own (the repo-select card, skip/switch confirmations, crash notices)
+      // still anchor into the current shared fold-back topic instead of leaking to
+      // the chat top level. Callers that DO pass an explicit turnId are unchanged —
+      // fallbackTurnId returns it verbatim, so the stale-turn hijack guard stays
+      // authoritative. Baking the fallback in HERE (the single chat-scope send
+      // chokepoint) means no individual send site can re-introduce the leak by
+      // forgetting to thread — the recurring failure mode behind this and the
+      // earlier e619250d fix. Guarded by test/session-reply-thread-anchor.test.ts
+      // (drives the real sessionReply) and test/reply-target-fallback.test.ts
+      // (the resolveSessionReplyTarget × fallbackTurnId composition it relies on).
+      const target = resolveSessionReplyTarget(ds, fallbackTurnId(ds, turnId));
       if (target.mode === 'thread') return replyMessage(appId, target.rootMessageId, content, msgType, true, undefined, hookContext);
       if (ds.session.rootMessageId) {
         const mode = await getChatMode(appId, chatId, { forceRefresh: true });
@@ -444,6 +463,13 @@ async function sessionReply(anchor: string, content: string, msgType: string = '
   // Thread-scope (or unknown / legacy): reply in thread.
   return replyMessage(appId, anchor, content, msgType, true, undefined, hookContext);
 }
+
+// Test seams: drive the real sessionReply (the chat-scope thread/top-level
+// chokepoint) against a seeded session, so the shared fold-back leak is guarded
+// at the function that actually routes — not just the resolveSessionReplyTarget
+// composition it relies on. See test/reply-target-fallback.test.ts.
+export const __testOnly_sessionReply = sessionReply;
+export const __testOnly_activeSessions = activeSessions;
 
 async function revokeQuotaGrant(
   larkAppId: string,
@@ -1952,7 +1978,7 @@ function parseTriggerChatBinding(
  * Default-oncall is a uniform forward-only policy: whenever the toggle is
  * on, ANY chat the bot is currently in — old or newly added, doesn't matter —
  * gets auto-bound to the configured workingDir on its next observed topic,
- * unless it's already bound (`findOncallChatForAnyBot` upstream) or the user
+ * unless it's already bound (`findOncallChat`, per-bot, upstream) or the user
  * has opted out via tombstone.
  *
  * Thin wrapper around the shared `ensureDefaultOncallBound` in oncall-store,
@@ -1995,7 +2021,8 @@ function resolveBotDefaultWorkingDir(larkAppId: string): string | undefined {
 
 /**
  * Resolve the pinned working dir for a brand-new topic via the layered lookup:
- *   1) an existing oncall binding (this bot or a sibling)
+ *   1) this bot's OWN oncall binding (per-bot: another bot's binding never pins
+ *      this bot — cross-bot dir alignment is handled by layer 3 inherit-peer)
  *   2) this bot's defaultOncall — auto-binds a brand-new chat when the flag is on
  *      (this WRITES state, so it must run identically on every spawn path)
  *   3) a sibling session's workingDir (cross-bot / chat-scope inheritance)
@@ -2011,7 +2038,7 @@ async function resolvePinnedWorkingDir(ctx: {
   chatType: 'group' | 'p2p';
   larkAppId: string;
 }) {
-  let oncallEntry = findOncallChatForAnyBot(ctx.chatId);
+  let oncallEntry = findOncallChat(ctx.larkAppId, ctx.chatId);
   if (!oncallEntry) {
     oncallEntry = await maybeAutoBindDefaultOncall(ctx.larkAppId, ctx.chatId, ctx.chatType);
   }
@@ -3773,6 +3800,17 @@ export async function startDaemon(botIndex?: number): Promise<void> {
 
   // Restore active sessions from previous run
   await restoreActiveSessions(activeSessions);
+
+  // Second global-skills sweep, AFTER restore has settled. The early
+  // cleanupGlobalBotmuxSkillsOnce() pass (in the startup ensureCliEnv above)
+  // runs before any restart overlap settles, so an outgoing old-build daemon
+  // (pre `--plugin-dir` migration) can re-create ~/.claude/skills/botmux-* a few
+  // ms after we cleaned it — leaving it to leak into the user's standalone
+  // `claude` until the *next* restart. Re-sweeping here, once this daemon's own
+  // spawns and the handoff window are done, catches that leak on the same
+  // startup. Idempotent & best-effort — never blocks startup.
+  try { sweepGlobalBotmuxSkills(); }
+  catch (err) { logger.warn(`[skills] post-restore global sweep failed: ${err instanceof Error ? err.message : String(err)}`); }
 
   // 文档订阅恢复：重启后订阅可能已失效，给仍活跃的会话重订阅；会话没恢复
   // （已关/丢失）的订阅则退订 + 清表，避免「命中订阅但无会话」的孤儿。
