@@ -4903,7 +4903,7 @@ body.touch #terminal .xterm-screen *{
 <body>
 <div id="terminal"></div>
 <div id="readonly-banner">只读模式 · 无写入权限</div>
-${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopener">登录后可操作 →</a>` : '<div id="login-banner">登录后可操作</div>'}
+${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopener">owner 登录后可操作 →</a>` : '<div id="login-banner">owner 登录后可操作</div>'}
 <div id="toolbar">
   <button data-k="esc">Esc</button>
   <button data-k="ctrlc">^C</button>
