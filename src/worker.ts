@@ -49,6 +49,7 @@ import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
+import { TERMINAL_FAVICON_DATA_URI } from './utils/terminal-favicon.js';
 import type { DaemonToWorker, WorkerToDaemon, DisplayMode, TermActionKey, ScreenStatus } from './types.js';
 import { t, setDefaultLocale } from './i18n/index.js';
 import { TerminalRenderer } from './utils/terminal-renderer.js';
@@ -4854,6 +4855,7 @@ function getTerminalHtml(hasWrite: boolean, platformReadonly = false, loginUrl =
 <meta charset="utf-8">
 <meta id="vp" name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>${cliName()} - ${label}</title>
+<link rel="icon" type="image/png" href="${TERMINAL_FAVICON_DATA_URI}">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
