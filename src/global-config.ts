@@ -282,6 +282,15 @@ export function readGlobalConfig(): GlobalConfig {
   return out;
 }
 
+/** Drop the short-TTL read cache so the next readGlobalConfig re-reads from
+ *  disk. Same-process writes invalidate automatically (mergeGlobalConfig); this
+ *  is for cross-process freshness on demand — e.g. the dashboard process after
+ *  `botmux bind` (a different process) flips remoteAccess on, so the post-bind
+ *  dashboard URL reflects the new value without waiting out the TTL. */
+export function invalidateGlobalConfigCache(): void {
+  readCache = null;
+}
+
 /** 远程访问 enabled? Reads the (short-TTL cached) global config — cheap enough to
  *  call per link. False unless explicitly enabled. Gates whether central-platform
  *  URLs are emitted (see buildTerminalUrl / publicWebhookUrl). */

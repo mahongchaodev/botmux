@@ -9,6 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config, getDashboardExternalHost } from './config.js';
 import { repoPickerScanOptions } from './global-config.js';
+import { buildDashboardUrl } from './core/dashboard-url.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
 import { botmuxWrapperFiles } from './core/botmux-wrapper.js';
 import { startMaintenance, stopMaintenance } from './core/maintenance.js';
@@ -3790,12 +3791,11 @@ function dashboardUrlForReport(): string | undefined {
     const portFile = join(dir, '.dashboard-port');
     const tokenFile = join(dir, '.dashboard-token');
     const port = existsSync(portFile) ? readFileSync(portFile, 'utf8').trim() : String(config.dashboard.port);
-    const base = `http://${getDashboardExternalHost()}:${port}/`;
-    if (existsSync(tokenFile)) {
-      const tok = readFileSync(tokenFile, 'utf8').trim();
-      if (tok) return `${base}?t=${tok}`;
-    }
-    return base;
+    const tok = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '';
+    // buildDashboardUrl swaps in the central-platform machine subdomain when
+    // 远程访问 is on and this host is bound, so the restart-report DM links to the
+    // platform dashboard instead of an unreachable local host:port.
+    return buildDashboardUrl({ host: getDashboardExternalHost(), port, token: tok || undefined });
   } catch {
     return undefined;
   }

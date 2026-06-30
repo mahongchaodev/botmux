@@ -41,7 +41,8 @@ import {
   TTADK_MODEL_SUGGESTIONS,
 } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
-import { mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
+import { invalidateGlobalConfigCache, mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
+import { buildDashboardUrl } from './core/dashboard-url.js';
 import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocalDevInstall, botmuxVersion } from './utils/install-info.js';
 import { checkNode, detectBotmuxInstalls, resolveCurrentVersion } from './utils/install-diagnostics.js';
@@ -804,9 +805,11 @@ function verifyCliRequest(req: IncomingMessage, pathname: string):
   return { ok: true };
 }
 
-/** Build the dashboard URL for a token, using the actually-bound port. */
+/** Build the dashboard URL for a token, using the actually-bound port. Routes
+ *  through the central-platform machine subdomain when 远程访问 is on and this
+ *  host is bound (see buildDashboardUrl); falls back to the local host:port. */
 function dashboardUrlFor(token: string): string {
-  return `http://${config.dashboard.externalHost}:${boundDashboardPort}/?t=${token}`;
+  return buildDashboardUrl({ host: config.dashboard.externalHost, port: boundDashboardPort, token });
 }
 
 type SkillJobStatus = 'running' | 'succeeded' | 'failed';
@@ -1068,6 +1071,11 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/__cli/reload-binding') {
       const gate = verifyCliRequest(req, url.pathname);
       if (!gate.ok) return jsonRes(res, gate.status, gate.body);
+      // `botmux bind` wrote platform.json + (default-on) remoteAccess in the CLI
+      // process; this dashboard process holds a short-TTL config cache that may
+      // still read the pre-bind value. Drop it so the immediately-following
+      // /__cli/current (and live card links) resolve the platform dashboard URL.
+      invalidateGlobalConfigCache();
       try {
         platformTunnel?.stop();
       } catch {
