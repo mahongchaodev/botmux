@@ -121,8 +121,24 @@ export interface Session {
    * session probes 'missing'. Cleared once a live worker is re-established.
    */
   suspendedColdResume?: boolean;
-  /** CLI used to spawn this session — stamped on every save so closed sessions retain it. */
+  /** CLI used to spawn this session, frozen at creation so bot-level CLI edits only affect new sessions. */
   cliId?: import('./adapters/cli/types.js').CliId;
+  /** Optional CLI binary override frozen with `cliId`; used when no wrapper launcher is set. */
+  cliPathOverride?: string;
+  /** Optional wrapper launcher frozen at creation, e.g. `ttadk codex` or `aiden x claude`. */
+  wrapperCli?: string;
+  /** Optional model frozen at creation so historical sessions resume with their original model. */
+  model?: string;
+  /**
+   * True once `cliId`/`cliPathOverride`/`wrapperCli`/`model` have been frozen for
+   * this session (see `sessionAgentConfig`). Gates the one-time freeze so it runs
+   * exactly once — on a fresh start, or on the first resume of a session created
+   * before these fields existed (back-filling the still-missing ones from the live
+   * bot config). The marker disambiguates "legacy, never frozen" from "frozen as
+   * no-wrapper", so a genuinely wrapper-less session never inherits a wrapper the
+   * bot gains later.
+   */
+  agentFrozen?: boolean;
   /**
    * Sandbox decision RECORDED AT SESSION CREATION (overlay file-isolation). The
    * live bot flag (BotConfig.sandbox) can be toggled later, but a session's
