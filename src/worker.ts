@@ -294,6 +294,13 @@ function releaseReadyGate(reason: string): void {
 const STARTUP_CMD_QUIET_MS = 500;
 const STARTUP_CMD_CAP_MS = 4_000;
 
+/** Inter-keystroke spacing when typing a slash command into CoCo char-by-char.
+ *  CoCo (Trae CLI, Ink TUI) treats "several bytes delivered in one PTY read" as a
+ *  paste, which skips command mode + the slash picker — so each char must land as
+ *  its own keystroke. 40ms is comfortably above CoCo's coalescing window (verified
+ *  against Trae CLI 0.120.45) while keeping a short command sub-second. */
+const COCO_SLASH_TYPE_THROTTLE_MS = 40;
+
 /** Type one literal input LINE into the CLI exactly like a passthrough slash
  *  command: raw text → a 200ms beat (so the TUI's slash-command picker registers
  *  the match before submit) → a separate Enter. Non-TUI backends fall back to a
@@ -301,6 +308,29 @@ const STARTUP_CMD_CAP_MS = 4_000;
  *  so both stay in lockstep. */
 async function sendRawCommandLine(be: NonNullable<typeof backend>, content: string): Promise<void> {
   if ('sendText' in be && 'sendSpecialKeys' in be) {
+    if (lastInitConfig?.cliId === 'coco') {
+      // CoCo (Trae CLI, Ink TUI) detects "several bytes in one PTY read = paste",
+      // so a one-shot sendText('/model') lands as PASTED text: command mode + the
+      // slash picker never activate and the trailing Enter submits `/model` to the
+      // model (the "/model 多一个换行" bug). Fix: type char-by-char (throttled) so
+      // each char is a distinct keystroke that opens command mode, and append ONE
+      // trailing space to a bare command so the suggestion popup is dismissed.
+      // Without that dismissal the popup captures the first Enter (CoCo then needs
+      // two), and for an interactive command like /model — which opens a model
+      // selector — a stray second Enter would confirm whatever model is highlighted.
+      // Popup gone ⇒ exactly one Enter executes (/model just opens the selector and
+      // waits). trim() first so a trailing newline carried from the Lark message
+      // isn't typed as a literal newline that re-breaks command detection.
+      const cmd = content.trim();
+      const typed = cmd.includes(' ') ? cmd : `${cmd} `;
+      for (const ch of typed) {
+        (be as any).sendText(ch);
+        await new Promise(r => setTimeout(r, COCO_SLASH_TYPE_THROTTLE_MS));
+      }
+      await new Promise(r => setTimeout(r, 200));
+      (be as any).sendSpecialKeys('Enter');
+      return;
+    }
     (be as any).sendText(content);
     await new Promise(r => setTimeout(r, 200));
     (be as any).sendSpecialKeys('Enter');
