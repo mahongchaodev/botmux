@@ -2,7 +2,7 @@
 // 对中心化平台保持一条出站控制 WebSocket；平台需要展示本机 dashboard 时，
 // 下发 open-stream，本端拨一条数据连接回去、裸桥接到本地 dashboard 端口。
 import net from 'node:net';
-import { hostname } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { WebSocket, createWebSocketStream } from 'ws';
 import { setPlatformTeams, clearPlatformBinding, type PlatformBinding, type PlatformTeam } from './binding.js';
 
@@ -45,6 +45,23 @@ const DATA_DIAL_PARALLEL = 3;
 const DATA_DIAL_MAX_WAVES = 2;
 const DATA_DIAL_WAVE_BACKOFF_MS = 150;
 const DATA_DIAL_OVERALL_DEADLINE_MS = 6_000;
+
+// 本机可供平台服务端「直连反代」的候选地址（内网 IPv4:dashboardPort）。平台够得着就直连本机
+// dashboard、绕过隧道（省掉 daemon 拨号/ECMP 赌/跨 pod 转发）；够不着自动退回隧道。仅内网地址、
+// 服务端到服务端 HTTP，不涉浏览器 mixed content。
+function localDirectHosts(port: number): string[] {
+  const out: string[] = [];
+  try {
+    for (const list of Object.values(networkInterfaces())) {
+      for (const ni of list || []) {
+        if (ni.family === 'IPv4' && !ni.internal && ni.address) out.push(`${ni.address}:${port}`);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
 
 export interface TunnelClientHandle {
   stop(): void;
@@ -135,6 +152,7 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
       botmuxVersion: opts.getVersion(),
       dashboardToken: opts.getDashboardToken() || '',
       dashboardPort: opts.getDashboardPort(),
+      directHosts: localDirectHosts(opts.getDashboardPort()),
       memberships: teams,
       bots: opts.getBots?.() ?? [],
     });
@@ -145,6 +163,7 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
       type: 'heartbeat',
       botmuxVersion: opts.getVersion(),
       dashboardToken: opts.getDashboardToken() || '',
+      directHosts: localDirectHosts(opts.getDashboardPort()),
       memberships: teams,
       bots: opts.getBots?.() ?? [],
     });
