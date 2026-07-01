@@ -119,6 +119,29 @@ function cssToken(value: unknown): string {
   return String(value ?? 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 }
 
+export const SESSION_STATUS_OPTIONS = [
+  'starting',
+  'working',
+  'idle',
+  'dormant',
+  'analyzing',
+  'active',
+  'limited',
+  'closed',
+];
+
+export function sessionStatusText(status: unknown): string {
+  const raw = String(status ?? 'unknown');
+  const key = `sessions.status.${raw}`;
+  const label = t(key);
+  return label === key ? raw : label;
+}
+
+function statusBadgeHtml(status: unknown): string {
+  const raw = String(status ?? 'unknown');
+  return `<span class="status status-${escapeHtml(cssToken(raw))}">${escapeHtml(sessionStatusText(raw))}</span>`;
+}
+
 function repoBasename(workingDir: unknown): string {
   const value = String(workingDir ?? '').trim();
   if (!value) return '-';
@@ -221,6 +244,7 @@ function deriveSessionBoardColumn(s: any): BoardColumnId | null {
   if (s.pendingRepo || s.tuiPromptActive || s.agentAttention || s.status === 'limited') return 'needs-you';
   if (s.status === 'starting') return 'starting';
   if (s.status === 'working' || s.status === 'analyzing' || s.status === 'active') return 'working';
+  if (s.status === 'dormant') return 'idle';
   return 'idle';
 }
 
@@ -247,7 +271,7 @@ export function restartConfirmMessage(s: any): string {
   return [
     t('sessions.restartConfirmIntro'),
     '',
-    `${t('sessions.restartConfirmStatus')}${sep}${status}`,
+    `${t('sessions.restartConfirmStatus')}${sep}${sessionStatusText(status)}`,
     `${t('sessions.restartConfirmCli')}${sep}${cli}`,
     '',
     t('sessions.restartConfirmQuestion'),
@@ -286,8 +310,7 @@ function pageHtml(): string {
       <input type="search" name="q" placeholder="${t('sessions.search')}" />
       <select name="status">
         <option value="">${t('sessions.anyStatus')}</option>
-        <option>starting</option><option>working</option><option>idle</option>
-        <option>analyzing</option><option>active</option><option>closed</option>
+        ${SESSION_STATUS_OPTIONS.map(status => `<option value="${escapeHtml(status)}">${escapeHtml(sessionStatusText(status))}</option>`).join('')}
       </select>
       <select name="adopt">
         <option value="">${t('sessions.adoptAny')}</option>
@@ -523,8 +546,12 @@ function renderCreateSessionSuccess(modal: HTMLDialogElement, body: any): void {
   modal.querySelector<HTMLButtonElement>('#cs-done')!.onclick = () => modal.close();
 }
 
-export function renderSessionsPage(root: HTMLElement) {
+export function renderSessionsPage(root: HTMLElement): () => void {
   root.innerHTML = pageHtml();
+  return wireSessionsPage(root);
+}
+
+export function wireSessionsPage(root: HTMLElement): () => void {
   const tbody = root.querySelector<HTMLElement>('#sessions-table tbody')!;
   const filtersForm = root.querySelector<HTMLFormElement>('#filters')!;
   const drawer = root.querySelector<HTMLDialogElement>('#drawer')!;
@@ -868,7 +895,7 @@ export function renderSessionsPage(root: HTMLElement) {
       <td><input type="checkbox" class="row-select" ${checked} ${closed ? 'disabled' : ''}></td>
       <td>${escapeHtml(botDisplayName(s))}</td>
       <td><span class="badge cli-${cssToken(s.cliId)}">${escapeHtml(s.cliId ?? 'unknown')}</span></td>
-      <td><span class="status status-${escapeHtml(s.status ?? 'unknown')}">${escapeHtml(s.status ?? 'unknown')}</span>${lockChipHtml(s)}</td>
+      <td>${statusBadgeHtml(s.status)}${lockChipHtml(s)}</td>
       <td class="token-cell">${formatTokenCount(s.tokenUsage?.in)}</td>
       <td class="token-cell">${formatTokenCount(s.tokenUsage?.out)}</td>
       <td title="${escapeHtml(String(s.title ?? ''))}">${escapeHtml(stripMentionPrefix(s.title ?? '').slice(0, 48))}</td>
@@ -917,7 +944,7 @@ export function renderSessionsPage(root: HTMLElement) {
           <span>${escapeHtml(botName)} · ${escapeHtml(chatTitle ?? s.cliId ?? 'unknown')}</span>
         </div>
         <span class="session-card-status-group">
-          <span class="status status-${escapeHtml(s.status ?? 'unknown')}">${escapeHtml(s.status ?? 'unknown')}</span>
+          ${statusBadgeHtml(s.status)}
           ${lockChipHtml(s)}
         </span>
       </div>
@@ -1011,7 +1038,7 @@ export function renderSessionsPage(root: HTMLElement) {
         ${lockChipHtml(s)}
         ${remote ? `<span class="badge kanban-remote-badge" title="${escapeHtml(t('sessions.kanban.remoteHint', { name: remote }))}">${escapeHtml(remote)}</span>` : ''}
         <span class="kanban-card-top-right">
-          <span class="kanban-card-dot" data-status="${escapeHtml(status)}" title="${escapeHtml(status)}"></span>
+          <span class="kanban-card-dot" data-status="${escapeHtml(cssToken(status))}" title="${escapeHtml(sessionStatusText(status))}"></span>
           ${remote ? '' : `<button type="button" class="card-act kanban-card-act" data-action="history" title="${escapeHtml(t('sessions.history.title'))}" aria-label="${escapeHtml(t('sessions.history.title'))}">${ICON.history}</button>
           ${s.feishuChatLink ? `<a class="card-act kanban-card-act" href="${escapeHtml(s.feishuChatLink)}" target="_blank" rel="noopener" title="${escapeHtml(t('sessions.kanban.openFeishu'))}" aria-label="${escapeHtml(t('sessions.kanban.openFeishu'))}">${ICON.feishu}</a>` : ''}
           <button type="button" class="card-act kanban-card-act${s.locked ? ' locked' : ''}" data-action="lock" title="${escapeHtml(lockActionLabel(s))}" aria-label="${escapeHtml(lockActionLabel(s))}">${s.locked ? ICON.unlock : ICON.lock}</button>
@@ -1449,7 +1476,7 @@ export function renderSessionsPage(root: HTMLElement) {
           ${botAvatarHtml({ name: botDisplayName(s), larkAppId: s.larkAppId, size: 'sm' })}
           <strong class="term-modal-name" title="${escapeHtml(String(s.title ?? title))}">${escapeHtml(String(title).slice(0, 60))}</strong>
           <button type="button" id="term-modal-edit" class="card-act" title="${escapeHtml(t('sessions.kanban.rename'))}" aria-label="${escapeHtml(t('sessions.kanban.rename'))}">${ICON.edit}</button>
-          <span class="status status-${escapeHtml(s.status ?? 'unknown')}">${escapeHtml(s.status ?? 'unknown')}</span>
+          ${statusBadgeHtml(s.status)}
         </span>
         <span class="term-modal-actions">
           ${feishu}
@@ -1810,7 +1837,7 @@ export function renderSessionsPage(root: HTMLElement) {
       <header>
         <h3>${escapeHtml(stripMentionPrefix(s.title) || s.sessionId)}</h3>
         <span class="drawer-status-line">
-          <span class="status status-${escapeHtml(s.status ?? 'unknown')}">${escapeHtml(s.status ?? 'unknown')}</span>
+          ${statusBadgeHtml(s.status)}
           ${lockChipHtml(s)}
         </span>
         <p><code>${escapeHtml(s.sessionId)}</code> <button data-copy="${escapeHtml(s.sessionId)}">${t('sessions.copy')}</button></p>
@@ -1905,7 +1932,7 @@ export function renderSessionsPage(root: HTMLElement) {
           lockBtn.textContent = lockActionLabel(s);
           const line = drawer.querySelector<HTMLElement>('.drawer-status-line');
           if (line) {
-            line.innerHTML = `<span class="status status-${escapeHtml(s.status ?? 'unknown')}">${escapeHtml(s.status ?? 'unknown')}</span>${lockChipHtml(s)}`;
+            line.innerHTML = `${statusBadgeHtml(s.status)}${lockChipHtml(s)}`;
           }
         }
       };
@@ -2480,7 +2507,7 @@ export function renderSessionsPage(root: HTMLElement) {
   });
 
   filtersForm.addEventListener('input', rerender);
-  store.on(rerender);
+  const unsubscribeStore = store.on(rerender);
   // 团队看板 30s 软刷新（拉对方部署的会话快照与共享编排）；页面切走后
   // kanban 脱离 DOM，定时器自清。
   const teamBoardTimer = setInterval(() => {
@@ -2496,4 +2523,13 @@ export function renderSessionsPage(root: HTMLElement) {
   rerender();
   // bot 友好名 / 群聊标题异步解析，回来后补一次重绘（首帧先显示原值）
   void loadNameMaps().then(rerender);
+  return () => {
+    unsubscribeStore();
+    clearInterval(teamBoardTimer);
+    cancelKanbanOpen();
+    drawer.close();
+    termModal.close();
+    historyModal.close();
+    createSessionModal.close();
+  };
 }
