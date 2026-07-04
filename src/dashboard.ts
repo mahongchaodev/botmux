@@ -32,6 +32,7 @@ import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
+import { FeishuLoginManager } from './dashboard/feishu-login.js';
 import {
   CLI_SELECT_OPTIONS,
   resolveCliSelection,
@@ -215,6 +216,9 @@ mkdirSync(REGISTRY_DIR, { recursive: true });
 const registry = new DaemonRegistry(REGISTRY_DIR);
 const aggregator = new Aggregator();
 const botOnboarding = new BotOnboardingManager({ botsJsonPath: BOTS_JSON_PATH });
+// 飞书 Web 登录态刷新（机器人改名缺登录态时的 dashboard 扫码入口）。机器级单例，
+// 写 ~/.botmux/feishu-session.json，与 setup / onboarding 复用同一份登录态。
+const feishuLogin = new FeishuLoginManager();
 const subs = new Map<string, () => void>();
 const attaching = new Set<string>();   // dedup concurrent attaches per appId
 
@@ -1604,6 +1608,16 @@ const server = createServer(async (req, res) => {
       const job = botOnboarding.get(decodeURIComponent(mOnboard[1]));
       if (!job) return jsonRes(res, 404, { ok: false, error: 'unknown_onboarding_job' });
       return jsonRes(res, 200, { job });
+    }
+
+    // 飞书 Web 登录态刷新（改名缺登录态 → dashboard 扫码）。POST 受 dashboard 的
+    // 写操作 auth 闸保护（非 GET 需 owner cookie）；GET 仅暴露二维码+状态，扫码
+    // 授权的是扫码人自己的账号，风险模型与 onboarding 第二个二维码一致。
+    if (req.method === 'POST' && url.pathname === '/api/feishu-login/start') {
+      return jsonRes(res, 202, { login: feishuLogin.start() });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/feishu-login/status') {
+      return jsonRes(res, 200, { login: feishuLogin.get() });
     }
 
     let m: RegExpMatchArray | null;

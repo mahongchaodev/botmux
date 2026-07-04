@@ -4329,6 +4329,63 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
 .bd-name-editor button { padding: 4px 12px; font-size: 12px; }
 .bd-name-status { display: block; margin-top: 4px; font-size: 11.5px; }
 .bd-name-status:empty { display: none; }
+/* 「扫码登录飞书」——改名因缺登录态降级时才亮出 */
+.bd-feishu-login {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.bd-feishu-login:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.bd-feishu-login[hidden] { display: none; }
+
+/* 飞书扫码登录 modal */
+.feishu-login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+.feishu-login-modal {
+  position: relative;
+  width: min(360px, 92vw);
+  padding: 24px 24px 20px;
+  border-radius: 16px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+  text-align: center;
+}
+.feishu-login-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 15px;
+  cursor: pointer;
+}
+.feishu-login-close:hover { background: color-mix(in srgb, var(--faint) 18%, transparent); color: inherit; }
+.feishu-login-title { margin: 0 0 8px; font-size: 16px; }
+.feishu-login-hint { margin: 0 0 14px; font-size: 12.5px; color: var(--faint); line-height: 1.5; }
+.feishu-login-qr { min-height: 40px; display: flex; justify-content: center; }
+.feishu-login-actions { margin-top: 14px; }
 .bd-profile-meta {
   margin: 0 0 0 auto;
   display: grid;
