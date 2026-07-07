@@ -61,7 +61,7 @@ describe('desktop renderer runtime boundary', () => {
     }))).toBe(true);
     expect(shouldKeepLoadedDashboardDuringDegradedState(runtimeState({
       status: 'degraded',
-      message: '请运行 botmux upgrade --with-app',
+      message: '请更新源码后重新运行 src/desktop/install-local.sh',
     }))).toBe(false);
   });
 

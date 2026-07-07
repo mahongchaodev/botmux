@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runAppSmokeCommand, type AppSmokeDeps, type RunCaptureResult } from '../src/cli/app-smoke.js';
+import { runAppSmokeCommand, type AppSmokeDeps, type RunCaptureResult } from '../src/desktop/smoke.js';
 
 function makeDeps(
   paths: string[],
@@ -24,7 +24,7 @@ function makeDeps(
   };
 }
 
-describe('botmux app smoke', () => {
+describe('desktop smoke', () => {
   const appPaths = [
     '/Applications/Botmux.app',
     '/Applications/Botmux.app/Contents/MacOS/Botmux',

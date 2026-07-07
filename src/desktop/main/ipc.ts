@@ -176,7 +176,11 @@ function isNoActiveDashboardToken(result: { stderr: string; stdout: string }): b
 
 function classifyDashboardLocateFailure(message: string): DashboardLocateFailureReason {
   const normalized = message.toLowerCase();
-  if (normalized.includes('botmux upgrade --with-app') || normalized.includes('兼容')) return 'incompatible';
+  if (
+    normalized.includes('src/desktop/install-local.sh') ||
+    normalized.includes('desktop 兼容') ||
+    normalized.includes('兼容')
+  ) return 'incompatible';
   if (normalized.includes('no-secret') || normalized.includes('.dashboard-secret') || normalized.includes('not initialised')) {
     return 'no_secret';
   }

@@ -44,7 +44,7 @@ export function shouldKeepLoadedDashboardDuringDegradedState(state: DesktopRunti
   // Incompatibility means the already-loaded dashboard may speak a different
   // shell protocol, so unload it. Transient PM2/discovery failures can keep the
   // visible webview while the sidebar explains the degraded state.
-  return !message.includes('botmux upgrade --with-app') && !message.includes('兼容') && !message.includes('protocol');
+  return !message.includes('src/desktop/install-local.sh') && !message.includes('兼容') && !message.includes('protocol');
 }
 
 export function isRuntimeState(value: unknown): value is DesktopRuntimeState {

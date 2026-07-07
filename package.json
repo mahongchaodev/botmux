@@ -39,6 +39,7 @@
     "report:dashboard": "tsx scripts/report-dashboard.ts",
     "desktop:bundle": "esbuild src/desktop/main.ts --bundle --outfile=dist/desktop/main.cjs --platform=node --format=cjs --external:electron && esbuild src/desktop/preload.ts --bundle --outfile=dist/desktop/preload.cjs --platform=node --format=cjs --external:electron && esbuild src/desktop/renderer/app.ts --bundle --outfile=dist/desktop/renderer/app.js --platform=browser --format=iife && cp src/desktop/renderer/index.html dist/desktop/renderer/index.html && cp src/desktop/renderer/style.css dist/desktop/renderer/style.css",
     "desktop:smoke": "tsx scripts/desktop-smoke.ts",
+    "desktop:install:local": "bash src/desktop/install-local.sh",
     "desktop:dev": "pnpm build && pnpm desktop:bundle && electron dist/desktop/main.cjs",
     "desktop:pack": "pnpm desktop:pack:local",
     "desktop:pack:local": "pnpm build && pnpm desktop:bundle && electron-builder --mac dmg zip --config electron-builder.yml",

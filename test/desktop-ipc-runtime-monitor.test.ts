@@ -240,7 +240,7 @@ describe('desktop dashboard locate IPC', () => {
     const runtime = {
       getState: vi.fn().mockResolvedValue({
         status: 'degraded',
-        message: '请运行 botmux upgrade --with-app 更新 App 后再继续。',
+        message: '请更新源码后重新运行 src/desktop/install-local.sh 后再继续。',
       }),
       start: vi.fn(),
       stop: vi.fn(),
@@ -258,7 +258,7 @@ describe('desktop dashboard locate IPC', () => {
     await expect(handlers.get('desktop:locate-dashboard')?.({} as any)).resolves.toEqual({
       ok: false,
       reason: 'incompatible',
-      message: '请运行 botmux upgrade --with-app 更新 App 后再继续。',
+      message: '请更新源码后重新运行 src/desktop/install-local.sh 后再继续。',
     });
     expect(runtime.dashboard).not.toHaveBeenCalled();
   });

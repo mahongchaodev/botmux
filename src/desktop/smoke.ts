@@ -89,7 +89,7 @@ export async function runAppSmokeCommand(args: string[], deps: AppSmokeDeps): Pr
   }
 
   if (deps.platform !== 'darwin') {
-    record('macOS platform', false, 'botmux app smoke 目前只支持 macOS App 检查');
+    record('macOS platform', false, 'desktop smoke 目前只支持 macOS App 检查');
     return 1;
   }
 
@@ -181,9 +181,9 @@ function parseSmokeOptions(args: string[], deps: AppSmokeDeps): AppSmokeOptions 
 
 export function appSmokeUsage(): string {
   return `用法:
-  botmux app smoke [--app-path /Applications/Botmux.app]
-  botmux app smoke [--dashboard-url http://127.0.0.1:7891]
-  botmux app smoke --skip-dashboard
+  pnpm desktop:smoke --app-path /Applications/Botmux.app
+  pnpm desktop:smoke --dashboard-url http://127.0.0.1:7891
+  pnpm desktop:smoke --skip-dashboard
 
 说明:
   执行只读冒烟检查：App 包结构、签名、Info.plist、CLI status 和 dashboard compat。`;

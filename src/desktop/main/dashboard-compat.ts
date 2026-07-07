@@ -2,6 +2,7 @@ import type { DashboardLocateResult } from '../shared/types.js';
 
 const supportedDashboardProtocolVersion = 1;
 const defaultCompatTimeoutMs = 3000;
+const sourceInstallHint = '请更新源码后重新运行 src/desktop/install-local.sh，或在外部浏览器打开控制台。';
 
 type DashboardCompatFailureReason = Extract<DashboardLocateResult, { ok: false }>['reason'];
 
@@ -59,7 +60,7 @@ export async function validateDashboardCompat(
       return {
         ok: false,
         reason: 'incompatible',
-        message: `当前 CLI 未提供 Desktop 兼容协议 ${new URL(compatUrl).pathname}（HTTP ${response.status}），请运行 botmux upgrade --with-app 更新 CLI/App，或在外部浏览器打开控制台。`,
+        message: `当前 CLI 未提供 Desktop 兼容协议 ${new URL(compatUrl).pathname}（HTTP ${response.status}），${sourceInstallHint}`,
       };
     }
 
@@ -70,7 +71,7 @@ export async function validateDashboardCompat(
       return {
         ok: false,
         reason: 'incompatible',
-        message: '当前 CLI 返回的 Desktop 兼容信息格式不正确，请运行 botmux upgrade --with-app 更新 CLI/App。',
+        message: `当前 CLI 返回的 Desktop 兼容信息格式不正确，${sourceInstallHint}`,
       };
     }
     return validateCompatManifest(manifest);
@@ -92,7 +93,7 @@ function validateCompatManifest(manifest: unknown): DashboardCompatResult {
     return {
       ok: false,
       reason: 'incompatible',
-      message: '当前 CLI 返回的 Desktop 兼容信息格式不正确，请运行 botmux upgrade --with-app 更新 CLI/App。',
+      message: `当前 CLI 返回的 Desktop 兼容信息格式不正确，${sourceInstallHint}`,
     };
   }
 
@@ -100,7 +101,7 @@ function validateCompatManifest(manifest: unknown): DashboardCompatResult {
     return {
       ok: false,
       reason: 'incompatible',
-      message: `当前 CLI dashboard 协议 v${manifest.dashboardProtocolVersion} 高于 Desktop 支持的 v${supportedDashboardProtocolVersion}，请运行 botmux upgrade --with-app 更新 App。`,
+      message: `当前 CLI dashboard 协议 v${manifest.dashboardProtocolVersion} 高于 Desktop 支持的 v${supportedDashboardProtocolVersion}，${sourceInstallHint}`,
     };
   }
 
@@ -108,7 +109,7 @@ function validateCompatManifest(manifest: unknown): DashboardCompatResult {
     return {
       ok: false,
       reason: 'incompatible',
-      message: '当前 CLI dashboard 不支持 Desktop shell，请运行 botmux upgrade --with-app 更新 CLI。',
+      message: `当前 CLI dashboard 不支持 Desktop shell，${sourceInstallHint}`,
     };
   }
 
