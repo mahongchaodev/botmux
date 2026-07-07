@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 
 export interface PlatformBinding {
-  /** 平台对外地址，如 https://botmux.bytedance.net 或本地 http://localhost:8000 */
+  /** 平台对外地址 */
   platformUrl: string;
   /** 本机稳定标识（重绑保持不变） */
   machineId: string;
