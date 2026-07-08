@@ -1743,7 +1743,6 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       scope: 'chat',
       anchor: 'chat-substitute',
       larkAppId: MY_APP_ID,
-      bypassTalkGate: true,
       substituteTrigger: {
         target: { name: 'Sub Person', userId: 'u_sub' },
         disclosure: 'prefix',
@@ -1752,7 +1751,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
-  it('substituteMode: @substitute from a non-canTalk sender still routes to CLI', async () => {
+  it('substituteMode: @substitute from a non-canTalk sender is ignored', async () => {
     setupBotState({
       allowedUsers: ['ou_other_allowed'],
       substituteMode: {
@@ -1773,19 +1772,11 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     await capturedHandlers['im.message.receive_v1'](event);
     await flushEventWork();
 
-    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
-      scope: 'chat',
-      anchor: 'chat-substitute-denied',
-      bypassTalkGate: true,
-      substituteTrigger: {
-        target: { name: 'Sub Person', openId: 'ou_sub' },
-        disclosure: 'prefix',
-      },
-    }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
-  it('substituteMode: non-canTalk first turn reaches handleNewTopic with bypassTalkGate', async () => {
+  it('substituteMode: non-canTalk first turn does not create a session', async () => {
     setupBotState({
       allowedUsers: ['ou_other_allowed'],
       substituteMode: {
@@ -1807,11 +1798,8 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     await capturedHandlers['im.message.receive_v1'](event);
     await flushEventWork();
 
-    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
-      scope: 'chat',
-      anchor: 'chat-substitute-first-turn',
-      bypassTalkGate: true,
-    }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
   it('substituteMode: post inline at can match a userId target', async () => {

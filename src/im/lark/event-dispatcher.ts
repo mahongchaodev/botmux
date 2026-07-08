@@ -1203,8 +1203,6 @@ export interface RoutingContext {
   summaryCommand?: SummaryCommandRuntimeContext;
   /** This turn was triggered by @mentioning a configured substitute person. */
   substituteTrigger?: import('../../types.js').SubstituteTrigger;
-  /** The dispatcher already accepted this turn outside the normal canTalk gate. */
-  bypassTalkGate?: boolean;
   larkAppId: string;
 }
 
@@ -2162,7 +2160,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             && !!message.thread_id
             && await getChatMode(larkAppId, chatId) === 'topic';
           const relax = (!!replyRootId && isAllowed)
-            || !!substituteTrigger
+            || (!!substituteTrigger && isAllowed)
             || (isAllowed && mentionMode === 'never')
             || (isAllowed && mentionMode === 'ambient' && !mentionsAnotherMember(larkAppId, message))
             || ownedTopicGroupFollowup
@@ -2223,7 +2221,6 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             ? { name: 'summary-command', chatKind: summaryCommandMatch.chatKind }
             : undefined,
           substituteTrigger,
-          bypassTalkGate: !!substituteTrigger,
         };
         // Serialize per anchor so two messages to the same thread/chat are
         // processed in arrival order — never concurrently. Without this a fast

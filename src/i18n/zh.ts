@@ -245,7 +245,6 @@ export const messages: Record<string, string> = {
   'cmd.substitute.unsupported': '⚠️ /substitute 仅支持普通群。',
   'cmd.substitute.owner_only': '⚠️ 只有 owner/allowedUsers 可以修改替身模式开关。',
   'cmd.substitute.usage': '用法：@我 /substitute status｜on｜off',
-  'cmd.substitute.need_working_dir': '⚠️ 当前机器人未配置自己的默认工作目录 / oncall 目录，无法直接代答。请 owner 先在 Dashboard 的 Bot 配置里设置「默认工作目录」或「Oncall 模式」，再使用替身模式。',
   'cmd.restart.in_progress': '🔄 正在重启 {cliName}...',
   'cmd.restart.terminated': '{cliName} 进程已终止，下次发消息时将自动恢复。',
   'cmd.cd.usage': '用法：/cd <path>\n例如：/cd ~/projects/my-app',

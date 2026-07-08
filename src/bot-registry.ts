@@ -647,8 +647,8 @@ export interface BotConfig {
   regularGroupMentionMode?: 'always' | 'topic' | 'never' | 'ambient';
   /**
    * Regular-group substitute trigger. When enabled, an @mention of one of the
-   * configured people is treated as an address to this bot, independent of
-   * canTalk. Matching currently uses mention open_id / user_id / union_id;
+   * configured people is treated as an address to this bot when the sender can
+   * talk to the bot. Matching currently uses mention open_id / user_id / union_id;
    * email is preserved for future resolution but is not matched directly.
    */
   substituteMode?: SubstituteModeConfig;

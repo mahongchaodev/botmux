@@ -546,14 +546,12 @@ export async function enforceMessageQuotaForCliInput(
   anchor: string,
   senderUnionId?: string,
   memberUnionId?: string,
-  bypassTalkGate = false,
 ): Promise<boolean> {
   // senderUnionId（bot-locked）让 evaluateTalk 认出跨部署团队 peer bot（teamBot 腿）；
   // memberUnionId（可为真人 union）走 teamMember 腿——否则外部闸门/群闸门放进来的
   // 团队 bot 或团队成员消息会在这里复查处被静默丢弃（#332 端到端断点，人腿同理）。
   const ev = evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId);
   if (!ev.allowed) {
-    if (bypassTalkGate) return true;
     logger.debug(`[quota:${larkAppId}] dropping message ${messageId.substring(0, 12)} from non-allowed sender ${senderOpenId?.substring(0, 12) ?? '?'}`);
     return false;
   }
@@ -2725,7 +2723,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     }
   }
 
-  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, teamTrustUnionId, senderUnionId, ctx.bypassTalkGate === true)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, teamTrustUnionId, senderUnionId)) {
     return;
   }
 
@@ -2761,13 +2759,6 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // Auto-worktree: register PENDING (router buffers concurrent msgs, no force-fork)
   // and build the worktree off the critical path (willAutoWorktree / runAutoWorktreeCommit).
   const autoWt = willAutoWorktree(larkAppId, pinnedWorkingDir, pinnedFromBotDefault);
-  const senderCanTalk = evaluateTalk(larkAppId, chatId, senderOpenId).allowed;
-  const untrustedSubstituteNeedsOwnerDir = substituteTrigger && !senderCanTalk && (!pinnedWorkingDir || !!inheritedFrom);
-  if (untrustedSubstituteNeedsOwnerDir) {
-    await sessionReply(anchor, tr('cmd.substitute.need_working_dir', undefined, localeForBot(larkAppId)), 'text', larkAppId);
-    logger.info(`[substitute:${larkAppId}] dropped ungranted substitute turn without own pinned working dir chat=${chatId.substring(0, 12)} msg=${messageId.substring(0, 12)}`);
-    return;
-  }
 
   // Create session in pending-repo state — don't spawn CLI yet.
   // For thread-scope, rootMessageId == anchor (the thread root). Critical
@@ -2781,11 +2772,9 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const rootIdForStore = scope === 'thread' ? anchor : messageId;
   const session = sessionStore.createSession(chatId, rootIdForStore, parsed.content.substring(0, 50), chatType);
   const now = Date.now();
-  const ownerOpenId = substituteTrigger && !senderCanTalk ? undefined : senderOpenId;
-  const ownerUnionId = substituteTrigger && !senderCanTalk ? undefined : senderUnionId;
   session.larkAppId = larkAppId;
-  session.ownerOpenId = ownerOpenId;
-  session.ownerUnionId = ownerUnionId;
+  session.ownerOpenId = senderOpenId;
+  session.ownerUnionId = senderUnionId;
   session.lastCallerOpenId = senderOpenId;
   // First turn of a brand-new topic: seed quoteTarget* so the very first
   // `botmux send` can --mention-back / 引用 the triggering message (chat scope).
@@ -2819,7 +2808,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     pendingMentions: parsed.mentions,
     pendingSubstituteTrigger: substituteTrigger,
     pendingSender: newTopicSender,
-    ownerOpenId,
+    ownerOpenId: senderOpenId,
     currentTurnTitle: content.substring(0, 50),
     workingDir: pinnedWorkingDir,
   };
@@ -3129,7 +3118,7 @@ function lookupForeignBotName(senderOpenId: string, larkAppId: string): string {
 }
 
 async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> {
-  const { chatId: ctxChatId, chatType: ctxChatType, scope, anchor, larkAppId, replyRootId, substituteTrigger, bypassTalkGate } = ctx;
+  const { chatId: ctxChatId, chatType: ctxChatType, scope, anchor, larkAppId, replyRootId, substituteTrigger } = ctx;
   await resolveNonsupportMessage(data, larkAppId);
   const { parsed, resources } = parseEventMessage(data);
 
@@ -3475,7 +3464,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   }
 
   const quotaSenderOpenId = threadSenderOpenId;
-  if (!await enforceMessageQuotaForCliInput(larkAppId, ctxChatId ?? data?.message?.chat_id, quotaSenderOpenId, parsed.messageId, anchor, threadTeamTrustUnionId, threadSenderUnionId, bypassTalkGate === true)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, ctxChatId ?? data?.message?.chat_id, quotaSenderOpenId, parsed.messageId, anchor, threadTeamTrustUnionId, threadSenderUnionId)) {
     return;
   }
 

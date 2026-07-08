@@ -242,7 +242,6 @@ export const messages: Record<string, string> = {
   'cmd.substitute.unsupported': '⚠️ /substitute only works in regular groups.',
   'cmd.substitute.owner_only': '⚠️ Only owner/allowedUsers can change substitute mode.',
   'cmd.substitute.usage': 'Usage: @me /substitute status | on | off',
-  'cmd.substitute.need_working_dir': '⚠️ This bot has no own default working directory / oncall directory, so it cannot answer directly as a substitute. Ask the owner to configure Default Working Directory or Oncall mode in Dashboard Bot Defaults, then use substitute mode.',
   'cmd.restart.in_progress': '🔄 Restarting {cliName}…',
   'cmd.restart.terminated': '{cliName} has been terminated; it will auto-resume on your next message.',
   'cmd.cd.usage': 'Usage: /cd <path>\nExample: /cd ~/projects/my-app',
