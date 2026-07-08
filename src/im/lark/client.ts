@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync, createWriteStream, mkdirSync, existsSync } from 'node:fs';
 import { dirname, extname, basename, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { Client, LoggerLevel } from '@larksuiteoapi/node-sdk';
-import { getBotClient, getAllBots, getBot } from '../../bot-registry.js';
+import { Client } from '@larksuiteoapi/node-sdk';
+import { getBotClient, getAllBots, getBot, formatLarkError } from '../../bot-registry.js';
 import { loadBotConfigs } from '../../bot-registry.js';
 import { config } from '../../config.js';
 import { emitHookEvent } from '../../services/hook-runner.js';
@@ -35,14 +35,34 @@ export async function larkGet(c: any, url: string, params: LarkRequestParams = {
   return c.request({ method: 'GET', url, params });
 }
 
-// Cached lightweight Lark clients for all configured bots (for isInChat checks)
+// Cached lightweight Lark clients for all configured bots (for isInChat checks).
+//
+// These clients exist solely for the is_in_chat probe below, where failures are
+// EXPECTED for configured bots that can't be checked against this chat
+// (other-tenant bot → 232010, app missing im:chat scopes → 99991672). The SDK's
+// generic request() dumps the full AxiosError through its logger before
+// rethrowing, so with the default console logger every probe miss splashed a
+// ~100-line stack/config blob into `botmux bots list` stdout / daemon logs.
+// Silencing via loggerLevel is impossible — the SDK's LoggerProxy does
+// `params.loggerLevel || LoggerLevel.info` and `LoggerLevel.fatal` is 0/falsy —
+// so route the SDK's own logging to a condensed debug line instead. The probe's
+// catch below stays the primary reporter (also one debug line per miss).
+const fmtProbe = (msg: any[]) => msg.map((m) => formatLarkError(m) ?? (typeof m === 'string' ? m : String(m))).join(' ');
+const probeLarkLogger = {
+  fatal: (...msg: any[]) => logger.debug(`[lark:isInChat] ${fmtProbe(msg)}`),
+  error: (...msg: any[]) => logger.debug(`[lark:isInChat] ${fmtProbe(msg)}`),
+  warn:  (...msg: any[]) => logger.debug(`[lark:isInChat] ${fmtProbe(msg)}`),
+  info:  (..._msg: any[]) => { /* 'client ready' × every configured bot — noise */ },
+  debug: (..._msg: any[]) => { /* dropped */ },
+  trace: (..._msg: any[]) => { /* dropped */ },
+};
 let allBotClients: Array<{ appId: string; cliId: string; client: InstanceType<typeof Client> }> | null = null;
 function getAllBotClients() {
   if (!allBotClients) {
     allBotClients = loadBotConfigs().map((cfg) => ({
       appId: cfg.larkAppId,
       cliId: cfg.cliId,
-      client: new Client({ appId: cfg.larkAppId, appSecret: cfg.larkAppSecret, domain: sdkDomain(normalizeBrand(cfg.brand)), loggerLevel: LoggerLevel.error }),
+      client: new Client({ appId: cfg.larkAppId, appSecret: cfg.larkAppSecret, domain: sdkDomain(normalizeBrand(cfg.brand)), logger: probeLarkLogger }),
     }));
   }
   return allBotClients;
@@ -648,6 +668,24 @@ export async function getMessageDetail(
     throw new Error(`Failed to get message: ${res.msg} (code: ${res.code})`);
   }
   return res.data;
+}
+
+export async function getMessageChatId(larkAppId: string, messageId: string): Promise<string | null> {
+  try {
+    const detail = await getMessageDetail(larkAppId, messageId, { userCardContent: false });
+    const candidates = [
+      detail?.items?.[0]?.chat_id,
+      detail?.chat_id,
+      detail?.message?.chat_id,
+    ];
+    for (const v of candidates) {
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    return null;
+  } catch (err) {
+    logger.debug(`[message] failed to resolve chat_id for ${messageId.substring(0, 12)}: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
 }
 
 export async function downloadMessageResource(larkAppId: string, messageId: string, fileKey: string, type: 'image' | 'file', savePath: string): Promise<void> {
@@ -1365,7 +1403,7 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
           };
         }
       } catch (err) {
-        logger.debug(`isInChat check failed for ${appId}: ${err}`);
+        logger.debug(`isInChat check failed for ${appId}: ${formatLarkError(err) ?? err}`);
       }
       return null;
     }),

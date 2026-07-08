@@ -1,7 +1,7 @@
 /**
  * Session cost calculator — computes token usage from JSONL logs.
  */
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, type Stats } from 'node:fs';
+import { existsSync, readFileSync, statSync, type Stats } from 'node:fs';
 import { logger } from '../utils/logger.js';
 import type { CliId } from '../adapters/cli/types.js';
 import { findAidenLatestCheckpointByBotmuxSessionId, findAidenLatestCheckpointBySessionId } from '../services/aiden-checkpoints.js';
@@ -10,6 +10,7 @@ import {
   cachedTranscriptPathLookup,
   resolveSessionTranscriptPath,
 } from '../services/transcript-resolver.js';
+import { scanJsonlFromOffset } from '../services/jsonl-cursor.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -126,6 +127,12 @@ function usageKindForCli(cliId: SessionTokenUsageQuery['cliId']): UsageKind {
     case 'relay':
       return 'claude';
     case 'codex':
+    // TRAE rollouts are byte-identical to Codex (see traex-transcript.ts):
+    // token_count events carry the cumulative totals, and the active model
+    // rides on turn_context/session_meta payloads. The generic fold picked up
+    // the tokens but never the model, so traex ledger records shipped with
+    // model "" (consumers like kaboo fall back to "unknown").
+    case 'traex':
       return 'codex';
     case 'coco':
       return 'coco';
@@ -233,13 +240,14 @@ function readTokenUsageAggregate(path: string, kind: UsageKind): TokenUsageAggre
   const seenMessageIds = new Set<string>();
 
   try {
-    const content = readFileSync(path, 'utf-8');
-    for (const line of content.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line);
-        foldUsageLine(kind, agg, seenMessageIds, entry);
-      } catch { /* skip malformed lines */ }
+    let scanError: unknown = null;
+    const scanned = scanJsonlFromOffset(path, 0, {
+      onLine: (line) => foldUsageJsonLine(kind, agg, seenMessageIds, line),
+      onError: (error) => { scanError = error; },
+    });
+    if (!scanned) throw scanError instanceof Error ? scanError : new Error('scan failed');
+    if (scanned.pendingTail.trim()) {
+      foldUsageJsonLine(kind, agg, seenMessageIds, scanned.pendingTail);
     }
   } catch (err: any) {
     logger.error(`Failed to read session token usage JSONL (${kind}): ${err.message}`);
@@ -293,13 +301,18 @@ const USAGE_FILE_CACHE_MAX_ENTRIES = 512;
 /** While a transcript keeps changing, serve the cached value and reparse at
  *  most once per interval — keeps row composition off the disk. */
 const USAGE_REPARSE_MIN_INTERVAL_MS = 15_000;
+/** Token usage is advisory. Never let dashboard row rendering synchronously
+ *  scan pathological multi-GB transcripts. */
+export const MAX_USAGE_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 
 /** Aiden checkpoint paths move as the session progresses (latest.json points
  *  at a new checkpoint id per turn), so positive hits expire quickly too. */
 const AIDEN_PATH_HIT_TTL_MS = 15_000;
+const warnedOversizedUsageFiles = new Set<string>();
 
 export function __resetSessionUsageCachesForTest(): void {
   usageFileCache.clear();
+  warnedOversizedUsageFiles.clear();
   __resetTranscriptResolverCacheForTest();
 }
 
@@ -316,25 +329,11 @@ function foldUsageText(kind: UsageKind, agg: TokenUsageAggregate, seenMessageIds
   }
 }
 
-function readFileSlice(path: string, start: number, length: number): Buffer | null {
+function foldUsageJsonLine(kind: UsageKind, agg: TokenUsageAggregate, seenMessageIds: Set<string>, line: string): void {
+  if (!line.trim()) return;
   try {
-    const fd = openSync(path, 'r');
-    const buf = Buffer.alloc(length);
-    let bytesRead = 0;
-    try {
-      while (bytesRead < length) {
-        const n = readSync(fd, buf, bytesRead, length - bytesRead, start + bytesRead);
-        if (n <= 0) break;
-        bytesRead += n;
-      }
-    } finally {
-      closeSync(fd);
-    }
-    return buf.subarray(0, bytesRead);
-  } catch (err: any) {
-    logger.error(`Failed to read transcript slice ${path}: ${err.message}`);
-    return null;
-  }
+    foldUsageLine(kind, agg, seenMessageIds, JSON.parse(line));
+  } catch { /* skip malformed lines */ }
 }
 
 interface UsageReadResult {
@@ -370,6 +369,20 @@ function readSessionTokenAggregateCached(path: string, kind: CachedUsageKind, op
     if (unchanged || throttled) {
       return { agg: cached.previewAgg, result: cached.result };
     }
+  }
+
+  if (st.size > MAX_USAGE_TRANSCRIPT_BYTES) {
+    // Warn once per transcript, not per observed size: an actively-growing
+    // oversized file would otherwise re-warn and leak a Set entry every reparse.
+    if (!warnedOversizedUsageFiles.has(key)) {
+      warnedOversizedUsageFiles.add(key);
+      logger.warn(
+        `Skipping token usage scan for oversized transcript ${path} ` +
+        `(${st.size} bytes > ${MAX_USAGE_TRANSCRIPT_BYTES} bytes)`,
+      );
+    }
+    if (cached) return { agg: cached.previewAgg, result: cached.result };
+    return { agg: newTokenUsageAggregate(), result: null };
   }
 
   if (usageFileCache.size >= USAGE_FILE_CACHE_MAX_ENTRIES && !usageFileCache.has(key)) {
@@ -408,22 +421,25 @@ function readSessionTokenAggregateCached(path: string, kind: CachedUsageKind, op
     baseOffset = 0;
   }
 
-  const chunk = readFileSlice(path, baseOffset, st.size - baseOffset);
-  if (!chunk) {
+  let scanError: unknown = null;
+  const scanned = scanJsonlFromOffset(path, baseOffset, {
+    endOffset: st.size,
+    onLine: (line) => foldUsageJsonLine(kind, state, seenMessageIds, line),
+    onError: (error) => { scanError = error; },
+  });
+  if (!scanned) {
+    logger.error(`Failed to read transcript slice ${path}: ${scanError instanceof Error ? scanError.message : String(scanError)}`);
     usageFileCache.delete(key);
     return null;
   }
-
-  const lastNewline = chunk.lastIndexOf(0x0a);
-  const completeBytes = lastNewline >= 0 ? lastNewline + 1 : 0;
-  foldUsageText(kind, state, seenMessageIds, chunk.toString('utf8', 0, completeBytes));
+  const completeBytes = scanned.newOffset - baseOffset;
 
   // The bytes after the last newline may still be a complete JSON record
   // (writer mid-flush). Fold them into a preview copy only — the durable
   // frontier stays at the newline, so the line is folded durably exactly
   // once when its terminator arrives.
   let previewAgg = state;
-  const tailText = chunk.toString('utf8', completeBytes).trim();
+  const tailText = scanned.pendingTail.trim();
   if (tailText) {
     previewAgg = cloneAggregate(state);
     foldUsageText(kind, previewAgg, new Set(seenMessageIds), tailText);

@@ -327,6 +327,39 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
+.topbar-create-session {
+  white-space: nowrap;
+}
+
+/* 文档站外链——沿用主题菜单 chip 的外观，和其它 topbar 控件对齐 */
+.topbar-docs-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color .15s ease;
+}
+.topbar-docs-link:hover { border-color: var(--muted); }
+.topbar-docs-link svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* Theme dropdown — custom listbox so each option can show a real Lucide line
    icon (a native <select> can't render SVG). Sits with the other topbar chips. */
 .theme-menu { position: relative; }
@@ -2933,6 +2966,31 @@ input.row-select,
   color: var(--faint);
   font-family: var(--mono);
 }
+.roles-editor-inject {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 -2px;
+}
+.roles-editor-inject > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+/* Inherit the global themed <select> look (surface bg, border, chevron); only
+   nudge it more compact for this inline control. */
+.roles-editor-inject > select {
+  min-height: 28px;
+  padding: 3px 26px 3px 9px;
+  font-size: 12px;
+}
+.roles-editor-inject-hint {
+  font-size: 11px;
+  color: var(--faint);
+  flex: 1 1 240px;
+  min-width: 160px;
+}
 .roles-profile-detail {
   gap: 16px;
   min-height: 0;
@@ -4287,6 +4345,105 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
   color: var(--faint);
   font-size: 10.5px;
 }
+/* 机器人改名（档案头 ✎ → 行内编辑器） */
+.bd-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.bd-name-row strong { display: inline; }
+.bd-name-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  flex: none;
+  /* 常驻淡显、悬停点亮——比 hover 才出现更易被发现，又不抢名字的视觉重心 */
+  opacity: 0.65;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.bd-name-edit:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+.bd-name-edit svg { width: 14px; height: 14px; }
+.bd-name-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.bd-name-editor[hidden] { display: none; }
+.bd-name-input {
+  font-size: 15px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: inherit;
+  width: min(240px, 56vw);
+}
+.bd-name-input:focus { outline: none; border-color: var(--accent); }
+.bd-name-editor button { padding: 4px 12px; font-size: 12px; }
+.bd-name-status { display: block; margin-top: 4px; font-size: 11.5px; }
+.bd-name-status:empty { display: none; }
+/* 「扫码登录飞书」——改名因缺登录态降级时才亮出 */
+.bd-feishu-login {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.bd-feishu-login:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.bd-feishu-login[hidden] { display: none; }
+
+/* 飞书扫码登录 modal */
+.feishu-login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+.feishu-login-modal {
+  position: relative;
+  width: min(360px, 92vw);
+  padding: 24px 24px 20px;
+  border-radius: 16px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+  text-align: center;
+}
+.feishu-login-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 15px;
+  cursor: pointer;
+}
+.feishu-login-close:hover { background: color-mix(in srgb, var(--faint) 18%, transparent); color: inherit; }
+.feishu-login-title { margin: 0 0 8px; font-size: 16px; }
+.feishu-login-hint { margin: 0 0 14px; font-size: 12.5px; color: var(--faint); line-height: 1.5; }
+.feishu-login-qr { min-height: 40px; display: flex; justify-content: center; }
+.feishu-login-actions { margin-top: 14px; }
 .bd-profile-meta {
   margin: 0 0 0 auto;
   display: grid;
@@ -4504,15 +4661,163 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
 
 .skills-source-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+}
+
+.skills-install-action-row,
+.skills-candidate-list,
+.skills-local-discovery-panel {
+  grid-column: 1 / -1;
+}
+
+.skills-install-action-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  align-items: start;
+  padding: 9px 0 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.skills-advanced-options {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.skills-advanced-options summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding-right: 92px;
+  cursor: pointer;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.skills-advanced-marker {
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 6px solid currentColor;
+  flex: 0 0 auto;
+  transform-origin: 45% 50%;
+  transition: transform 140ms ease;
+}
+
+.skills-advanced-options[open] .skills-advanced-marker {
+  transform: rotate(90deg);
+}
+
+.skills-advanced-fields {
+  display: grid;
+  gap: 9px;
+  margin-top: 8px;
+}
+
+.skills-install-actions,
+.skills-local-discovery-panel,
+.skills-candidate-list-head {
+  display: flex;
   gap: 8px;
   align-items: center;
 }
 
-.skills-source-control button {
+.skills-install-actions {
+  position: absolute;
+  top: 9px;
+  right: 0;
+  justify-content: flex-end;
+  min-height: 36px;
+  flex-wrap: nowrap;
+}
+
+.skills-install-actions button,
+.skills-local-discovery-panel button,
+.skills-candidate-list-head button {
   min-height: 36px;
   padding: 0 13px;
   white-space: nowrap;
+}
+
+.skills-candidate-list {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-muted) 65%, transparent);
+}
+
+.skills-candidate-list-head {
+  justify-content: space-between;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.skills-candidate-row {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px !important;
+  align-items: start;
+  color: var(--fg) !important;
+}
+
+.skills-candidate-row input {
+  width: auto;
+  margin-top: 2px;
+}
+
+.skills-candidate-row span {
+  display: grid;
+  min-width: 0;
+}
+
+.skills-candidate-row small {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skills-install-selection-dialog {
+  width: min(720px, calc(100vw - 44px));
+}
+
+.skills-install-selection-body {
+  max-height: 460px;
+}
+
+.skills-local-discovery-panel {
+  justify-content: space-between;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-muted) 55%, transparent);
+}
+
+.skills-local-discovery-panel div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.skills-local-discovery-panel strong {
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.skills-local-discovery-panel span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .skills-main-panel,
@@ -5367,6 +5672,9 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
   .skills-side-rail,
   .skills-install-grid,
   .skills-source-control,
+  .skills-install-actions,
+  .skills-local-discovery-panel,
+  .skills-candidate-list-head,
   .skills-section-head-row,
   .skills-overview,
   .skills-metric-strip,
@@ -5402,6 +5710,27 @@ button.contrast:hover { background: var(--danger-soft); border-color: var(--dang
   }
   .skills-bot-rail-actions {
     justify-content: flex-start;
+  }
+  .skills-install-actions,
+  .skills-local-discovery-panel,
+  .skills-candidate-list-head {
+    display: grid;
+    justify-items: stretch;
+  }
+}
+
+@media (max-width: 460px) {
+  .skills-install-action-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .skills-advanced-options summary {
+    padding-right: 0;
+  }
+  .skills-install-actions {
+    position: static;
+    justify-content: flex-start;
+    justify-items: start;
   }
 }
 

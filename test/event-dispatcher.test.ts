@@ -679,6 +679,8 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     // sender is NOT in our peer cross-ref (random Lark bot, not a botmux peer).
     // Drop it — otherwise random bots could spawn chat-scope sessions in any
     // chat they share with us.
+    // 受限态（配了 allowlist）下 gate 才生效——开放模式人/bot 皆放行（见 open-mode 用例）。
+    setupBotState({ allowedUsers: ['ou_owner'] });
     mockGetChatMode.mockResolvedValueOnce('group');
     // No cross-ref entries → unknown peer
     mockReadFileSync.mockReturnValue('{}');
@@ -697,6 +699,36 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('routes an unknown external bot @mention in OPEN mode (no allowlist → human/bot parity)', async () => {
+    // 开放模式（allowedUsers/allowedChatGroups/globalGrants 全空）下，人侧
+    // evaluateTalk 早已 `reason:'open'` 全放行；bot 侧 vetting gate 必须对齐——
+    // 否则外部 bot @ 会被静默丢弃，必须真人先 @ 一次建会话（ownsSession）才救活。
+    // 这条锁死「开放模式人/bot 同权」：默认 setupBotState() 即无 allowlist。
+    setupBotState();  // open mode: no allowlist configured
+    mockGetChatMode.mockResolvedValueOnce('group');
+    mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
+    const event = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      senderType: 'bot',
+      content: JSON.stringify({
+        zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }]] },
+      }),
+      rootId: undefined,
+    });
+    event.message.root_id = undefined as any;
+    handlers.isSessionOwner.mockReturnValue(false);
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    // No grant card, no drop — routed straight through to a chat-scope session.
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-001',
+      larkAppId: MY_APP_ID,
+    }));
   });
 
   it('sends a grant request card when an unknown external bot is @blocked and the toggle is on', async () => {
@@ -886,6 +918,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     // 给我们发卡片 @mention，sender_type 即使是 'bot'，cross-ref 里没有 →
     // 应该跟 'app' 走 unknown-peer 分支一样被 drop，不能 fall through 到
     // user-message 路径开 chat-scope session。
+    setupBotState({ allowedUsers: ['ou_owner'] });  // 受限态：gate 生效
     mockGetChatMode.mockResolvedValueOnce('group');
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
     const event = makeBotMessageEvent({
@@ -911,6 +944,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     // 它必须排在 vetting gate 之后。否则随机第三方 bot 发 `@bot /t …` 会让闸门
     // 的 `ctx.scope === 'chat' || source === 'regular-group-thread'` 两条件全 false
     // → 绕过 vetting → 静默 spawn 一个 thread-scope 会话。这条用例锁死「不能绕」。
+    setupBotState({ allowedUsers: ['ou_owner'] });  // 受限态：gate 生效
     mockGetChatMode.mockResolvedValueOnce('group');  // 普通群, regularGroupReplyMode unset(chat) → source=regular-group-chat
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
     const event = makeBotMessageEvent({
@@ -970,6 +1004,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     // 我们在新 anchor 上不拥有任何会话。所以 gate 必须按 override 之后的 anchor 算
     // ownsSession，否则未授权 bot 借旧 chat-scope session 的归属绕过 vetting，再被
     // /t 翻成 thread 后在新 anchor 上 auto-create 出一个会话。
+    setupBotState({ allowedUsers: ['ou_owner'] });  // 受限态：gate 生效
     mockGetChatMode.mockResolvedValueOnce('group');
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
     const event = makeBotMessageEvent({
@@ -996,6 +1031,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
   it('still drops an unknown-peer bot on the /topic alias too (alias must not bypass either)', async () => {
     // /t 和 /topic 走同一条 parseForceTopicInvocation，别让别名成为绕过 vetting 的后门。
+    setupBotState({ allowedUsers: ['ou_owner'] });  // 受限态：gate 生效
     mockGetChatMode.mockResolvedValueOnce('group');
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
     const event = makeBotMessageEvent({
@@ -1021,7 +1057,8 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
   it('lets a chat-granted bot use /t to seed a topic (override reachable past the grant exemption)', async () => {
     // 闸门的另一条放行口：chatGrants。override 排在闸门之后，仍须能被这条放行路径到达。
-    setupBotState({ chatGrants: { 'chat-001': [OTHER_BOT_OPEN_ID] } });
+    // 配 owner 进入受限态，让 chatGrants 成为唯一放行理由（否则开放模式会直接跳过 gate）。
+    setupBotState({ allowedUsers: ['ou_owner'], chatGrants: { 'chat-001': [OTHER_BOT_OPEN_ID] } });
     mockGetChatMode.mockResolvedValueOnce('group');
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer，唯一放行靠 grant
     const event = makeBotMessageEvent({
@@ -1110,7 +1147,8 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     // owner 用 `/grant @bot` 把外部 bot 加进本群 chatGrants：即便它不在 peer
     // cross-ref（isKnownPeerBot=false），命中 chatGrants 也应与已注册 peer 同等
     // 放行，拉起 chat-scope session。与上面「unknown peer 被 drop」用例对照。
-    setupBotState({ chatGrants: { 'chat-001': [OTHER_BOT_OPEN_ID] } });
+    // 配 owner 进入受限态，让 chatGrants 成为唯一放行理由（否则开放模式会直接跳过 gate）。
+    setupBotState({ allowedUsers: ['ou_owner'], chatGrants: { 'chat-001': [OTHER_BOT_OPEN_ID] } });
     mockGetChatMode.mockResolvedValueOnce('group');
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
     const event = makeBotMessageEvent({
@@ -1135,7 +1173,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
   it('does not let a chat-grant for one chat leak into a different chat', async () => {
     // chatGrants 是 per-chat：在 chat-001 授权的 bot 到了 chat-999 仍应被 drop。
-    setupBotState({ chatGrants: { 'chat-001': [OTHER_BOT_OPEN_ID] } });
+    // 注意 chatGrants 本身不构成「受限态」（hasConfiguredAllowlist 只认
+    // allowedUsers/allowedChatGroups/globalGrants），故须另配 owner 让 gate 生效。
+    setupBotState({ allowedUsers: ['ou_owner'], chatGrants: { 'chat-001': [OTHER_BOT_OPEN_ID] } });
     mockGetChatMode.mockResolvedValueOnce('group');
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
     const event = makeBotMessageEvent({
@@ -2129,6 +2169,59 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       anchor: 'owned-topic-root',
       larkAppId: MY_APP_ID,
     }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('topic group default, MULTI-bot: a non-@ reply inside an owned topic is ignored (@ required)', async () => {
+    // Regression for the #336 relax leaking into multi-bot topics: with 2+ bots
+    // in the group, every co-resident bot owns a session on the same thread
+    // anchor, so a non-@ (or @-someone-else) reply must NOT be answered.
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default always
+    mockGetChatMode.mockResolvedValue('topic');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 2 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'no @ in a multi-bot topic group' }),
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-in-owned-topic-multibot',
+      chatId: 'chat-topic-group-multibot',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('topic group default: a reply @mentioning ANOTHER member inside an owned topic backs off', async () => {
+    // Redirect carve-out (mirrors ambient): "@SomeoneElse do X" inside the
+    // topic addresses someone else — this bot must stay quiet even though it
+    // owns a session here and the group has no other bot.
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default always
+    mockGetChatMode.mockResolvedValue('topic');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 1 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Other please take this one' }),
+      mentions: [{ key: '@_other', name: 'Other', id: { open_id: 'ou_other_member' } }],
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-in-owned-topic-redirect',
+      chatId: 'chat-topic-group-redirect',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 

@@ -4,7 +4,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startIpcServer, setLarkAppId, setIpcAuthSecret, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
+import { startIpcServer, setLarkAppId, setIpcAuthSecret, setBotRenamer, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
 import * as groupsStore from '../src/services/groups-store.js';
 import * as oncallStore from '../src/services/oncall-store.js';
@@ -273,6 +273,91 @@ describe('POST /api/sessions/:sessionId/restart', () => {
     expect(res.status).toBe(502);
     expect(await res.json()).toMatchObject({ ok: false });
     findSpy.mockRestore();
+  });
+});
+
+describe('POST /api/sessions/:sessionId/suspend', () => {
+  it('suspends a live session via suspendWorker (manual_suspend reason)', async () => {
+    const ds = {
+      session: { sessionId: 's-susp', cliId: 'claude-code' },
+      worker: { send: vi.fn(), killed: false },
+      adoptedFrom: undefined,
+    } as any;
+    const findSpy = vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue(ds);
+    const suspendSpy = vi.spyOn(workerPool, 'suspendWorker').mockReturnValue(true);
+
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/s-susp/suspend`, { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, sessionId: 's-susp', suspended: true });
+    expect(suspendSpy).toHaveBeenCalledWith(ds, 'manual_suspend');
+    findSpy.mockRestore();
+    suspendSpy.mockRestore();
+  });
+
+  it('404s for sessions that are not active', async () => {
+    const findSpy = vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue(undefined);
+
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/missing/suspend`, { method: 'POST' });
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ ok: false, error: 'session_not_active' });
+    findSpy.mockRestore();
+  });
+
+  it('rejects adopt/observed sessions (suspending would kill the user pane)', async () => {
+    const suspendSpy = vi.spyOn(workerPool, 'suspendWorker').mockReturnValue(true);
+    const findSpy = vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
+      session: { sessionId: 's-adopt-susp', cliId: 'codex' },
+      worker: { send: vi.fn(), killed: false },
+      adoptedFrom: { source: 'tmux', tmuxTarget: '0:1.0', cwd: '/x' },
+    } as any);
+
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/s-adopt-susp/suspend`, { method: 'POST' });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, error: 'adopt_suspend_unsupported' });
+    expect(suspendSpy).not.toHaveBeenCalled();
+    findSpy.mockRestore();
+    suspendSpy.mockRestore();
+  });
+
+  it('is idempotent when the worker is already gone (idle-suspended earlier)', async () => {
+    const suspendSpy = vi.spyOn(workerPool, 'suspendWorker').mockReturnValue(true);
+    const findSpy = vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
+      session: { sessionId: 's-gone', cliId: 'codex' },
+      worker: null,
+      adoptedFrom: undefined,
+    } as any);
+
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/s-gone/suspend`, { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, suspended: false, reason: 'no_live_worker' });
+    expect(suspendSpy).not.toHaveBeenCalled();
+    findSpy.mockRestore();
+    suspendSpy.mockRestore();
+  });
+
+  it('409s when the backend is not suspendable (suspendWorker returns false)', async () => {
+    const findSpy = vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
+      session: { sessionId: 's-pty', cliId: 'codex' },
+      worker: { send: vi.fn(), killed: false },
+      adoptedFrom: undefined,
+    } as any);
+    const suspendSpy = vi.spyOn(workerPool, 'suspendWorker').mockReturnValue(false);
+
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/s-pty/suspend`, { method: 'POST' });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, error: 'backend_not_suspendable' });
+    findSpy.mockRestore();
+    suspendSpy.mockRestore();
   });
 });
 
@@ -686,6 +771,100 @@ describe('PUT /api/bot-agent', () => {
       else process.env.BOTS_CONFIG = prevBotsConfig;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('PUT /api/bot-rename', () => {
+  async function withRenameServer(fn: (base: string, configPath: string) => Promise<void>): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-rename-ipc-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-rename-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'claude-code',
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      await fn(`http://127.0.0.1:${handle.port}`, configPath);
+    } finally {
+      setBotRenamer(null);
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('renames via the wired Open Platform renamer (mode=feishu, no displayName written)', async () => {
+    await withRenameServer(async (base, configPath) => {
+      const seen: string[] = [];
+      setBotRenamer(async (name) => { seen.push(name); return { ok: true, name }; });
+
+      const res = await fetch(`${base}/api/bot-rename`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: '  新名字  ' }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, mode: 'feishu' });
+      expect(seen).toEqual(['新名字']); // trimmed before hitting the renamer
+      // Feishu rename succeeded → no local alias persisted by the route.
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].displayName).toBeUndefined();
+    });
+  });
+
+  it('falls back to the local displayName with a warning when the renamer fails', async () => {
+    await withRenameServer(async (base, configPath) => {
+      setBotRenamer(async () => ({ ok: false, reason: 'no_session', message: 'run botmux setup' }));
+
+      const res = await fetch(`${base}/api/bot-rename`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: '小助手' }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        ok: true,
+        mode: 'local',
+        warning: 'no_session',
+        message: 'run botmux setup',
+      });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].displayName).toBe('小助手');
+
+      // The local alias surfaces on the bot-defaults GET.
+      const get = await (await fetch(`${base}/api/bot-default-oncall`)).json();
+      expect(get).toMatchObject({ displayName: '小助手' });
+    });
+  });
+
+  it('rejects empty and over-long names without calling the renamer', async () => {
+    await withRenameServer(async (base, configPath) => {
+      let called = 0;
+      setBotRenamer(async (name) => { called++; return { ok: true, name }; });
+
+      const empty = await fetch(`${base}/api/bot-rename`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: '   ' }),
+      });
+      expect(empty.status).toBe(400);
+      expect(await empty.json()).toMatchObject({ ok: false, error: 'name_required' });
+
+      const long = await fetch(`${base}/api/bot-rename`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'x'.repeat(65) }),
+      });
+      expect(long.status).toBe(400);
+      expect(await long.json()).toMatchObject({ ok: false, error: 'too_long' });
+
+      expect(called).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].displayName).toBeUndefined();
+    });
   });
 });
 

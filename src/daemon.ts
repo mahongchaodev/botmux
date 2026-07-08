@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config, getDashboardExternalHost } from './config.js';
 import { repoPickerScanOptions } from './global-config.js';
-import { buildDashboardUrl } from './core/dashboard-url.js';
+import { buildDashboardUrls } from './core/dashboard-url.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
 import { botmuxWrapperFiles } from './core/botmux-wrapper.js';
 import { startMaintenance, stopMaintenance } from './core/maintenance.js';
@@ -17,7 +17,9 @@ import { sendRestartReportIfPending } from './core/restart-report.js';
 import { statSync } from 'node:fs';
 import { addReaction, getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
 import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
-import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChat, effectiveDefaultWorkingDir, type BotState, type OncallChat } from './bot-registry.js';
+import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChat, effectiveDefaultWorkingDir, effectiveBotDisplayName, type BotState, type OncallChat } from './bot-registry.js';
+import { setDisplayNameRefresher, findConfigField, applyConfigField } from './services/bot-config-store.js';
+import { renameBotOnOpenPlatform } from './services/open-platform-rename.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import { ensureDefaultOncallBound } from './services/oncall-store.js';
@@ -63,7 +65,7 @@ import {
   sweepGlobalBotmuxSkills,
   writableTerminalLinkFor,
 } from './core/worker-pool.js';
-import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
+import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner, setBotRenamer } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
 import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
 import { SLASH_COMMAND_SHAPE } from './core/passthrough-commands.js';
@@ -94,7 +96,7 @@ import {
 import { beginReplyTargetTurn, fallbackTurnId, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
 import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
 import { sweepIdleWorkers, DEFAULT_MAX_LIVE_WORKERS } from './core/idle-worker-sweeper.js';
-import { handleCardAction } from './im/lark/card-handler.js';
+import { handleCardAction, runAutoWorktreeCommit } from './im/lark/card-handler.js';
 import type { CardHandlerDeps } from './im/lark/card-handler.js';
 import {
   executeWorkflowCommand,
@@ -144,6 +146,7 @@ import { getRunsDir } from './workflows/runs-dir.js';
 import { loadEffectInputSidecar } from './workflows/effect-input.js';
 import { isValidWorkflowId } from './workflows/catalog.js';
 import { triggerWorkflowRun } from './workflows/trigger-run.js';
+import { botAutoWorktreeEnabled } from './services/default-worktree.js';
 import type { RawParamInput } from './workflows/params.js';
 import type { AbortCancelReason } from './workflows/runtime.js';
 import {
@@ -364,6 +367,12 @@ function silentTurnReactionsFor(ds: DaemonSession): boolean {
   } catch { return false; }
 }
 
+function receivedReactionEmojiFor(ds: DaemonSession): string {
+  try {
+    return getBot(ds.larkAppId).config.receivedReactionEmoji || RECEIVED_REACTION_EMOJI_TYPE;
+  } catch { return RECEIVED_REACTION_EMOJI_TYPE; }
+}
+
 function readSessionFreshFromDisk(sessionId: string, larkAppId: string): import('./types.js').Session | undefined {
   const paths = [
     join(config.session.dataDir, `sessions-${larkAppId}.json`),
@@ -385,7 +394,7 @@ export async function noteTurnReceived(
   _prompt?: string,
   _sender?: { name?: string },
   _turnId?: string,
-  receivedReactionEmoji: string = RECEIVED_REACTION_EMOJI_TYPE,
+  receivedReactionEmoji?: string,
 ): Promise<void> {
   // Replaces the old 「处理中」 placeholder card. That card existed only to be
   // PATCHed with the final answer, and `im.v1.message.patch` is silent (no Feishu
@@ -415,7 +424,7 @@ export async function noteTurnReceived(
   // so a registered entry is always in place before its own turn can go idle.
   let reactionId: string;
   try {
-    reactionId = await addReaction(ds.larkAppId, triggerMessageId, receivedReactionEmoji);
+    reactionId = await addReaction(ds.larkAppId, triggerMessageId, receivedReactionEmoji ?? receivedReactionEmojiFor(ds));
   } catch (err) {
     logger.debug(`[reaction] received add failed for ${triggerMessageId}: ${err instanceof Error ? err.message : String(err)}`);
     return;
@@ -535,9 +544,14 @@ export async function enforceMessageQuotaForCliInput(
   senderOpenId: string | undefined,
   messageId: string,
   anchor: string,
+  senderUnionId?: string,
+  memberUnionId?: string,
   bypassTalkGate = false,
 ): Promise<boolean> {
-  const ev = evaluateTalk(larkAppId, chatId, senderOpenId);
+  // senderUnionId（bot-locked）让 evaluateTalk 认出跨部署团队 peer bot（teamBot 腿）；
+  // memberUnionId（可为真人 union）走 teamMember 腿——否则外部闸门/群闸门放进来的
+  // 团队 bot 或团队成员消息会在这里复查处被静默丢弃（#332 端到端断点，人腿同理）。
+  const ev = evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId);
   if (!ev.allowed) {
     if (bypassTalkGate) return true;
     logger.debug(`[quota:${larkAppId}] dropping message ${messageId.substring(0, 12)} from non-allowed sender ${senderOpenId?.substring(0, 12) ?? '?'}`);
@@ -2294,10 +2308,46 @@ async function resolvePinnedWorkingDir(ctx: {
       })
     : null;
   const pinnedWorkingDir = oncallEntry?.workingDir ?? botDefaultWorkingDir ?? inheritedFrom?.workingDir;
-  return { pinnedWorkingDir, oncallEntry, inheritedFrom };
+  // Did the pinned dir come from this bot's OWN 仅默认目录 (layer 3)? Only that layer
+  // opts into auto-worktree — oncall bindings / sibling inheritance never do. When
+  // there's no oncall entry, pinnedWorkingDir IS botDefaultWorkingDir whenever the
+  // latter is set (it wins over inherit), so `!oncallEntry && botDefaultWorkingDir`
+  // fully characterizes "came from the bot's own default".
+  const pinnedFromBotDefault = !oncallEntry && !!botDefaultWorkingDir;
+  return { pinnedWorkingDir, oncallEntry, inheritedFrom, pinnedFromBotDefault };
 }
 
 export const __testOnly_resolvePinnedWorkingDir = resolvePinnedWorkingDir;
+
+/**
+ * 该新会话是否要走「仅默认目录 + 自动建 worktree」：pinned dir 来自本 bot 自己的
+ * defaultWorkingDir (layer 3) 且开关打开。为真时，spawn 路径不再同步 fork，而是把会话登记
+ * 成 `pendingRepo` 挂起态（入站路由自动 buffer 并发消息、不抢 fork），随后在关键路径之外经
+ * {@link runAutoWorktreeCommit} 建 worktree 并 commit+fork。见 default-worktree.ts / card-handler。*/
+function willAutoWorktree(larkAppId: string, pinnedWorkingDir: string | undefined, pinnedFromBotDefault: boolean): boolean {
+  return !!pinnedWorkingDir && pinnedFromBotDefault && botAutoWorktreeEnabled(larkAppId);
+}
+
+/**
+ * Kick off the DETACHED auto-worktree build for an already-registered `pendingRepo`
+ * session, and surface it on the dashboard immediately (`announcePendingRepoSession`
+ * — otherwise the row is invisible until the worktree's git fetch completes). Shared
+ * by every daemon new-session spawn path (passthrough / new-topic / group-join /
+ * safety-net). Does NOT `noteTurnReceived` (no ✋ ack): the turn only truly starts
+ * when runAutoWorktreeCommit → commitRepoSelection forks, and forking may not happen
+ * (build fails / user /closes) — an early ✋ would be orphaned. The pending dashboard
+ * row is announced inside runAutoWorktreeCommit (one place for all callers). */
+function startAutoWorktreePending(ds: DaemonSession, args: {
+  anchor: string; baseDir: string; title?: string; prompt: string; operatorOpenId?: string;
+}): void {
+  void runAutoWorktreeCommit({
+    ds, anchor: args.anchor, larkAppId: ds.larkAppId, baseDir: args.baseDir,
+    title: args.title, prompt: args.prompt, operatorOpenId: args.operatorOpenId,
+    activeSessions,
+    notify: (m) => sessionReply(args.anchor, m, 'text', ds.larkAppId),
+  });
+  logger.info(`[${tag(ds)}] auto-worktree → pending, building worktree off ${args.baseDir}`);
+}
 
 async function replyInvalidWorkingDirs(
   anchor: string,
@@ -2337,6 +2387,10 @@ async function startInitialPassthroughSession(args: {
   parsed: LarkMessage;
   commandContent: string;
   senderOpenId?: string;
+  /** Bot-locked union_id (quota gate's teamBot leg — bot senders only). */
+  senderUnionId?: string;
+  /** Raw sender union_id (quota gate's teamMember leg — may be a human). */
+  memberUnionId?: string;
   /** Ownership is the CALLER's call — required fields, no sender fallback.
    *  A bot-started cold start must pass undefined (mirrors the auto-create
    *  path): a foreign-bot owner makes daemon-generated footers wake that bot
@@ -2347,9 +2401,9 @@ async function startInitialPassthroughSession(args: {
 }): Promise<void> {
   const {
     larkAppId, chatId, chatType, scope, anchor, messageId, replyRootId,
-    parsed, commandContent, senderOpenId, ownerOpenId, ownerUnionId, creatorOpenId,
+    parsed, commandContent, senderOpenId, senderUnionId, memberUnionId, ownerOpenId, ownerUnionId, creatorOpenId,
   } = args;
-  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, senderUnionId, memberUnionId)) {
     return;
   }
 
@@ -2372,7 +2426,10 @@ async function startInitialPassthroughSession(args: {
   messageQueue.ensureQueue(anchor);
   messageQueue.appendMessage(anchor, { ...parsed, content: commandContent });
 
-  const { pinnedWorkingDir, oncallEntry, inheritedFrom } = await resolvePinnedWorkingDir({ scope, anchor, chatId, chatType, larkAppId });
+  const { pinnedWorkingDir, oncallEntry, inheritedFrom, pinnedFromBotDefault } = await resolvePinnedWorkingDir({ scope, anchor, chatId, chatType, larkAppId });
+  // Auto-worktree: register PENDING (router buffers, no force-fork) and build the
+  // worktree off the critical path (see willAutoWorktree / runAutoWorktreeCommit).
+  const autoWt = willAutoWorktree(larkAppId, pinnedWorkingDir, pinnedFromBotDefault);
   const ds: DaemonSession = {
     session,
     worker: null,
@@ -2386,7 +2443,7 @@ async function startInitialPassthroughSession(args: {
     cliVersion: cliVersionCache.get(botCfg.cliId)?.version ?? 'unknown',
     lastMessageAt: now,
     hasHistory: false,
-    pendingRepo: !pinnedWorkingDir,
+    pendingRepo: !pinnedWorkingDir || autoWt,
     pendingPrompt: '',
     pendingRawInput: commandContent,
     ownerOpenId,
@@ -2401,6 +2458,14 @@ async function startInitialPassthroughSession(args: {
   sessionStore.updateSession(ds.session);
   activeSessions.set(sessionKey(anchor, larkAppId), ds);
 
+  if (pinnedWorkingDir && autoWt) {
+    if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
+    // 挂起态提交：worktree 建好后经 runAutoWorktreeCommit → commitRepoSelection 拉起
+    // pendingRawInput 冷启动会话。detach → 立即返回，不阻塞本条消息处理。
+    startAutoWorktreePending(ds, { anchor, baseDir: pinnedWorkingDir, title: session.title, prompt: commandContent, operatorOpenId: ownerOpenId });
+    return;
+  }
+
   if (pinnedWorkingDir) {
     if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
     rememberLastCliInput(ds, commandContent, commandContent);
@@ -2410,7 +2475,7 @@ async function startInitialPassthroughSession(args: {
       : inheritedFrom
       ? `inherited from sibling session ${inheritedFrom.sessionId.substring(0, 8)} (app=${inheritedFrom.larkAppId ?? 'unknown'})`
       : `bot defaultWorkingDir`;
-    logger.info(`[${tag(ds)}] ${reason} → workingDir=${pinnedWorkingDir}, queued initial raw passthrough ${commandContent.substring(0, 40)}`);
+    logger.info(`[${tag(ds)}] ${reason} → workingDir=${ds.workingDir}, queued initial raw passthrough ${commandContent.substring(0, 40)}`);
     return;
   }
 
@@ -2488,6 +2553,14 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
 
   // senderOpenId 已在上方（force-topic grant 限制前）声明；这里只补 master 新增的 senderUnionId。
   const senderUnionId: string | undefined = data.sender?.sender_id?.union_id;
+  // union_id 信任腿（canOperate/evaluateTalk 的 teamBot）只对**飞书盖章的 bot 发送方**
+  // 生效：平台 roster 是成员机器自报的，若不锁 sender_type，恶意成员把某个真人的
+  // union_id 报成"自家 bot"，那个真人就会在全团队机器上被当队友 bot 放行（talk +
+  // operate），破坏「人绝不继承 bot 信任」的边界。旧联邦 team-bots 表结构上只收
+  // bot（学习入口限 bot sender），这里对齐同一不变量。senderUnionId 本身保持原义
+  //（人类会话的 ownerUnionId 还靠它）。
+  const teamTrustUnionId: string | undefined =
+    (data.sender?.sender_type === 'app' || data.sender?.sender_type === 'bot') ? senderUnionId : undefined;
   const botCfg = getBot(larkAppId).config;
   logger.info(`New session: "${content.substring(0, 60)}" (scope=${scope}, anchor=${anchor.substring(0, 12)}, resources: ${resources.length}, active: ${getActiveCount()}, messageId: ${messageId}, chatId: ${chatId})`);
   emitHookEvent('topic.new', {
@@ -2566,6 +2639,8 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
           parsed,
           commandContent,
           senderOpenId,
+          senderUnionId: teamTrustUnionId,
+          memberUnionId: senderUnionId, // 原始 union（人腿），不锁 bot
           // New-topic senders are humans here (mirrors the normal new-topic
           // spawn path, which assigns ownership unconditionally too).
           ownerOpenId: senderOpenId,
@@ -2583,7 +2658,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       // chat-granted users (who only pass canTalk) management commands like
       // /cd /restart /oncall bind. Previously this gate only fired in oncall chats,
       // which left a hole once per-chat grants flow through canTalk.
-      if (!canOperate(larkAppId, chatId, senderOpenId, senderUnionId)) {
+      if (!canOperate(larkAppId, chatId, senderOpenId, teamTrustUnionId)) {
         await sessionReply(anchor, tr('daemon.cmd_allowed_users_only', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
         return;
       }
@@ -2650,7 +2725,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     }
   }
 
-  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, ctx.bypassTalkGate === true)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, teamTrustUnionId, senderUnionId, ctx.bypassTalkGate === true)) {
     return;
   }
 
@@ -2682,7 +2757,10 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // Pin the working dir via the layered oncall / inherit / default lookup
   // (auto-binds a defaultOncall chat as a side effect). Shared with the
   // first-message `/repo` command branch so both paths stay consistent.
-  const { pinnedWorkingDir, oncallEntry, inheritedFrom } = await resolvePinnedWorkingDir({ scope, anchor, chatId, chatType, larkAppId });
+  const { pinnedWorkingDir, oncallEntry, inheritedFrom, pinnedFromBotDefault } = await resolvePinnedWorkingDir({ scope, anchor, chatId, chatType, larkAppId });
+  // Auto-worktree: register PENDING (router buffers concurrent msgs, no force-fork)
+  // and build the worktree off the critical path (willAutoWorktree / runAutoWorktreeCommit).
+  const autoWt = willAutoWorktree(larkAppId, pinnedWorkingDir, pinnedFromBotDefault);
   const senderCanTalk = evaluateTalk(larkAppId, chatId, senderOpenId).allowed;
   const untrustedSubstituteNeedsOwnerDir = substituteTrigger && !senderCanTalk && (!pinnedWorkingDir || !!inheritedFrom);
   if (untrustedSubstituteNeedsOwnerDir) {
@@ -2735,7 +2813,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     cliVersion: cliVersionCache.get(botCfg.cliId)?.version ?? 'unknown',
     lastMessageAt: now,
     hasHistory: false,
-    pendingRepo: !pinnedWorkingDir,
+    pendingRepo: !pinnedWorkingDir || autoWt,
     pendingPrompt: promptContent,
     pendingAttachments: attachments.length > 0 ? attachments : undefined,
     pendingMentions: parsed.mentions,
@@ -2753,6 +2831,15 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   sessionStore.updateSession(ds.session);
   activeSessions.set(sessionKey(anchor, larkAppId), ds);
 
+  // Auto-worktree: session is registered PENDING; build the worktree off the
+  // critical path, then commitRepoSelection pins it + forks (folding in any
+  // messages buffered during creation). detach → return immediately.
+  if (pinnedWorkingDir && autoWt) {
+    if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
+    startAutoWorktreePending(ds, { anchor, baseDir: pinnedWorkingDir, title: session.title, prompt: promptContent, operatorOpenId: senderOpenId });
+    return;
+  }
+
   // Pinned (oncall binding or inherited from sibling bot): spawn CLI immediately.
   if (pinnedWorkingDir) {
     if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
@@ -2767,7 +2854,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       : inheritedFrom
       ? `inherited from sibling session ${inheritedFrom.sessionId.substring(0, 8)} (app=${inheritedFrom.larkAppId ?? 'unknown'})`
       : `bot defaultWorkingDir`;
-    logger.info(`[${tag(ds)}] ${reason} → workingDir=${pinnedWorkingDir}, skipped repo select`);
+    logger.info(`[${tag(ds)}] ${reason} → workingDir=${ds.workingDir}, skipped repo select`);
     return;
   }
 
@@ -2919,7 +3006,8 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       return;
     }
 
-    const { pinnedWorkingDir } = await resolvePinnedWorkingDir({ scope, anchor, chatId, chatType, larkAppId });
+    const { pinnedWorkingDir, pinnedFromBotDefault } = await resolvePinnedWorkingDir({ scope, anchor, chatId, chatType, larkAppId });
+    const autoWt = willAutoWorktree(larkAppId, pinnedWorkingDir, pinnedFromBotDefault);
     refreshCliVersion(botCfg.cliId, botCfg.cliPathOverride);
 
     const session = sessionStore.createSession(chatId, anchor, title, chatType);
@@ -2946,7 +3034,7 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       cliVersion: cliVersionCache.get(botCfg.cliId)?.version ?? 'unknown',
       lastMessageAt: now,
       hasHistory: false,
-      pendingRepo: !pinnedWorkingDir,
+      pendingRepo: !pinnedWorkingDir || autoWt,
       pendingPrompt: promptBody,
       ownerOpenId: operatorOpenId,
       currentTurnTitle: title,
@@ -2964,6 +3052,13 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), undefined,
       { larkAppId, chatId, whiteboardId: ds.session.whiteboardId },
     );
+
+    // Auto-worktree: register PENDING, build worktree off-path, commit+fork later.
+    if (pinnedWorkingDir && autoWt) {
+      if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
+      startAutoWorktreePending(ds, { anchor, baseDir: pinnedWorkingDir, title, prompt: promptBody, operatorOpenId });
+      return;
+    }
 
     // Pinned working dir → spawn immediately.
     if (pinnedWorkingDir) {
@@ -3126,6 +3221,11 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   // operate, parity with same-deployment siblings (option B). undefined for
   // senders Lark didn't stamp a union_id on → no team-operate, falls back.
   const threadSenderUnionId = data?.sender?.sender_id?.union_id as string | undefined;
+  // union_id 信任腿只对**飞书盖章的 bot 发送方**生效（isForeignBot 兜 sender_type
+  // 缺失但 cross-ref 认识的自家 peer）：平台 roster 是成员机器自报的，不锁 sender
+  // 类型的话，把真人 union_id 报成 bot 就能让真人在全团队被当队友 bot 放行
+  //（talk + operate）。与旧联邦 team-bots「学习入口限 bot sender」同一不变量。
+  const threadTeamTrustUnionId = (isBotSenderType || isForeignBot) ? threadSenderUnionId : undefined;
   const threadChatId = ctxChatId ?? data?.message?.chat_id;
   const clearAgentAttentionForHumanInbound = (): void => {
     if (isForeignBot || isBotSenderType) return;
@@ -3224,6 +3324,8 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
           parsed,
           commandContent,
           senderOpenId: threadSenderOpenId,
+          senderUnionId: threadTeamTrustUnionId,
+          memberUnionId: threadSenderUnionId, // 原始 union（人腿），不锁 bot
           // Bot-started cold starts get no human owner (mirrors the auto-create
           // path) — see the ownership note on startInitialPassthroughSession.
           ownerOpenId: isForeignBot ? undefined : threadSenderOpenId,
@@ -3266,7 +3368,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       }
       // canOperate gate for thread-reply daemon commands — required in every chat
       // (see spawn-path gate above). Denies chat-granted users management commands.
-      if (!canOperate(larkAppId, effectiveThreadChatId, threadSenderOpenId, threadSenderUnionId)) {
+      if (!canOperate(larkAppId, effectiveThreadChatId, threadSenderOpenId, threadTeamTrustUnionId)) {
         sessionReply(anchor, tr('daemon.cmd_allowed_users_only', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
         return;
       }
@@ -3373,7 +3475,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   }
 
   const quotaSenderOpenId = threadSenderOpenId;
-  if (!await enforceMessageQuotaForCliInput(larkAppId, ctxChatId ?? data?.message?.chat_id, quotaSenderOpenId, parsed.messageId, anchor, bypassTalkGate === true)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, ctxChatId ?? data?.message?.chat_id, quotaSenderOpenId, parsed.messageId, anchor, threadTeamTrustUnionId, threadSenderUnionId, bypassTalkGate === true)) {
     return;
   }
 
@@ -3439,7 +3541,11 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     }
     if (!ds.pendingFollowUps) ds.pendingFollowUps = [];
     ds.pendingFollowUps.push(enriched);
-    await sessionReply(anchor, tr('daemon.choose_repo_first', undefined, localeForBot(larkAppId)), 'text', larkAppId);
+    // Auto-worktree pending (worktreeCreating) has no repo card to point at — the
+    // message IS buffered (folded on commit), so just say "hold on, building worktree"
+    // instead of the misleading "pick a repo from the card above".
+    const pendingReplyKey = ds.worktreeCreating ? 'daemon.worktree_building_wait' : 'daemon.choose_repo_first';
+    await sessionReply(anchor, tr(pendingReplyKey, undefined, localeForBot(larkAppId)), 'text', larkAppId);
     return;
   }
 
@@ -3491,13 +3597,14 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
 
     // Use the same layered oncall / inherit / default lookup as handleNewTopic
     // so stale inherited peers are ignored consistently in both spawn paths.
-    const { pinnedWorkingDir, oncallEntry, inheritedFrom } = await resolvePinnedWorkingDir({
+    const { pinnedWorkingDir, oncallEntry, inheritedFrom, pinnedFromBotDefault } = await resolvePinnedWorkingDir({
       scope,
       anchor,
       chatId: autoCreateChatId,
       chatType: autoCreateChatType,
       larkAppId,
     });
+    const autoWt = willAutoWorktree(larkAppId, pinnedWorkingDir, pinnedFromBotDefault);
     // Now we know the message will spawn or pend a real session — resolve
     // sender (may await contact API budget) since every downstream branch
     // injects it either into the immediate prompt or stashes it on
@@ -3516,7 +3623,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       cliVersion: cliVersionCache.get(botCfg.cliId)?.version ?? 'unknown',
       lastMessageAt: now,
       hasHistory: false,
-      pendingRepo: !pinnedWorkingDir,
+      pendingRepo: !pinnedWorkingDir || autoWt,
       pendingPrompt: promptContent,
       pendingAttachments: attachments.length > 0 ? attachments : undefined,
       pendingMentions: parsed.mentions,
@@ -3533,6 +3640,13 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     beginReplyTargetTurn(newDs, replyRootId, parsed.messageId);
     sessionStore.updateSession(newDs.session);
     activeSessions.set(sessionKey(anchor, larkAppId), newDs);
+
+    // Auto-worktree: register PENDING, build worktree off-path, commit+fork later.
+    if (pinnedWorkingDir && autoWt) {
+      if (await replyInvalidWorkingDirs(anchor, larkAppId, newDs)) return;
+      startAutoWorktreePending(newDs, { anchor, baseDir: pinnedWorkingDir, title: parsed.content.substring(0, 50), prompt: promptContent, operatorOpenId: ownerOpenId });
+      return;
+    }
 
     // Pinned (oncall binding or inherited from peer bot in same thread):
     // spawn CLI immediately, skip repo selection.
@@ -3830,19 +3944,21 @@ function resolvePrimaryOwnerOpenId(larkAppId: string): string | undefined {
 /** Build the current dashboard URL (active token, not a rotation) from the
  *  dashboard process's persisted `.dashboard-port` / `.dashboard-token`. Falls
  *  back to a token-less base URL if the dashboard hasn't published a token yet. */
-function dashboardUrlForReport(): string | undefined {
+function dashboardUrlForReport(): { url?: string; localUrl?: string } {
   try {
     const dir = join(homedir(), '.botmux');
     const portFile = join(dir, '.dashboard-port');
     const tokenFile = join(dir, '.dashboard-token');
     const port = existsSync(portFile) ? readFileSync(portFile, 'utf8').trim() : String(config.dashboard.port);
     const tok = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '';
-    // buildDashboardUrl swaps in the central-platform machine subdomain when
+    // buildDashboardUrls swaps in the central-platform machine subdomain when
     // 远程访问 is on and this host is bound, so the restart-report DM links to the
-    // platform dashboard instead of an unreachable local host:port.
-    return buildDashboardUrl({ host: getDashboardExternalHost(), port, token: tok || undefined });
+    // platform dashboard instead of an unreachable local host:port. In that case
+    // localUrl carries the direct host:port fallback so the owner can still reach
+    // the dashboard if the platform is down.
+    return buildDashboardUrls({ host: getDashboardExternalHost(), port, token: tok || undefined });
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -3885,7 +4001,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const ipcPort = config.dashboard.ipcBasePort + idx;
   const desc: DaemonDescriptor = {
     larkAppId: cfg.larkAppId,
-    botName: cfg.larkAppId,
+    botName: cfg.displayName ?? cfg.larkAppId,
     cliId: cfg.cliId,
     botIndex: idx,
     ipcPort,
@@ -3898,6 +4014,37 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // briefly sees an unusable on_/email (the resolution below rewrites this field).
     resolvedAllowedUsers: getBot(cfg.larkAppId).resolvedAllowedUsers.filter(u => u.startsWith('ou_')),
   };
+  // 名称状态刷新：displayName 或飞书真名变化后，用有效展示名刷新 descriptor +
+  // SessionRow.botName，无需重启 daemon。displayName 路径经 bot-config-store 的
+  // 钩子触发；真·改名路径在下面的 renamer 里直接调用。
+  const refreshBotNameState = () => {
+    const effective = effectiveBotDisplayName(getBot(cfg.larkAppId));
+    setBotName(effective);
+    if (effective !== desc.botName) {
+      desc.botName = effective;
+      try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
+    }
+  };
+  setDisplayNameRefresher(refreshBotNameState);
+  // 机器人真·改名（dashboard 档案头 ✎）：开放平台自动化改飞书应用名并发布新版本
+  // （群内显示名跟随已发布版本，见 services/open-platform-rename.ts）。成功后同步
+  // 内存 botName / bots-info 名册 / descriptor，并清掉冗余的 displayName 别名——
+  // 飞书名已经是新名，保持单一事实来源。
+  setBotRenamer(async (newName) => {
+    const r = await renameBotOnOpenPlatform(cfg.larkAppId, newName, cfg.brand);
+    if (!r.ok) return r;
+    const bot = getBot(cfg.larkAppId);
+    bot.botName = newName;
+    const spec = findConfigField('displayName');
+    if (spec && bot.config.displayName) {
+      // applyConfigField 的 displayName 钩子会顺带触发 refreshBotNameState。
+      await applyConfigField(cfg.larkAppId, spec, null);
+    } else {
+      refreshBotNameState();
+    }
+    try { writeBotInfoFile(config.session.dataDir); } catch { /* best effort */ }
+    return r;
+  });
   // Initialise worker pool with daemon callbacks
   initWorkerPool({
     sessionReply,
@@ -3917,10 +4064,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Wire the workflow runner for /api/trigger (kind=workflow): reuse the same
   // heavy deps as the catalog run route.
   setWorkflowRunner((input) => triggerWorkflowRun(input, workflowTriggerDeps()));
-  // Seed dashboard IPC botName with the bot's config id; the friendly name from
-  // /bot/v3/info is wired into the registry descriptor (below) but the IPC server
-  // also needs its own copy for SessionRow.botName.
-  setBotName(cfg.larkAppId);
+  // Seed dashboard IPC botName with the custom displayName (falling back to the
+  // bot's config id); the friendly name from /bot/v3/info is wired into the
+  // registry descriptor (below) but the IPC server also needs its own copy for
+  // SessionRow.botName.
+  setBotName(cfg.displayName ?? cfg.larkAppId);
   setLarkAppId(cfg.larkAppId);
   selfV3LarkAppId = cfg.larkAppId; // scope v3 humanGate cold-attach / start to this bot
 
@@ -4028,9 +4176,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // Probe bot open_id and persist to bots-info.json. When the friendly
     // botName comes back from /bot/v3/info, refresh the dashboard descriptor
     // so the registry shows "Claude" / "Codex" instead of the raw app id.
+    // A custom displayName (bots.json) beats the probed Lark name — the probe
+    // must not overwrite a rename seeded at startup.
     probeBotOpenId(cfg.larkAppId).then(() => {
       writeBotInfoFile(config.session.dataDir);
-      const probedName = bot.botName;
+      const probedName = cfg.displayName ?? bot.botName;
       const probedAvatar = bot.botAvatarUrl;
       let descChanged = false;
       if (probedName && probedName !== desc.botName) {
@@ -4199,10 +4349,12 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // After an intentional restart, DM the owner a summary. Delayed a few
     // seconds so the dashboard process can publish its token first.
     setTimeout(() => {
+      const dash = dashboardUrlForReport();
       void sendRestartReportIfPending({
         primaryLarkAppId: cfg.larkAppId,
         ownerOpenId: resolvePrimaryOwnerOpenId(cfg.larkAppId),
-        dashboardUrl: dashboardUrlForReport(),
+        dashboardUrl: dash.url,
+        dashboardLocalUrl: dash.localUrl,
         sendCard: (openId, card) => sendUserMessage(cfg.larkAppId, openId, card, 'interactive').then(() => undefined),
         log: (m) => logger.info(`[restart-report] ${m}`),
       });

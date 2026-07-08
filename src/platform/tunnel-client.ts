@@ -4,7 +4,7 @@
 import net from 'node:net';
 import { hostname, networkInterfaces } from 'node:os';
 import { WebSocket, createWebSocketStream } from 'ws';
-import { setPlatformTeams, clearPlatformBinding, type PlatformBinding, type PlatformTeam } from './binding.js';
+import { setPlatformTeams, setPlatformIpFamily, clearPlatformBinding, type PlatformBinding, type PlatformTeam } from './binding.js';
 
 /** 本机一个 botmux bot 的概要（上报给平台，供团队页「人→机器→bot」展示 + 拉群）。 */
 export interface PlatformBotInfo {
@@ -15,6 +15,15 @@ export interface PlatformBotInfo {
   cli?: string;
   /** 团队页是否展示这个 bot（默认 true，按 bot 配置 showInTeam 上报）。 */
   showInTeam?: boolean;
+  /** bot 自己的租户稳定 union_id（自家消息回声学到，见 bot-union-ids-store）。
+   *  平台按团队聚合成 roster 随 team-sync 下发，成员机器据此免 /grant 互信。 */
+  unionId?: string;
+}
+
+/** 平台 team-sync 下发的原始负载（校验/落盘在 platform-team-store）。 */
+export interface PlatformTeamSyncMessage {
+  rev: string;
+  teams: unknown[];
 }
 
 export interface TunnelClientOptions {
@@ -26,6 +35,12 @@ export interface TunnelClientOptions {
   getVersion: () => string;
   /** 本机的 bot 清单（每次读最新；随心跳上报） */
   getBots?: () => PlatformBotInfo[];
+  /** 本机已应用的 team-sync rev（每次读最新；随 register/heartbeat 上报，平台
+   *  据此做版本比对：不一致才下发全量 team-sync）。 */
+  getTeamSyncRev?: () => string;
+  /** 平台下发 team-sync（团队 bot roster + 团队群清单）时回调；落盘与公告由
+   *  dashboard 侧处理，tunnel-client 只做传输。 */
+  onTeamSync?: (payload: PlatformTeamSyncMessage) => void;
   log: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -45,6 +60,14 @@ const DATA_DIAL_PARALLEL = 3;
 const DATA_DIAL_MAX_WAVES = 2;
 const DATA_DIAL_WAVE_BACKOFF_MS = 150;
 const DATA_DIAL_OVERALL_DEADLINE_MS = 6_000;
+
+// 控制连接并行拨号（happy-eyeballs）：一轮并行拨几条、谁先握手成功用谁，兜住入口 VIP 对新建连接
+// ~35% 的黑洞。单条超时给足 TLS 握手时间（好连接 ~40ms，黑洞则等满超时判负）。
+const CONTROL_DIAL_PARALLEL = 3;
+const CONTROL_DIAL_TIMEOUT_MS = 5_000;
+// 控制连接 WS 层保活：空闲时也定时 ping（保持链路有流量，避免被 LB/NAT idle 掐成半开）；
+// 一个周期内没等到 pong 就判半死、terminate 触发重连（不用干等几分钟 TCP 超时）。
+const CONTROL_PING_MS = 30_000;
 
 // 本机可供平台服务端「直连反代」的候选地址（内网 IPv4:dashboardPort）。平台够得着就直连本机
 // dashboard、绕过隧道（省掉 daemon 拨号/ECMP 赌/跨 pod 转发）；够不着自动退回隧道。仅内网地址、
@@ -70,34 +93,152 @@ export interface TunnelClientHandle {
 export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClientHandle {
   let stopped = false;
   let ws: WebSocket | null = null;
+  // 当前一轮控制连接并行拨号中「在拨/在等」的候选（胜出/停止时用于清理）。
+  let controlDials: Set<WebSocket> | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
+  let pingTimer: NodeJS.Timeout | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
   let backoff = BACKOFF_MIN_MS;
   // 本机平台团队（成员关系下沉到部署本地）
   let teams: PlatformTeam[] = opts.binding.teams ? [...opts.binding.teams] : [];
+  // 与平台通信的 IP 协议族：bind 时探明的偏好起步（缺省跟随系统默认）。有的机器 IPv4
+  // 路由是坏的、但 IPv6 通（或运行期才坏掉），控制连接连续失败时隔次换协议族试探，
+  // 换族连通即采纳并落盘——之后所有平台连接（含数据流）默认走它，重启也生效。
+  let ipFamily: 4 | 6 | undefined = opts.binding.ipFamily;
+  let connectFails = 0;
 
   const base = wsBase(opts.binding.platformUrl);
   const tokenQ = encodeURIComponent(opts.binding.machineToken);
 
+  const flipFamily = (f: 4 | 6 | undefined): 4 | 6 => (f === 6 ? 4 : 6);
+
+  // 控制连接并行拨号（happy-eyeballs）。入口 VIP 对「新建连接」丢包很高（实测 ~35%，TLS 握手黑洞、
+  // 非 SYN 层），单发+退避会反复撞黑洞、迟迟连不上 → 用户以为「连不上要 restart」。改成一轮并行拨
+  // CONTROL_DIAL_PARALLEL 条、谁先握手成功用谁、其余 terminate；一整轮全败才按 backoff 重连。
+  // ~60% 单条成功率下，3 条并行一轮成功率 ~94%，把「连不上」窗口从「撞黑洞×退避」压到一轮内。
+  // 数据流早已这么做（openDataStream），这里给控制连接补上。
   function connect(): void {
     if (stopped) return;
     const url = `${base}/tunnel/control?token=${tokenQ}`;
-    // 关掉 permessage-deflate：隧道是裸字节桥，承载的 HTTP 自己会 gzip，WS 层再压一遍既没收益、
-    // 又会在经过中心化网关(TLB)时因压缩扩展协商被改写而触发 "Invalid WebSocket frame: RSV1 must
-    // be clear"，整条数据流当场挂掉 → dashboard 的 CSS/JS 半路断供、页面掉样式。不 offer 扩展，
-    // 中间任何一跳都不会给这条连接开压缩。
-    const sock = new WebSocket(url, { perMessageDeflate: false });
-    ws = sock;
+    // 连续 3 次连不上后，每隔一次用另一个协议族试探（默认/4 ↔ 6），兜住单协议族路由坏掉的机器。
+    const attemptFamily = connectFails >= 3 && connectFails % 2 === 1 ? flipFamily(ipFamily) : ipFamily;
 
-    sock.on('open', () => {
-      backoff = BACKOFF_MIN_MS;
-      opts.log('隧道已连接平台');
-      sendRegister(sock);
-      heartbeat = setInterval(() => sendHeartbeat(sock), HEARTBEAT_MS);
-    });
+    let settled = false; // 本轮已有胜者或已判负
+    let pending = CONTROL_DIAL_PARALLEL;
+    const dials = new Set<WebSocket>();
+    controlDials = dials;
+
+    const dropLosers = (winner: WebSocket | null): void => {
+      for (const c of dials) {
+        if (c === winner) continue;
+        try { c.removeAllListeners(); } catch { /* ignore */ }
+        // 关键：补一个吞异常的 error handler。对仍在 CONNECTING 的 ws 调 terminate() 会「异步」emit('error')
+        //（"WebSocket was closed before the connection was established"）；上面刚把 error listener 摘了，
+        // 没 handler 就成未捕获 'error' 事件把 dashboard 进程打挂 → 无限重连、平台侧 machine_offline。
+        c.on('error', () => { /* swallow */ });
+        try { c.terminate(); } catch { /* ignore */ }
+      }
+      dials.clear();
+    };
+
+    const onDialFail = (): void => {
+      if (settled) return;
+      if (--pending > 0) return; // 本轮还有在拨的，等它们
+      settled = true;
+      connectFails++; // 一整轮都没连上才计一次失败（驱动 backoff + 协议族翻转）
+      dropLosers(null);
+      scheduleReconnect();
+    };
+
+    for (let k = 0; k < CONTROL_DIAL_PARALLEL; k++) {
+      // 关掉 permessage-deflate：隧道是裸字节桥，承载的 HTTP 自己会 gzip，WS 层再压一遍既没收益、
+      // 又会在经过中心化网关(TLB)时因压缩扩展协商被改写而触发 "RSV1 must be clear" 断流。
+      const sock = new WebSocket(url, { perMessageDeflate: false, family: attemptFamily });
+      dials.add(sock);
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        dials.delete(sock);
+        try { sock.terminate(); } catch { /* ignore */ }
+        onDialFail();
+      }, CONTROL_DIAL_TIMEOUT_MS);
+
+      sock.on('open', () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (settled) { try { sock.terminate(); } catch { /* ignore */ } return; } // 已有胜者 → 弃掉
+        settled = true;
+        dials.delete(sock);
+        dropLosers(sock);
+        // 摘掉建连期临时 listener，换上正式收发 handler
+        try { sock.removeAllListeners('open'); } catch { /* ignore */ }
+        try { sock.removeAllListeners('error'); } catch { /* ignore */ }
+        try { sock.removeAllListeners('unexpected-response'); } catch { /* ignore */ }
+        adoptControl(sock, attemptFamily);
+      });
+
+      sock.on('unexpected-response', (_req, res) => {
+        opts.log('隧道握手被拒', { status: res.statusCode });
+        if (res.statusCode === 401) opts.log('机器 token 失效，请重新 botmux bind');
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        dials.delete(sock);
+        try { sock.terminate(); } catch { /* ignore */ }
+        onDialFail();
+      });
+
+      sock.on('error', () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        dials.delete(sock);
+        try { sock.terminate(); } catch { /* ignore */ }
+        // 建连期错误不逐条刷屏（撞黑洞是常态）；一整轮全败才由 scheduleReconnect 侧体现。
+        onDialFail();
+      });
+    }
+  }
+
+  // 采纳某条已握手成功的控制连接：重置失败计数/落盘生效协议族、挂正式收发 handler、发 register、起心跳。
+  function adoptControl(sock: WebSocket, attemptFamily: 4 | 6 | undefined): void {
+    ws = sock;
+    controlDials = null;
+    connectFails = 0;
+    backoff = BACKOFF_MIN_MS;
+    if (attemptFamily !== ipFamily) {
+      ipFamily = attemptFamily;
+      try {
+        setPlatformIpFamily(attemptFamily);
+      } catch {
+        /* 落盘失败不影响本进程内生效 */
+      }
+      opts.log(`隧道经 IPv${attemptFamily} 连通，已设为本机与平台通信的默认协议族`);
+    }
+    opts.log('隧道已连接平台');
+    sendRegister(sock);
+    heartbeat = setInterval(() => sendHeartbeat(sock), HEARTBEAT_MS);
+
+    // WS ping/pong 保活 + 半开探测。心跳是 daemon→平台的单向应用消息，掩盖不了「平台→daemon 方向
+    // 被 idle 掐断」；WS ping 由平台自动回 pong，双向都有流量→防 idle 掐断，且丢 pong 能快速判半开。
+    let pongAlive = true;
+    sock.on('pong', () => { pongAlive = true; });
+    pingTimer = setInterval(() => {
+      if (sock.readyState !== WebSocket.OPEN) return;
+      if (!pongAlive) {
+        // 上一周期的 ping 没等到 pong → 连接多半半开了，主动断开触发重连。
+        opts.log('控制连接 ping 无 pong，判定半开，重连');
+        try { sock.terminate(); } catch { /* ignore */ } // → 'close' → cleanupSock + scheduleReconnect
+        return;
+      }
+      pongAlive = false;
+      try { sock.ping(); } catch { /* ignore */ }
+    }, CONTROL_PING_MS);
 
     sock.on('message', (data) => {
-      let msg: { type?: string; streamId?: string; teamId?: string; teamName?: string };
+      let msg: { type?: string; streamId?: string; teamId?: string; teamName?: string; rev?: string; teams?: unknown[] };
       try {
         msg = JSON.parse(data.toString());
       } catch {
@@ -109,14 +250,18 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
         joinTeam(msg.teamId, msg.teamName || msg.teamId, sock);
       } else if (msg.type === 'leave-team' && msg.teamId) {
         leaveTeam(msg.teamId, sock);
+      } else if (msg.type === 'team-sync' && typeof msg.rev === 'string') {
+        opts.log('收到 team-sync', { rev: msg.rev, teams: Array.isArray(msg.teams) ? msg.teams.length : 0 });
+        try {
+          opts.onTeamSync?.({ rev: msg.rev, teams: Array.isArray(msg.teams) ? msg.teams : [] });
+        } catch (e) {
+          opts.log('team-sync 应用失败', { err: String(e) });
+        }
+        // 立即回一拍心跳带上新 rev，平台好知道已收敛（否则等下个 30s 周期）。
+        sendHeartbeat(sock);
       } else if (msg.type === 'unbound') {
         handleUnbound(sock);
       }
-    });
-
-    sock.on('unexpected-response', (_req, res) => {
-      opts.log('隧道握手被拒', { status: res.statusCode });
-      if (res.statusCode === 401) opts.log('机器 token 失效，请重新 botmux bind');
     });
 
     sock.on('close', () => {
@@ -133,6 +278,10 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
     if (heartbeat) {
       clearInterval(heartbeat);
       heartbeat = null;
+    }
+    if (pingTimer) {
+      clearInterval(pingTimer);
+      pingTimer = null;
     }
   }
 
@@ -155,6 +304,7 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
       directHosts: localDirectHosts(opts.getDashboardPort()),
       memberships: teams,
       bots: opts.getBots?.() ?? [],
+      teamSyncRev: opts.getTeamSyncRev?.() ?? '',
     });
   }
 
@@ -166,6 +316,7 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
       directHosts: localDirectHosts(opts.getDashboardPort()),
       memberships: teams,
       bots: opts.getBots?.() ?? [],
+      teamSyncRev: opts.getTeamSyncRev?.() ?? '',
     });
   }
 
@@ -259,7 +410,8 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
         }
       };
       for (let k = 0; k < DATA_DIAL_PARALLEL; k++) {
-        const data = new WebSocket(url, { perMessageDeflate: false });
+        // 数据流跟随当前生效的协议族（控制连接连得上的那个），不再各自赌路由
+        const data = new WebSocket(url, { perMessageDeflate: false, family: ipFamily });
         inflight.add(data);
         let done = false;
         const timer = setTimeout(() => {
@@ -299,6 +451,15 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
+      }
+      // 干掉本轮还在并行拨号中的候选连接（stop 可能发生在握手成功之前）。
+      if (controlDials) {
+        for (const c of controlDials) {
+          try { c.removeAllListeners(); } catch { /* ignore */ }
+          c.on('error', () => { /* swallow：同 dropLosers，terminate CONNECTING 态会异步 emit('error') */ });
+          try { c.terminate(); } catch { /* ignore */ }
+        }
+        controlDials = null;
       }
       try {
         ws?.close();

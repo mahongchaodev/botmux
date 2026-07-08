@@ -13,9 +13,23 @@
  *   7. On 'restart', kills CLI and re-spawns with --resume
  */
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, realpathSync, copyFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { isAbsolute, join, basename } from 'node:path';
+import { homedir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import {
+  evaluateReadIsolationGate,
+  buildSeatbeltProfile,
+  isolatedPaneReattachSafe,
+  sendCredFilePath,
+  botHomePath,
+  buildV2DenyPaths,
+  buildV2DenyRegexes,
+  buildV2CarveOuts,
+  type V2IsolationContext,
+} from './adapters/cli/read-isolation.js';
+import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
@@ -68,6 +82,7 @@ import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { buildWrappedLaunch, parseWrapperCli, isTtadkWrapper } from './setup/cli-selection.js';
 import { findLaunchedCliPid, scheduleWrapperRealCliPid, readComm, isBareShellComm, bareShellLaunchKind } from './core/session-discovery.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
+import { sessionReadyHookCommand } from './adapters/hook-command.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
@@ -96,12 +111,15 @@ import { config, resolveChatBotDiscoveryConfig } from './config.js';
 import * as sessionStore from './services/session-store.js';
 import * as pty from 'node-pty';
 import { createHash } from 'node:crypto';
+import { installHook, type HookInstallConfig } from './adapters/hook-installer.js';
+import { hookCommandFor } from './adapters/hook-command.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let cliAdapter: CliAdapter | null = null;
 let backend: SessionBackend | null = null;
 let cliPidMarker: string | null = null;  // path to .botmux-cli-pids/<pid>
+let seatbeltProfilePath: string | null = null;       // per-session Seatbelt .sb profile to rm at exit (external-wrapper read isolation)
 let sandboxStopWatcher: (() => void) | null = null;  // stop fn for the sandbox outbox watcher
 let sandboxCleanup: (() => void) | null = null;      // unmount overlays + rm the per-session sandbox tree
 let sandboxTeardownDone = false;                     // guards the exit-time best-effort teardown from double-running / running on suspend-for-resume
@@ -117,6 +135,128 @@ let consecutiveInWorkerRestarts = 0;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
+
+/** v2 read isolation — provision a bot's PER-BOT config dir under its BOT_HOME so the
+ *  CLI (redirected there via CLAUDE_CONFIG_DIR/CODEX_HOME) starts fully set up despite
+ *  the global ~/.claude|~/.codex being Seatbelt-denied. Idempotent (guards on
+ *  existence), best-effort (only warns). The worker runs UNSANDBOXED, so it can read
+ *  the global config/keychain to seed the per-bot copy. */
+function provisionIsolatedBotHome(
+  botHome: string,
+  workingDir: string,
+  isClaude: boolean,
+  cliId: string,
+  hookInstall: HookInstallConfig | undefined,
+  log: (m: string) => void,
+): void {
+  try {
+    if (isClaude) {
+      const cdir = join(botHome, 'claude');
+      mkdirSync(cdir, { recursive: true });
+      // Auth: a fresh CLAUDE_CONFIG_DIR does NOT inherit the shared account's OAuth
+      // token → keep <cdir>/.credentials.json synced to the FRESHEST valid credential
+      // on EVERY spawn (verified: Claude logs in from that file). Refreshing here (not
+      // just seeding once) means a re-login elsewhere self-heals on the next cold
+      // spawn — no separate sync step needed. Same shared account for every bot.
+      const fresh = freshestClaudeCred();
+      if (fresh) writeCredIfChanged(join(cdir, '.credentials.json'), fresh);
+      else if (!existsSync(join(cdir, '.credentials.json'))) {
+        log(`[read-isolation] WARN no Claude credential found (keychain or ~/.claude/.credentials.json) — bot may hit login screen`);
+      }
+      // State: seed <cdir>/.claude.json from the GLOBAL one MINUS `projects` (keeps the
+      // onboarding/promo "seen" flags + account so no dialogs appear, without leaking
+      // other projects' data), then trust this bot's cwd. Merge-safe on resume.
+      seedAndTrustClaudeState(join(cdir, '.claude.json'), workingDir, log);
+      // Hooks: install the SessionStart-ready + askUserQuestion hooks into the PER-BOT
+      // settings.json (global ~/.claude/settings.json is Seatbelt-denied), else the
+      // worker's ready gate falls back to a slow timeout and AskUserQuestion won't relay.
+      if (hookInstall) {
+        try { installHook(cliId, { ...hookInstall, configPath: join(cdir, 'settings.json') }, hookCommandFor(cliId)); }
+        catch (e) { log(`[read-isolation] WARN per-bot hook install failed: ${(e as Error).message}`); }
+      }
+    } else {
+      const cdir = join(botHome, 'codex');
+      mkdirSync(cdir, { recursive: true });
+      // auth.json: keep synced to the shared account's copy on EVERY spawn (a re-login
+      // elsewhere rotates the refresh token, which would strand a stale per-bot copy).
+      const authSrc = join(homedir(), '.codex', 'auth.json');
+      if (existsSync(authSrc)) writeCredIfChanged(join(cdir, 'auth.json'), readFileSync(authSrc, 'utf-8'));
+      // config.toml: seed ONCE (it may carry per-bot customizations afterwards).
+      const cfgDst = join(cdir, 'config.toml');
+      const cfgSrc = join(homedir(), '.codex', 'config.toml');
+      if (!existsSync(cfgDst) && existsSync(cfgSrc)) copyFileSync(cfgSrc, cfgDst);
+    }
+  } catch (e) {
+    log(`[read-isolation] WARN provisioning bot home failed: ${(e as Error).message}`);
+  }
+}
+
+/** Pick the FRESHEST valid Claude OAuth credential: macOS keychain vs the global
+ *  `~/.claude/.credentials.json`, by `claudeAiOauth.expiresAt` (longest runway
+ *  wins — a re-login updates one of the two, and this picks whichever is newer).
+ *  Returns the raw credential JSON string, or null when neither source exists. */
+function freshestClaudeCred(): string | null {
+  const cands: { raw: string; exp: number }[] = [];
+  const expOf = (raw: string): number => {
+    try { return Number(JSON.parse(raw)?.claudeAiOauth?.expiresAt) || 0; } catch { return 0; }
+  };
+  try {
+    const p = join(homedir(), '.claude', '.credentials.json');
+    if (existsSync(p)) {
+      const raw = readFileSync(p, 'utf-8').trim();
+      if (raw) cands.push({ raw, exp: expOf(raw) });
+    }
+  } catch { /* unreadable file → skip candidate */ }
+  try {
+    const r = spawnSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { encoding: 'utf-8' });
+    const raw = (r.stdout ?? '').trim();
+    if (raw) cands.push({ raw, exp: expOf(raw) });
+  } catch { /* no keychain (non-mac) → skip candidate */ }
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.exp - a.exp);
+  return cands[0].raw;
+}
+
+/** Write a credential file (mode 0600) only when its content actually changed —
+ *  avoids needless mtime churn on every spawn. Trailing-newline differences are
+ *  ignored for the comparison; the written form is newline-terminated. */
+function writeCredIfChanged(dst: string, raw: string): void {
+  const body = raw.endsWith('\n') ? raw : raw + '\n';
+  try {
+    if (existsSync(dst) && readFileSync(dst, 'utf-8').trim() === raw.trim()) return;
+  } catch { /* unreadable existing file → overwrite below */ }
+  writeFileSync(dst, body, { mode: 0o600 });
+}
+
+/** Seed a fresh per-bot `.claude.json` from the global top-level flags (minus projects)
+ *  so onboarding/promo dialogs are pre-dismissed and the account is recognized, then
+ *  mark this bot's realpath(cwd) trusted. Merge-safe: only seeds when absent; always
+ *  refreshes the cwd trust. */
+function seedAndTrustClaudeState(statePath: string, workingDir: string, log: (m: string) => void): void {
+  try {
+    let data: Record<string, any> = {};
+    if (existsSync(statePath)) {
+      try { data = JSON.parse(readFileSync(statePath, 'utf-8')); } catch { data = {}; }
+    } else {
+      try {
+        const g = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf-8')) as Record<string, any>;
+        const { projects: _drop, ...top } = g;
+        data = top;
+      } catch { data = {}; }
+    }
+    if (!data.projects || typeof data.projects !== 'object') data.projects = {};
+    let canonical = workingDir;
+    try { canonical = realpathSync(workingDir); } catch { /* cwd may not exist yet */ }
+    const entry = data.projects[canonical] && typeof data.projects[canonical] === 'object'
+      ? data.projects[canonical]
+      : (data.projects[canonical] = {});
+    entry.hasTrustDialogAccepted = true;
+    writeFileSync(statePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+  } catch (e) {
+    log(`[read-isolation] WARN seed .claude.json failed: ${(e as Error).message}`);
+  }
+}
+
 const IDLE_PROBE_INTERVAL_MS = 3_500;
 const IDLE_PROBE_MAX_ATTEMPTS = 24;
 let busyPatternIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -261,31 +401,38 @@ let readyFlushSettleTimer: ReturnType<typeof setTimeout> | null = null;
 let isSettlingFirstFlush = false;
 
 /** Wait until the PTY has been quiet for READY_FLUSH_SETTLE_MS (Ink render
- *  drained), capped at READY_FLUSH_SETTLE_CAP_MS, then flush the held prompt. */
-function settleThenFlush(startedAtMs: number): void {
+ *  drained), capped at READY_FLUSH_SETTLE_CAP_MS, then flush the held prompt.
+ *  A real SessionStart/BOTMUX_READY_COMMAND signal is itself authoritative
+ *  prompt readiness; the timeout fallback only opens the gate and lets the
+ *  regular readyPattern/idle path prove readiness later. */
+function settleThenFlush(startedAtMs: number, promptReadyAfterSettle: boolean): void {
   readyFlushSettleTimer = null;
   const now = Date.now();
   const quietForMs = now - lastPtyOutputAtMs;
   if (quietForMs >= READY_FLUSH_SETTLE_MS || now - startedAtMs >= READY_FLUSH_SETTLE_CAP_MS) {
     isSettlingFirstFlush = false;
-    log(`Ready-gate settle done (quiet ${quietForMs}ms); delivering held first prompt`);
+    log(`Ready-gate settle done (quiet ${quietForMs}ms); ${promptReadyAfterSettle ? 'marking prompt ready' : 'delivering held first prompt'}`);
+    if (promptReadyAfterSettle) {
+      markPromptReady();
+      return;
+    }
     void flushPending();
     return;
   }
   const wait = Math.min(READY_FLUSH_SETTLE_MS - quietForMs, READY_FLUSH_SETTLE_CAP_MS - (now - startedAtMs));
-  readyFlushSettleTimer = setTimeout(() => settleThenFlush(startedAtMs), Math.max(50, wait));
+  readyFlushSettleTimer = setTimeout(() => settleThenFlush(startedAtMs, promptReadyAfterSettle), Math.max(50, wait));
   readyFlushSettleTimer.unref?.();
 }
 
 /** Release the ready-gate and flush anything it held. No-op when the gate was
  *  never armed (other CLIs / adopt) or already released (idempotent). */
-function releaseReadyGate(reason: string): void {
+function releaseReadyGate(reason: string, opts?: { promptReadyAfterSettle?: boolean }): void {
   if (readySignalTimer) { clearTimeout(readySignalTimer); readySignalTimer = null; }
   if (readyGate.receive()) {
     log(`Ready gate released (${reason}); settling for PTY quiescence before first flush`);
     if (readyFlushSettleTimer) { clearTimeout(readyFlushSettleTimer); readyFlushSettleTimer = null; }
     isSettlingFirstFlush = true;
-    settleThenFlush(Date.now());
+    settleThenFlush(Date.now(), opts?.promptReadyAfterSettle === true);
   }
 }
 
@@ -4031,6 +4178,50 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log(`[sandbox] redirecting Claude bridge dataDir → overlay upper: ${redirected}`);
     claudeDataDir = redirected;
   }
+  // v2 read isolation: relocate the CLI's data root into the per-bot BOT_HOME
+  // (`<BOTMUX_HOME>/bots/<appId>/{claude,codex}`) so each bot's transcripts/memory
+  // land in its OWN (Seatbelt-allowed) dir, NOT the shared/global ~/.claude|~/.codex
+  // (which v2 denies wholesale). Decided EARLY — like willFileSandbox above — so
+  // every JSONL/bridge/resume path below already targets the per-bot dir. The
+  // matching CLAUDE_CONFIG_DIR/CODEX_HOME env, per-bot provisioning and Seatbelt
+  // wrapper are applied at spawn time further down. This gate is the SINGLE
+  // decision point: configured-but-unenforceable fail-closes HERE (never run a
+  // session unisolated that asked for isolation).
+  const readIsolationGate = evaluateReadIsolationGate({
+    configured: cfg.readIsolation === true,
+    adapterSupports: cliAdapter.supportsReadIsolation === true,
+    wrapperCliSet: !!cfg.wrapperCli,
+    platform: process.platform,
+    sessionDataDirSet: !!process.env.SESSION_DATA_DIR,
+  });
+  if (readIsolationGate.failClosedReason) {
+    throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: ${readIsolationGate.failClosedReason}`);
+  }
+  const willReadIsolate = readIsolationGate.enabled;
+  // Every bot — isolated OR not — gets its own BOT_HOME dir as a ready-made private-
+  // storage slot. An isolated sibling denies this path regardless of whether the owner
+  // is isolated (deny uses the full bots.json), so a non-isolated bot can drop private
+  // data here without any manual mkdir. Isolated bots additionally provision their CLI
+  // config/creds into it below.
+  const ownBotHome = process.env.SESSION_DATA_DIR
+    ? botHomePath(dirname(process.env.SESSION_DATA_DIR), cfg.larkAppId)
+    : undefined;
+  if (ownBotHome) {
+    try {
+      mkdirSync(ownBotHome, { recursive: true });
+    } catch (e) {
+      log(`[read-isolation] WARN could not create BOT_HOME ${ownBotHome}: ${(e as Error).message}`);
+    }
+  }
+  let isolationBotHome: string | undefined;
+  if (willReadIsolate) {
+    isolationBotHome = ownBotHome!;
+    const isClaudeFam = !!claudeDataDir;
+    if (isClaudeFam) claudeDataDir = join(isolationBotHome, 'claude');
+    // Provision the per-bot config dir (auth + onboarding/trust seed + hooks for claude;
+    // auth/config copy for codex) so the CLI starts fully set up under the Seatbelt wrapper.
+    provisionIsolatedBotHome(isolationBotHome, cfg.workingDir, isClaudeFam, cfg.cliId, cliAdapter.hookInstall, log);
+  }
   // Predict reattach vs fresh BEFORE the resume pre-flight. On a persistent
   // backend (tmux/herdr/zellij) a daemon restart finds the CLI process still
   // alive in its pane, so the backend will `attach` to the live process and
@@ -4048,6 +4239,46 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       : effectiveBackendType === 'zellij'
         ? ZellijBackend.sessionName(cfg.sessionId)
       : undefined;
+  // [read-isolation] Before we decide to reattach a persistent pane: a pane can
+  // survive a daemon restart still running a CLI that may NOT be isolated (e.g.
+  // spawned before isolation was enabled, or by an old build). Isolation is only
+  // injectable at spawn time, so reattaching such a pane would silently run
+  // unisolated. We stamp a boot-id marker when we spawn an isolated pane; if this
+  // isolated bot's existing pane is NOT stamped by THIS daemon lifetime, kill it
+  // so the probe below sees no pane and we cold-spawn fresh isolated. A pane from
+  // this lifetime (suspend→resume) keeps its marker → reattaches normally (it is
+  // still the isolated process). This lets isolated bots use tmux/zellij/herdr.
+  if (cfg.readIsolation === true && persistentSessionName && effectiveBackendType !== 'pty') {
+    const paneLive = effectiveBackendType === 'tmux'
+      ? TmuxBackend.hasSession(persistentSessionName)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.hasSession(persistentSessionName)
+        : HerdrBackend.hasSession(persistentSessionName);
+    if (paneLive) {
+      let marker: string | null = null;
+      try {
+        marker = readFileSync(
+          join(process.env.SESSION_DATA_DIR ?? '', 'read-isolation', `${cfg.sessionId}.boot`),
+          'utf-8',
+        );
+      } catch { /* no marker → pane was spawned WITHOUT isolation */ }
+      if (isolatedPaneReattachSafe(marker)) {
+        // Pane was spawned isolated (marker present) → still confined on the running
+        // process even across daemon restarts → warm reattach is safe and preserves
+        // resume/context + tmux idle-suspend.
+        log(`[read-isolation] reattaching isolated persistent pane (${cfg.sessionId})`);
+      } else {
+        // No marker → pane predates isolation (or an old build) → could be running
+        // UNISOLATED → kill it so the probe below cold-spawns fresh isolated.
+        log(`[read-isolation] unmarked persistent pane for ${cfg.sessionId} (not spawned isolated) — killing + cold-spawning isolated`);
+        try {
+          killPersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName);
+        } catch (e) {
+          throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: could not kill stale persistent pane (${(e as Error).message})`);
+        }
+      }
+    }
+  }
   const willReattachPersistent = persistentSessionName
     ? effectiveBackendType === 'tmux'
       ? TmuxBackend.hasSession(persistentSessionName)
@@ -4158,11 +4389,48 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // route it through the input queue instead so startupCommands run first
   // (flushPending's hook can't precede an args-baked prompt). The init handler
   // mirrors this when deciding whether to enqueue the prompt.
+  // Also defer on RESUME for adapters whose initial-prompt launch flag is
+  // silently ignored when continuing a session (OpenCode `--prompt` + `-s`):
+  // baking it into args would drop the message that triggered the resume.
   const deferInitialPrompt = shouldDeferInitialPromptForStartup({
     hasStartupCommands: !!cfg.startupCommands?.length,
     adoptMode: cfg.adoptMode === true,
     passesInitialPromptViaArgs: cliAdapter.passesInitialPromptViaArgs === true,
-  });
+  }) || (effectiveResume && cliAdapter.initialPromptArgsIgnoredOnResume === true);
+  // Per-bot local read isolation: assemble the Seatbelt profile context (the gate
+  // already fail-closed above — reaching here with willReadIsolate means it is
+  // enforceable). The worker is on the host (NOT sandboxed), so it holds the
+  // secret; only the spawned CLI child is confined. A reattach that reaches here
+  // is safe: the stale-pane guard above already killed any persistent pane not
+  // stamped as isolated, so `willReattachPersistent` can now only be true for a
+  // pane spawned isolated (still the confined process).
+  let readIsolationCtx: V2IsolationContext | undefined;
+  if (willReadIsolate) {
+    const sessionDataDir = process.env.SESSION_DATA_DIR!;
+    readIsolationCtx = {
+      homeDir: homedir(),
+      botmuxHome: dirname(sessionDataDir),
+      sessionDataDir,
+      currentAppId: cfg.larkAppId,
+      extraDenyPaths: cfg.readDenyExtraPaths,
+    };
+    // Write this bot's OWN send-credential into its BOT_HOME (the same per-bot
+    // private storage as its CLI data; siblings' BOT_HOMEs are whole-denied).
+    // `botmux send` reads the secret from here instead of bots.json — so the
+    // secret never travels via env/argv (no cross-bot `ps aux` leak) and the CLI
+    // never needs to escape the sandbox.
+    try {
+      const credPath = sendCredFilePath(sessionDataDir, cfg.larkAppId);
+      mkdirSync(dirname(credPath), { recursive: true });
+      writeFileSync(
+        credPath,
+        JSON.stringify({ larkAppId: cfg.larkAppId, larkAppSecret: cfg.larkAppSecret, brand: cfg.brand }),
+        { mode: 0o600 },
+      );
+    } catch (e) {
+      log(`[read-isolation] WARN could not write send-cred file: ${(e as Error).message}`);
+    }
+  }
   const args = cliAdapter.buildArgs({
     sessionId: effectiveAdapterSessionId,
     resume: effectiveResume,
@@ -4171,10 +4439,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     initialPrompt: deferInitialPrompt ? undefined : (cfg.prompt || undefined),
     botName: cfg.botName,
     botOpenId: cfg.botOpenId,
+    larkAppId: cfg.larkAppId,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,
     disableCliBypass: cfg.disableCliBypass === true,
     skillPluginDir: cfg.skillPluginDir,
+    readIsolation: willReadIsolate,
   });
 
   // Extra args from env (CLI_DISABLE_DEFAULT_ARGS is removed — adapters own their defaults)
@@ -4249,6 +4519,13 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // namespaced BOTMUX_LARK_APP_ID injected below; the worker keeps its own
   // bare creds (forkWorker) for lark-upload. See utils/child-env.ts.
   const childEnv = redactChildEnv(process.env);
+  // Put the daemon-written wrapper dir (~/.botmux/bin/botmux = THIS build) ahead of any
+  // stale npm-global botmux in PATH, so the agent's `botmux` is always this build. Matters
+  // most under read isolation: only this build has the send-cred reader — a shadowing stale
+  // build can't read bots.json (Seatbelt-denied) → `botmux send` fails "Bot not registered".
+  // (The tmux backend re-prepends this in its pane script after rcfile load; this covers the
+  // pty/direct-spawn path, whose child inherits childEnv.PATH directly.)
+  childEnv.PATH = `${join(homedir(), '.botmux', 'bin')}:${childEnv.PATH ?? ''}`;
   // §5 of botmux ask v0.1.7 — `botmux ask buttons` reads these to find the
   // daemon socket, route the card back to this thread, and resolve the
   // approver allowlist against session.owner. Missing env → exit 2.
@@ -4256,11 +4533,18 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   childEnv.BOTMUX_CHAT_ID = cfg.chatId;
   childEnv.BOTMUX_LARK_APP_ID = cfg.larkAppId;
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
+  // NOTE: under read isolation `botmux send` gets this bot's secret from the worker-
+  // written cred FILE in its BOT_HOME (send-cred.json, see sendCredFilePath) located
+  // via the BOTMUX_LARK_APP_ID above — NOT from the env. The secret is deliberately kept OUT
+  // of the child env so a sibling bot cannot recover it via `ps eww` / process-info
+  // (Seatbelt denies file reads, not process-metadata enumeration). Non-isolated bots
+  // read bots.json unchanged (send fallback in cli.ts).
   // Inject an explicit false when disabled so child `botmux bots list` cannot
   // drift from the daemon because of stale rcfile/tmux environment.
   const chatBotDiscovery = resolveChatBotDiscoveryConfig();
   childEnv.BOTMUX_LARK_LIST_BOTS_API_ENABLED = chatBotDiscovery.listBotsApiEnabled ? 'true' : 'false';
   childEnv.BOTMUX_LARK_LIST_BOTS_API_TIMEOUT_MS = String(chatBotDiscovery.listBotsApiTimeoutMs);
+  if (cliAdapter.injectsReadyHook) childEnv.BOTMUX_READY_COMMAND = sessionReadyHookCommand();
   // Initial value only; long-lived panes get the latest turn via the JSON pid marker.
   if (cfg.turnId) childEnv.BOTMUX_TURN_ID = cfg.turnId;
   if (injectClaudeSandbox) childEnv.IS_SANDBOX = '1';
@@ -4270,6 +4554,16 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // passthrough whitelist (BOTMUX_INJECTED_ENV_KEYS) so the tmux backend forwards
   // them past the server's global env.
   if (cliAdapter.spawnEnv) Object.assign(childEnv, cliAdapter.spawnEnv);
+
+  // v2 read isolation: point the CLI at its PER-BOT config dir (set AFTER spawnEnv so
+  // it overrides any adapter default). claude → CLAUDE_CONFIG_DIR, codex → CODEX_HOME.
+  // Both are in BOTMUX_INJECTED_ENV_KEYS so the tmux backend forwards them into the
+  // pane; without this the CLI falls back to the global ~/.claude|~/.codex which the
+  // Seatbelt wrapper denies → it can't read its own data and won't start.
+  if (isolationBotHome) {
+    if (claudeDataDir) childEnv.CLAUDE_CONFIG_DIR = claudeDataDir; // = <BOT_HOME>/claude
+    else childEnv.CODEX_HOME = join(isolationBotHome, 'codex');
+  }
 
   // Per-bot env (bots.json `env`): extra vars for THIS bot's CLI only — e.g.
   // ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN to run a bot on GLM/a 3rd-party
@@ -4288,6 +4582,63 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   let spawnBin = cliAdapter.resolvedBin;
   let spawnArgs = args;
   let spawnCwd = cfg.workingDir;
+
+  // Read isolation: wrap the whole CLI process in a macOS Seatbelt sandbox that
+  // denies reads of the sensitive paths (blocklist). The CLI bypasses its OWN
+  // sandbox (see adapter) so the outer wrapper is the sole enforcer. Non-darwin
+  // platforms already fail-closed at the gate above (Linux bwrap is a TODO).
+  if (readIsolationCtx) {
+    // Seatbelt matches CANONICAL paths (it resolves symlinks), so realpath every
+    // deny/allow before emitting the profile — otherwise a sensitive root reached
+    // through a symlinked prefix (e.g. a symlinked home / SESSION_DATA_DIR) would
+    // silently fail-open (the /tmp→/private/tmp class of miss). realpath-if-exists:
+    // a non-existent path has nothing to read, so its literal form is harmless.
+    // The ROOT dirs are canonicalized FIRST (profileCtx) so the regex patterns —
+    // which can't be realpath'd as a result — are built on canonical prefixes too.
+    const canonical = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+    // v2 HYBRID model: whole-deny ~/.claude|~/.codex (F1 fix — own CLI data is redirected
+    // into BOT_HOME, readable) + surgical-deny only the cross-bot-SENSITIVE parts of the
+    // otherwise-readable ~/.botmux + system creds. Per-bot dirs (bots/, .lark-cli-bots/)
+    // are denied WHOLESALE and per-bot session files by filename PATTERN, so a newly-
+    // added bot is covered without cold-restarting this one and nothing enumerates
+    // sibling app ids; the own slice is re-opened via carve-outs — allow subpaths + a
+    // file-read-metadata traverse shim so Codex can realpath() its CODEX_HOME through
+    // the denied parent. Admin readDenyExtraPaths become FINAL denies (win over the
+    // own-allow).
+    const profileCtx: V2IsolationContext = {
+      ...readIsolationCtx,
+      homeDir: canonical(readIsolationCtx.homeDir),
+      botmuxHome: canonical(readIsolationCtx.botmuxHome),
+      sessionDataDir: canonical(readIsolationCtx.sessionDataDir),
+    };
+    const denyPaths = buildV2DenyPaths(profileCtx).map(canonical);
+    const denyRegexes = buildV2DenyRegexes(profileCtx);
+    const carve = buildV2CarveOuts(profileCtx);
+    const allowPaths = carve.allowPaths.map(canonical);
+    const finalDenyPaths = carve.finalDenyPaths.map(canonical);
+    const traverseDirs = carve.traverseDirs.map(canonical);
+    if (!locateOnPath('sandbox-exec')) {
+      throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: sandbox-exec not found`);
+    }
+    const profileDir = join(process.env.SESSION_DATA_DIR!, 'read-isolation');
+    mkdirSync(profileDir, { recursive: true });
+    const profilePath = join(profileDir, `${cfg.sessionId}.sb`);
+    writeFileSync(profilePath, buildSeatbeltProfile(denyPaths, allowPaths, finalDenyPaths, traverseDirs, denyRegexes), { mode: 0o600 });
+    seatbeltProfilePath = profilePath;
+    spawnArgs = ['-f', profilePath, spawnBin, ...spawnArgs];
+    spawnBin = 'sandbox-exec';
+    log(`[read-isolation] wrapping ${cliAdapter.id} in Seatbelt: sandbox-exec -f ${profilePath}`);
+  }
+  // [read-isolation] Fresh isolated spawn on a persistent backend: stamp the pane
+  // with this daemon's boot id so a later suspend→resume reattach can be trusted
+  // (see the stale-pane guard above). pty needs no marker (never reattached).
+  if (readIsolationCtx && persistentSessionName && !willReattachPersistent) {
+    try {
+      const markerDir = join(process.env.SESSION_DATA_DIR!, 'read-isolation');
+      mkdirSync(markerDir, { recursive: true });
+      writeFileSync(join(markerDir, `${cfg.sessionId}.boot`), cfg.daemonBootId ?? '', { mode: 0o600 });
+    } catch { /* non-fatal: worst case a same-lifetime reattach cold-spawns instead */ }
+  }
   // Sandbox wraps the spawned binary in bwrap. Works for pty (PtyBackend runs
   // bwrap directly) and tmux (the tmux pane's command becomes `bwrap … -- cli`);
   // env is carried via bwrap --setenv (see prepareSandbox), not the backend.
@@ -4345,6 +4696,8 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
           authPaths: cliAdapter.authPaths,
           extraExecPaths: cliAdapter.sandboxExtraExecPaths?.(),
           readonlyRoots: cfg.skillReadonlyRoots ?? [],
+          userReadonlyPaths: cfg.sandboxReadonlyPaths ?? [],
+          net: cfg.sandboxNetwork !== false,
         });
         if (sbx) {
           spawnBin = sbx.bin;
@@ -5432,11 +5785,16 @@ process.on('message', async (raw: unknown) => {
         // NOT bake the prompt (deferInitialPrompt) so the commands can precede it
         // — so we MUST queue it here. shouldDeferInitialPromptForStartup mirrors
         // spawnCli's decision exactly. Bridge mark is deferred to flushPending.
+        // lastSpawnEffectiveResume was just written by spawnCli(msg) above, so
+        // this mirrors spawnCli's resume-defer condition exactly (incl. the
+        // Tier-1/Tier-2 fresh demotion, which clears the flag). Adopt spawns
+        // return from spawnCli before that write — exclude them explicitly so
+        // the stale module-level value can't leak in.
         const deferInitialPrompt = shouldDeferInitialPromptForStartup({
           hasStartupCommands: !!msg.startupCommands?.length,
           adoptMode: msg.adoptMode === true,
           passesInitialPromptViaArgs: cliAdapter?.passesInitialPromptViaArgs === true,
-        });
+        }) || (msg.adoptMode !== true && lastSpawnEffectiveResume && cliAdapter?.initialPromptArgsIgnoredOnResume === true);
         if (msg.prompt && cliAdapter?.passesInitialPromptViaArgs && !deferInitialPrompt && codexBridgeFallbackActive()) {
           // Args-baked first prompts (notably Pi) never pass through the normal
           // 'message' IPC path, so the structured bridge would otherwise see the
@@ -5660,9 +6018,21 @@ process.on('message', async (raw: unknown) => {
       // Claude-family SessionStart hook fired (via `botmux session-ready` →
       // daemon). The CLI's input box is genuinely rendered — release the
       // ready-gate and deliver any held first prompt. Idempotent: a later
-      // duplicate (clear/compact source) or a post-timeout fire is a no-op.
+      // duplicate (clear/compact source) is a no-op.
       log(`SessionStart ready signal received (source=${msg.source ?? '?'})`);
-      releaseReadyGate('SessionStart hook');
+      // 先记下 gate 是否已被 45s fallback 释放：ReadyGate.receive() 是一次性
+      // 语义，fallback 抢先后 releaseReadyGate 会整块跳过迟到的真信号。
+      const lateAfterFallback = readyGate.isArmed && readyGate.isReceived;
+      releaseReadyGate('SessionStart hook', { promptReadyAfterSettle: true });
+      // 冷启动超过 READY_SIGNAL_TIMEOUT_MS 的 CLI（Hermes 常态是 2-3 分钟）恰好
+      // 总落在 fallback 之后：fallback 只开闸不投递（非 type-ahead 的
+      // flushPending 是 no-op），真信号依然是权威就绪，这里直接兑现。仅限首轮
+      // （awaitingFirstPrompt）——首条 prompt 交付后 clear/compact 来源的
+      // SessionStart 保持原有 no-op 语义，绝不在会话中途误标就绪。
+      if (lateAfterFallback && awaitingFirstPrompt && !isPromptReady) {
+        log('Late ready signal after timeout fallback — marking prompt ready now');
+        markPromptReady();
+      }
       break;
     }
 
@@ -5811,6 +6181,7 @@ function teardownSandboxBestEffort(): void {
   sandboxStopWatcher = null;
   try { sandboxCleanup?.(); } catch { /* */ }
   sandboxCleanup = null;
+  if (seatbeltProfilePath) { try { unlinkSync(seatbeltProfilePath); } catch { /* */ } seatbeltProfilePath = null; }
 }
 // Under pm2 the worker's stdout/stderr are pipes; a broken pipe (e.g. log
 // streaming detaches) would otherwise reach the uncaughtException handler below

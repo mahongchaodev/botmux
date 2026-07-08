@@ -20,9 +20,9 @@
  * sandbox-exec approach and is handled elsewhere.
  */
 import { homedir } from 'node:os';
-import { mkdirSync, existsSync, writeFileSync, chmodSync, readdirSync, readFileSync, rmSync, statSync, openSync, fstatSync, readSync, writeSync, closeSync, constants as fsConstants } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, chmodSync, readdirSync, readFileSync, rmSync, statSync, realpathSync, openSync, fstatSync, readSync, writeSync, closeSync, constants as fsConstants } from 'node:fs';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
-import { join, dirname, relative } from 'node:path';
+import { join, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 
@@ -133,8 +133,14 @@ export interface SandboxPlan {
    *  the CLI's token refresh / login persists — unlike project edits which are
    *  isolated). Resolved + existence-filtered by prepareSandbox. */
   authReal?: string[];
-  /** Runtime-generated roots that the CLI must see but must not mutate. */
+  /** Runtime-generated roots that the CLI must see but must not mutate. Trusted
+   *  (daemon-produced, e.g. skill plugin dirs) — bound AFTER the privacy masks so
+   *  a broad hideDir can't break skill delivery. */
   readonlyRoots?: string[];
+  /** User-configured read-only inputs (per-bot sandboxReadonlyPaths). Bound BEFORE
+   *  the privacy masks so hidePaths always win over them — an entry overlapping a
+   *  masked path must never re-expose the real content. */
+  userReadonlyRoots?: string[];
   /** Keep network egress. File-only scope ⇒ default true (npm/pip/git work). */
   net?: boolean;
 }
@@ -145,8 +151,10 @@ export interface SandboxPlan {
  *
  * Mount order matters (later mounts win): the whole real fs read-only first, then
  * the home + project merged overlays bind over it (so writes there are isolated),
- * then privacy masks blank specific paths, then the outbox binds LAST so it stays
- * writable even if a mask covers a parent dir.
+ * then user readonly inputs, then privacy masks blank specific paths (masks bind
+ * after user readonly roots so an overlapping readonly entry can never re-expose
+ * masked content), then trusted runtime roots, then the outbox binds LAST so it
+ * stays writable even if a mask covers a parent dir.
  */
 export function buildSandboxArgs(plan: SandboxPlan): string[] {
   const a: string[] = [];
@@ -158,12 +166,17 @@ export function buildSandboxArgs(plan: SandboxPlan): string[] {
   a.push('--bind', plan.homeMerged, plan.home);
   a.push('--bind', plan.projectMerged, plan.projectMount);
   // CLI auth/login dirs kept REAL + writable (bind over the isolated home) so token
-  // refresh / login persists. Narrow (auth only) → session history stays isolated.
+  // refresh / login persists. Narrow (auth only) keeps session history isolated;
+  // some CLIs widen to their whole state dir for SQLite locks (CliAdapter.authPaths).
   for (const p of plan.authReal ?? []) a.push('--bind', p, p);
+  // User-configured read-only inputs — BEFORE the masks so hidePaths always win
+  // over an overlapping (e.g. ancestor) readonly entry.
+  for (const root of plan.userReadonlyRoots ?? []) a.push('--ro-bind', root, root);
   // Per-bot privacy masks (opt-in, no defaults).
   for (const dir of plan.hideDirs) a.push('--tmpfs', dir);
   for (const f of plan.hideFiles) a.push('--ro-bind', f.empty, f.path);
-  // Session-scoped runtime inputs, e.g. generated skill/plugin dirs.
+  // Session-scoped TRUSTED runtime inputs, e.g. generated skill/plugin dirs —
+  // after the masks so a broad hideDir can't blank skill delivery.
   for (const root of plan.readonlyRoots ?? []) a.push('--ro-bind', root, root);
   // Outbox LAST so it wins even if a mask covers a parent dir.
   a.push('--bind', plan.outbox, plan.outbox);
@@ -214,6 +227,78 @@ export function reexposeRunBinArgs(binPaths: (string | undefined)[]): string[] {
   return out;
 }
 
+/** Expand a leading `~` (bare `~` or `~/…` only — never `~user`) to `home`. */
+function expandTilde(raw: string, home: string): string {
+  return raw.replace(/^~(?=\/|$)/, home);
+}
+
+/** Tilde-expand each entry and keep only paths that exist on the host. */
+function resolveExistingPaths(paths: readonly string[] | undefined, home: string): string[] {
+  const out: string[] = [];
+  for (const raw of paths ?? []) {
+    if (!raw || typeof raw !== 'string') continue;
+    const p = expandTilde(raw, home);
+    try { if (existsSync(p)) out.push(p); } catch { /* */ }
+  }
+  return out;
+}
+
+/** Does readonly-binding `p` swallow the overlay root `root` (p === root or an
+ *  ancestor of it)? Later binds win in bwrap, so such a bind would replace the
+ *  whole write-isolated overlay with the real read-only tree. Both args must be
+ *  canonicalized first — a raw `/repo/`, `/repo/../repo`, or a symlink to the
+ *  project would slip past a plain string-prefix check yet still shadow the
+ *  overlay once bwrap normalizes/resolves the mount. */
+function coversRoot(p: string, root: string): boolean {
+  if (p === root) return true;
+  const prefix = p.endsWith('/') ? p : `${p}/`; // '/' stays '/', '/a' → '/a/'
+  return root.startsWith(prefix);
+}
+
+/** Canonicalize an existing path: resolve symlinks + `.`/`..`/trailing slash.
+ *  Falls back to a lexical resolve if realpath fails (e.g. a racing unlink). */
+function canonicalize(p: string): string {
+  try { return realpathSync(p); } catch { return resolve(p); }
+}
+
+/** bwrap cannot bind-mount over a symlink mount destination. Some hosts expose
+ *  $HOME through a symlink, so bind overlays — and set the child HOME env — at
+ *  canonical targets so the mount point always exists and $HOME resolves even
+ *  when the symlink's parent is masked inside the sandbox. */
+export function resolveSandboxMountPath(p: string): string {
+  return canonicalize(p);
+}
+
+/**
+ * Resolve user-configured sandboxReadonlyPaths: tilde-expand, drop non-existent
+ * entries, and REJECT entries that (after resolving symlinks + normalizing) are
+ * equal to or an ancestor of an overlay root (home / projectMount) — those would
+ * shadow the entire write-isolated overlay with the real read-only tree,
+ * silently breaking write isolation. The overlap check runs on the CANONICAL
+ * path so a symlink (`/tmp/ref -> /repo`) or a non-normalized string (`/repo/`,
+ * `/repo/../repo`) can't alias past the guard. Entries strictly UNDER an overlay
+ * root stay allowed: that's the documented "reference material, read-only,
+ * excluded from /land" use case. Returns the tilde-expanded original paths (the
+ * docs promise "mounted at the same path"); bwrap resolves any symlink source.
+ * Exported for tests.
+ */
+export function resolveUserReadonlyRoots(
+  paths: readonly string[] | undefined, home: string, projectMount: string,
+): string[] {
+  const homeReal = canonicalize(home);
+  const projReal = canonicalize(projectMount);
+  const out: string[] = [];
+  for (const p of resolveExistingPaths(paths, home)) {
+    const real = canonicalize(p);
+    if (coversRoot(real, homeReal) || coversRoot(real, projReal)) {
+      console.error(`[sandbox] sandboxReadonlyPaths entry ignored (resolves to an overlay root, would shadow write isolation): ${p}`);
+      continue;
+    }
+    out.push(p);
+  }
+  return out;
+}
+
 // ───────────────────────────── orchestration ─────────────────────────────────
 
 /** Absolute path to this build's compiled cli.js (dist/cli.js), derived from
@@ -252,9 +337,18 @@ export interface SandboxSpawn {
  *  data dir (e.g. CLAUDE_CONFIG_DIR / `.claude-runtime`): the HOME overlay's
  *  ephemeral UPPER copy. The worker redirects its jsonl/bridge watch here so it
  *  sees the sandboxed CLI's writes (which are invisible at the real host path).
- *  Mirrors prepareSandbox's homeUpper layout — keep in sync. */
+ *  Mirrors prepareSandbox's homeUpper layout — keep in sync.
+ *
+ *  The home overlay is bound (and $HOME set) at the CANONICAL home, so copy-ups
+ *  land relative to that root. Compute the in-home relative path robustly whether
+ *  realDataDir arrives in symlink or canonical form: adapters build it from the
+ *  raw homedir() (so the raw base cancels cleanly in the common case), but a
+ *  canonicalized dataDir under a symlink home would escape home-upper via `..` —
+ *  fall back to the canonical base so it can't. */
 export function sandboxedClaudeDataDir(sessionId: string, realDataDir: string): string {
-  return join(VARTMP_ROOT, sessionId, 'home-upper', relative(homedir(), realDataDir));
+  const raw = relative(homedir(), realDataDir);
+  const rel = raw.startsWith('..') ? relative(resolveSandboxMountPath(homedir()), realDataDir) : raw;
+  return join(VARTMP_ROOT, sessionId, 'home-upper', rel);
 }
 
 /** Proxy env vars forwarded into the sandbox so the CLI reaches the API even on
@@ -292,8 +386,15 @@ export function prepareSandbox(opts: {
    *  spawned inside the sandbox beyond cliBin — re-exposed if under /run. ONLY
    *  executable paths (never cwd/path args). undefined → none. */
   extraExecPaths?: readonly string[];
-  /** Runtime-generated roots that should be visible read-only inside bwrap. */
+  /** Runtime-generated roots that should be visible read-only inside bwrap.
+   *  Trusted (daemon-produced) — bound after the privacy masks. */
   readonlyRoots?: readonly string[];
+  /** User-configured extra read-only inputs (per-bot sandboxReadonlyPaths).
+   *  Bound before the privacy masks (masks win) and rejected when they would
+   *  shadow the home/project overlay roots. */
+  userReadonlyPaths?: readonly string[];
+  /** Keep network egress. Defaults to true for backwards compatibility. */
+  net?: boolean;
 }): SandboxSpawn | null {
   if (!opts.enabled) return null;
   if (process.platform !== 'linux') return null; // overlayfs + bwrap are Linux-only
@@ -303,7 +404,8 @@ export function prepareSandbox(opts: {
   const needFuse = process.env.BOTMUX_SANDBOX_FUSE === '1' || process.getuid?.() !== 0;
   if (!ensureSandboxDeps(needFuse)) return null;
 
-  const sessionRoot = join(opts.dataDir, 'sandboxes', opts.sessionId);
+  const dataDir = resolveSandboxMountPath(opts.dataDir);
+  const sessionRoot = join(dataDir, 'sandboxes', opts.sessionId);
   const outbox = join(sessionRoot, 'outbox');
   const shimBin = join(sessionRoot, 'shimbin');
   const empties = join(sessionRoot, 'empties');
@@ -317,10 +419,10 @@ export function prepareSandbox(opts: {
   const homeWork = join(vartmp, 'home-work');
   for (const d of [outbox, shimBin, empties]) mkdirSync(d, { recursive: true });
 
-  const home = homedir();
+  const home = resolveSandboxMountPath(homedir());
   // BOTMUX_SANDBOX_SRC overrides the LOWER project source for spike testing only.
-  const projectSource = process.env.BOTMUX_SANDBOX_SRC || opts.sourceWorkingDir;
-  const projectMount = opts.sourceWorkingDir;
+  const projectSource = resolveSandboxMountPath(process.env.BOTMUX_SANDBOX_SRC || opts.sourceWorkingDir);
+  const projectMount = resolveSandboxMountPath(opts.sourceWorkingDir);
 
   // A same-session re-spawn (e.g. in-pane /clear) re-enters here; unmount any
   // stale merged overlays first so we don't stack a second mount on the same dir.
@@ -353,11 +455,14 @@ export function prepareSandbox(opts: {
 
   // Per-bot privacy masks: existing dirs → tmpfs blank; everything else → empty
   // read-only placeholder file. No defaults (caller passes hidePaths explicitly).
+  // `~` resolves like the docs' examples (`~/.ssh`) — an unexpanded tilde would
+  // fail existsSync and mask a literal `~/...` path, leaving the real one readable.
   const hideDirs: string[] = [];
   const hideFiles: { path: string; empty: string }[] = [];
   let emptyIdx = 0;
-  for (const p of opts.hidePaths ?? []) {
-    if (!p || typeof p !== 'string') continue;
+  for (const raw of opts.hidePaths ?? []) {
+    if (!raw || typeof raw !== 'string') continue;
+    const p = expandTilde(raw, home);
     let isDir = false;
     try { isDir = existsSync(p) && statSync(p).isDirectory(); } catch { /* */ }
     if (isDir) {
@@ -373,18 +478,9 @@ export function prepareSandbox(opts: {
   // unlike isolated project edits). Resolve `~` and bind only existing paths — a
   // missing auth file isn't a valid mountpoint (the CLI must be logged in on the
   // host; login-from-scratch inside the sandbox isn't supported).
-  const authReal: string[] = [];
-  for (const raw of opts.authPaths ?? []) {
-    if (!raw || typeof raw !== 'string') continue;
-    const p = raw.replace(/^~(?=\/|$)/, home);
-    try { if (existsSync(p)) authReal.push(p); } catch { /* */ }
-  }
-
-  const readonlyRoots: string[] = [];
-  for (const raw of opts.readonlyRoots ?? []) {
-    if (!raw || typeof raw !== 'string') continue;
-    try { if (existsSync(raw)) readonlyRoots.push(raw); } catch { /* */ }
-  }
+  const authReal = resolveExistingPaths(opts.authPaths, home);
+  const readonlyRoots = resolveExistingPaths(opts.readonlyRoots, home);
+  const userReadonlyRoots = resolveUserReadonlyRoots(opts.userReadonlyPaths, home, projectMount);
 
   const plan: SandboxPlan = {
     projectMount,
@@ -396,7 +492,8 @@ export function prepareSandbox(opts: {
     hideFiles,
     authReal,
     readonlyRoots,
-    net: true,
+    userReadonlyRoots,
+    net: opts.net !== false,
   };
   const args = buildSandboxArgs(plan);
   // Shim bin at a fixed path UNDER the /run tmpfs — the whole real fs is bound
@@ -420,7 +517,8 @@ export function prepareSandbox(opts: {
   // Authoritative child env via bwrap --setenv (works on pty AND tmux — the tmux
   // backend only forwards a fixed whitelist, which excludes HOME/PATH/relay).
   const env: Record<string, string> = {
-    HOME: home,                                      // home overlay is bound AT the real home path
+    HOME: home,                                      // MUST match where the overlay is bound (canonical);
+                                                     // a symlink-form HOME dangles when its parent is masked (e.g. tmpfs /tmp)
     BOTMUX_SEND_RELAY: outbox,                       // routes `botmux send` to the daemon outbox watcher
     PATH: `/run/sbxbin:${process.env.PATH ?? ''}`,   // /run/sbxbin first so `botmux` = the relay shim
   };
@@ -461,7 +559,8 @@ export function prepareSandbox(opts: {
  */
 export function attachSandboxOutbox(opts: { sessionId: string; dataDir: string }): { outbox: string; workDir: string; cleanup: () => void } | null {
   if (process.platform !== 'linux') return null;
-  const sessionRoot = join(opts.dataDir, 'sandboxes', opts.sessionId);
+  const dataDir = resolveSandboxMountPath(opts.dataDir);
+  const sessionRoot = join(dataDir, 'sandboxes', opts.sessionId);
   const outbox = join(sessionRoot, 'outbox');
   const projUpper = join(sessionRoot, 'proj-upper');
   if (!existsSync(outbox) && !existsSync(projUpper)) return null; // never sandboxed
@@ -485,7 +584,7 @@ export function attachSandboxOutbox(opts: { sessionId: string; dataDir: string }
 /** Reclaim one session's overlay residue: unmount both merged overlays + rm the
  *  per-session tree (incl. the /var/tmp home scratch). Idempotent / best-effort. */
 function reclaimSandbox(dataDir: string, sid: string): void {
-  const sessionRoot = join(dataDir, 'sandboxes', sid);
+  const sessionRoot = join(resolveSandboxMountPath(dataDir), 'sandboxes', sid);
   unmountOverlay(join(sessionRoot, 'proj-merged'));
   unmountOverlay(join(sessionRoot, 'home-merged'));
   try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
@@ -535,7 +634,8 @@ function liveSandboxSids(): Set<string> {
  * daemon lifetime — one daemon per bot can run for days).
  */
 export function sweepOrphanSandboxes(dataDir: string, activeSessionIds: Set<string>): void {
-  const root = join(dataDir, 'sandboxes');
+  const sandboxDataDir = resolveSandboxMountPath(dataDir);
+  const root = join(sandboxDataDir, 'sandboxes');
   let sids: string[] = [];
   try { sids = readdirSync(root); } catch { return; } // no sandboxes dir yet
   // Grace before reclaiming an ACTIVE-but-unmounted sandbox: a worker that just
@@ -567,7 +667,7 @@ export function sweepOrphanSandboxes(dataDir: string, activeSessionIds: Set<stri
       try { ageOk = now - statSync(sessionRoot).mtimeMs > ACTIVE_DEAD_GRACE_MS; } catch { ageOk = false; }
       if (!ageOk) continue; // too fresh — could be a worker mid-spawn
     }
-    reclaimSandbox(dataDir, sid);
+    reclaimSandbox(sandboxDataDir, sid);
   }
 }
 

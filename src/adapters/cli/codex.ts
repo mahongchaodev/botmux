@@ -125,16 +125,48 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
   let cachedBin: string | undefined;
   return {
     id: 'codex',
-    authPaths: ['~/.codex/auth.json'],
+    // codex 0.137's own filesystem profile can't express a read blocklist, so
+    // isolation is enforced by the worker's whole-process macOS Seatbelt wrapper.
+    // e2e verified: codex under `sandbox-exec -f <profile>` (with bypass) is
+    // blocked from denied paths and runs normally; its sessions/auth live in the
+    // per-bot BOT_HOME via CODEX_HOME redirection. (Read isolation does NOT consult
+    // authPaths — that only feeds the bwrap file sandbox below.)
+    supportsReadIsolation: true,
+    // Whole ~/.codex kept REAL, not just auth.json: codex opens SQLite state/log
+    // DBs there (state_*.sqlite / logs_*.sqlite). Under the file sandbox the home
+    // is an overlayfs merge, and overlayfs (kernel + fuse) doesn't support the
+    // POSIX fcntl locks SQLite needs — the connection pool blocks ~57s then codex
+    // exits 1 ("pool timed out"). Binding the dir real gives working locks and
+    // keeps login/history persistent (same rationale as auth.json).
+    authPaths: ['~/.codex'],
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
-    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass }) {
+    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass, readIsolation }) {
+      // Read isolation for Codex is enforced by the worker's Seatbelt wrapper,
+      // NOT by codex's own profile (codex 0.137 can't express a read blocklist).
+      // So spawn args are unchanged — keep bypass so codex's own nested sandbox
+      // is OFF and the outer Seatbelt profile is the sole enforcer.
       const baseArgs = [
         ...(!disableCliBypass ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
         '--no-alt-screen',
         '-c',
         `shell_environment_policy.set.BOTMUX_SESSION_ID=${JSON.stringify(sessionId)}`,
       ];
+      // Under read isolation the worker denies bots.json, so `botmux send` (a shell
+      // subprocess) registers this bot from the worker-written cred FILE, keyed by
+      // SESSION_DATA_DIR + BOTMUX_LARK_APP_ID. Codex does NOT forward its env to shell
+      // subprocesses by default (only shell_environment_policy.set/inherit do), so
+      // without this those two vars never reach `botmux send` → "Bot not registered".
+      // Forward codex's full env to shell commands so the cred-file lookup works. No
+      // secret is forwarded — it lives only in the cred file (not env/argv), so it is
+      // NOT exposed to other bots via `ps aux`. (inherit rather than set: the two vars
+      // are already in codex's env from the worker.)
+      if (readIsolation) {
+        baseArgs.push(
+          '-c', 'shell_environment_policy.inherit="all"',
+          '-c', 'shell_environment_policy.ignore_default_excludes=true',
+        );
+      }
       if (model && model.trim()) {
         // Codex 接受 `--model <id>` / `-m <id>`，写全名最稳，错的会在 codex 自己启动时报。
         baseArgs.push('--model', model.trim());

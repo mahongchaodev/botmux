@@ -145,6 +145,18 @@ export function maintenanceRestartLogPath(): string {
 }
 
 /**
+ * Stable cwd (HOME) for spawns that must not inherit a possibly-deleted cwd.
+ * A global npm update replaces the botmux package dir, so any process whose cwd
+ * points there (notably the dashboard, started by pm2 with `cwd: PKG_ROOT`) is
+ * left holding a deleted directory. Both the `npm install -g` child and the
+ * detached restart driver spawned afterwards would then die at startup reading
+ * cwd (`uv_cwd`/ENOENT). Pinning them to HOME sidesteps that entirely.
+ */
+export function npmGlobalUpdateCwd(): string {
+  return homedir();
+}
+
+/**
  * Cross-process lock target that serializes `npm install -g botmux@latest`
  * between the scheduled auto-update (this daemon process) and a
  * dashboard-triggered manual update (the separate `botmux-dashboard` process),
@@ -208,6 +220,10 @@ export function spawnDetachedRestart(reason: string): void {
     detached: true,
     stdio: fd !== undefined ? ['ignore', fd, fd] : 'ignore',
     env: process.env,
+    // Run from HOME, not the caller's cwd: the dashboard (cwd: PKG_ROOT) triggers
+    // this right after a global npm update replaced that dir, so inheriting it
+    // would start the restart driver in a deleted directory. See npmGlobalUpdateCwd.
+    cwd: npmGlobalUpdateCwd(),
   });
   // A detached child's 'error' (e.g. spawn ENOENT) would otherwise throw
   // unhandled and crash this process — log it instead.
@@ -235,7 +251,7 @@ function productionDeps(): MaintenanceDeps {
       // timeout fast so the tick logs it and slips to the next day (the manual
       // update is already bumping to latest anyway).
       withFileLockSync(npmGlobalUpdateLockTarget(), () => {
-        execSync('npm install -g botmux@latest', { stdio: 'inherit' });
+        execSync('npm install -g botmux@latest', { cwd: npmGlobalUpdateCwd(), stdio: 'inherit' });
       }, { maxWaitMs: 500 });
     },
     writeIntent: (intent) => writeRestartIntent(intent),

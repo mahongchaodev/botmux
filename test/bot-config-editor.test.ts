@@ -295,6 +295,8 @@ describe('resolveCliId', () => {
   });
 
   it('maps setup menu indices to cliIds', () => {
+    // 序号以 src/setup/bot-config-editor.ts 的 CLI_ID_CHOICES 为准；
+    // 新 CLI 一律追加尾部，历史序号保持稳定（脚本化 setup 依赖）。
     expect(resolveCliId('1')).toBe('claude-code');
     expect(resolveCliId('4')).toBe('codex');
     expect(resolveCliId('7')).toBe('opencode');
@@ -306,6 +308,8 @@ describe('resolveCliId', () => {
     expect(resolveCliId('14')).toBe('traex');
     expect(resolveCliId('15')).toBe('pi');
     expect(resolveCliId('16')).toBe('copilot');
+    expect(resolveCliId('20')).toBe('kimi');
+    expect(resolveCliId('21')).toBe('genius');
   });
 
   it('passes through literal cliIds unchanged', () => {

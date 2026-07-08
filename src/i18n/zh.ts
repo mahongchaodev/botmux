@@ -4,8 +4,9 @@
  */
 export const messages: Record<string, string> = {
   // ─── Card buttons ────────────────────────────────────────────────────────
-  'card.btn.open_terminal': '🖥️ 打开终端',
-  'card.btn.open_writable_terminal': '🖥️ 打开可操作终端',
+  'card.btn.open_terminal': '🖥️ 打开 Web 终端',
+  'card.btn.open_writable_terminal': '🖥️ 打开可操作 Web 终端',
+  'card.btn.open_local_cli': '💻 打开 {cliName}',
   'card.btn.get_write_link': '🔑 获取操作链接',
   'card.writable_terminal_link': '🔑 可操作终端（群内可见，任何人可直接操控）：[{url}]({url})',
   'card.btn.restart_cli': '🔄 重启 {cliName}',
@@ -54,7 +55,7 @@ export const messages: Record<string, string> = {
   'card.body.choose_label': '选择:',
   'card.usage_limit.retry_at': '⚠️ 当前已达到 {cliName} 使用限额。请在 {retryLabel} 后再试。',
   'card.usage_limit.retry_ready': '✅ {cliName} 限额预计已刷新。你可以重发上一条任务，或直接发送新消息。',
-  'card.private.snapshot_note': '🔒 仅你可见的静态快照（不会实时刷新）。点「打开终端」查看实时画面。',
+  'card.private.snapshot_note': '🔒 仅你可见的静态快照（不会实时刷新）。点「打开 Web 终端」查看实时画面。',
 
   // ─── Repo select card ────────────────────────────────────────────────────
   'card.repo.title': '📁 项目仓库管理',
@@ -74,6 +75,9 @@ export const messages: Record<string, string> = {
   'card.repo.toast_worktree_mode_switched_back': '已切回单仓库选择器，本 bot 后续会话默认生效（可再点切到多仓库）。',
   'card.repo.worktree_rolled_back': '{repo} 创建 worktree 失败：{error}。已回滚本批次此前创建的 {count} 个 worktree。',
   'card.repo.toast_worktree_creating': '正在创建 worktree，完成后会在话题里通知…',
+
+  // 平台团队大厅打卡（bot-only 群，仅 bot 可见）
+  'platform.hall_announce': '🤖 团队登记打卡：本 bot 上线（登记身份 union_id 用，无需回复）',
 
   // 群内授权卡片
   'card.grant.title': '🔑 使用授权',
@@ -246,8 +250,10 @@ export const messages: Record<string, string> = {
   'cmd.restart.terminated': '{cliName} 进程已终止，下次发消息时将自动恢复。',
   'cmd.cd.usage': '用法：/cd <path>\n例如：/cd ~/projects/my-app',
   'cmd.cd.switched': '工作目录已切换到 {path}，下次发消息时将在新目录下恢复。',
+  'cmd.cd.created_switched': '📁 目录不存在，已自动创建并切换到 {path}，下次发消息时将在新目录下恢复。',
   'cmd.cd.dir_not_exist': '目录不存在：{path}',
   'cmd.cd.cannot_read': '无法读取路径：{path}（{msg}）',
+  'cmd.cd.cannot_create': '无法创建目录：{path}（{msg}）',
   'cmd.cd.not_a_directory': '路径不是目录：{path}',
   'cmd.repo.no_prior_scan': '请先执行 /repo 查看项目列表。',
   'cmd.repo.index_out_of_range': '序号超出范围，有效范围：1-{max}',
@@ -265,6 +271,12 @@ export const messages: Record<string, string> = {
   'cmd.repo.worktree_in_progress': '⏳ 已有一个 worktree 正在创建，请稍候…',
   'cmd.repo.worktree_created_not_switched': '🌿 worktree 已创建：`{path}`（分支 `{branch}`），但会话状态已变化，未自动切换。需要时可用 `/repo {path}` 打开。',
   'cmd.repo.worktree_switch_failed': '⚠️ worktree 已创建：`{path}`，但自动切换失败：{error}\n可用 `/repo {path}` 手动打开。',
+  // 「仅默认目录」模式开启「自动创建 worktree」后，新会话启动时用（daemon 交互新话题 /
+  // dashboard 建会话 / webhook 外部事件三条路复用）。
+  'worktree.auto_creating': '🌿 正在为本会话创建独立 worktree（含 git fetch，可能需要几秒）…',
+  'worktree.auto_created': '🌿 已为本会话自动创建独立 worktree：`{path}`\n分支 `{branch}`，基于 `{base}`。原默认目录不受影响。',
+  'worktree.auto_fallback': '⚠️ 无法在默认目录 `{dir}` 创建 worktree（{error}），已回退到直接在默认目录启动会话。',
+  'worktree.err_not_git': '默认目录不是 git 仓库（或暂时无法确认）',
   'cmd.skip.opened': '▶️ 已直接开启会话（工作目录：{cwd}）',
   'cmd.status.running': '运行中',
   'cmd.status.waiting': '等待中',
@@ -309,6 +321,7 @@ export const messages: Record<string, string> = {
   'cmd.oncall.bind_failed_no_bot': '⚠️ 无法在配置文件中找到当前机器人条目，绑定失败。',
   'cmd.oncall.bind_failed': '⚠️ 绑定失败：{reason}',
   'cmd.oncall.bind_success': '✅ {verb} oncall\n群：{chatId}\n工作目录：{target} → {resolved}\n\n下次在本群开新话题时,本 bot 会直接用此目录启动 CLI、不再弹仓库选择卡片（仅本 bot 生效；要绑多个 bot 用 @bot1 @bot2 /oncall bind <path>）。',
+  'cmd.oncall.bind_created_note': '📁 目录不存在，已自动创建。',
   'cmd.oncall.verb_bound': '已绑定',
   'cmd.oncall.verb_updated': '已更新',
   'cmd.oncall.unbind_failed': '⚠️ 解绑失败：{reason}',
@@ -628,6 +641,11 @@ export const messages: Record<string, string> = {
   'card.voice.toast_need_auth': '🔒 你没有该机器人的使用权限，无法生成语音总结，请联系管理员授权',
   'card.action.takeover_retired': '⚠️ 旧版"接管"按钮已停用。bridge 模式下原 CLI 由 botmux 桥接，无需接管即可在飞书中收到回答。如需 /resume 完整接管能力，请等待 /adopt --takeover 命令上线。',
   'card.action.terminal_not_ready': '⚠️ 终端尚未就绪，请稍后再试。',
+  'card.action.local_terminal_opened': '💻 已请求打开本机 {cliName}',
+  'card.action.local_terminal_unsupported': '⚠️ 当前 {cliName} 会话暂不支持本机直开，请使用 Web 终端。',
+  'card.action.local_cli_missing': '⚠️ 本机未找到 {cliName} 可执行文件（{executable}），请先安装或配置 PATH / cliPathOverride。',
+  'card.action.local_terminal_failed': '⚠️ 打开本机 CLI 失败：{reason}',
+  'card.action.local_terminal_no_permission': '🔒 没有操作权限，无法打开本机 CLI',
   'card.action.write_link_sent': '🔑 操作链接已私密发送，请查收',
   'card.action.write_link_no_permission': '🔒 没有操作权限，无法获取操作链接',
   'card.action.session_gone': '⚠️ 会话已不在线，操作未完成',
@@ -705,6 +723,7 @@ export const messages: Record<string, string> = {
   'daemon.cmd_needs_active_cli': '{cmd} 需要活跃的 CLI 进程，当前话题无运行中的会话。',
   'daemon.enriched_mentions_label': '消息中的 @mention：',
   'daemon.choose_repo_first': '请先在上方卡片中选择仓库，您的消息已暂存，选择后会自动发送。',
+  'daemon.worktree_building_wait': '正在创建 worktree（含 git fetch，可能需要几秒），您的消息已暂存，创建完成后会自动一并发送。',
 
   // ─── /dashboard command group (PR3 C1) ─────────────────────────────────
   'card.dashboard.owner_only': '🔒 `/dashboard` 命令组仅 Bot 管理员（allowedUsers）可用。',
@@ -973,7 +992,7 @@ export const messages: Record<string, string> = {
   'settings.sectionMaintenance': '维护',
   'settings.publicReadOnly': '公开只读模式',
   'settings.publicReadOnlyHelp': '允许无 token 访问只读 API。',
-  'settings.openTerminalInFeishu': '飞书内打开终端',
+  'settings.openTerminalInFeishu': '飞书内打开 Web 终端',
   'settings.openTerminalInFeishuHelp': '终端链接默认在飞书 webview 打开。',
   'settings.autoUpdate': '每日自动更新',
   'settings.autoUpdateHelp': '在每天指定时间自动拉取最新版本。',
@@ -1090,6 +1109,7 @@ export const messages: Record<string, string> = {
   'restart.version': '版本：{version}',
   'restart.unfinished_sessions': '未结束会话：{count} 个',
   'restart.dashboard': 'Dashboard：{url}',
+  'restart.dashboard_local': '本地直连（平台异常时可用）：{url}',
   'restart.changelog_label': '更新内容：',
   'restart.changelog_link_fallback': '详情：{url}',
   'restart.card_title': 'botmux 维护通知',

@@ -8,10 +8,10 @@
  * just the argv shape and the upper-walk/apply contract.
  */
 import { describe, it, expect } from 'vitest';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, existsSync, writeFileSync, readFileSync, symlinkSync, rmSync, mkdirSync } from 'node:fs';
-import { buildSandboxArgs, reexposeRunBinArgs, validateRelayRequest, materializeOutboxFile, prepareSandbox, type SandboxPlan } from '../src/adapters/backend/sandbox.js';
+import { mkdtempSync, existsSync, writeFileSync, readFileSync, symlinkSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
+import { buildSandboxArgs, reexposeRunBinArgs, validateRelayRequest, materializeOutboxFile, prepareSandbox, resolveSandboxMountPath, sandboxedClaudeDataDir, resolveUserReadonlyRoots, type SandboxPlan } from '../src/adapters/backend/sandbox.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
 import { computeSandboxDiff, applySandboxDiff, upperDir } from '../src/services/sandbox-land.js';
 
@@ -101,6 +101,30 @@ describe('buildSandboxArgs (overlay model)', () => {
     expect(outboxIdx).toBeGreaterThan(rootIdx);
   });
 
+  it('binds user readonly roots BEFORE privacy masks so an overlapping entry cannot re-expose masked content', () => {
+    const a = buildSandboxArgs(plan({
+      hideDirs: ['/root/.ssh'],
+      hideFiles: [{ path: '/root/.botmux/bots.json', empty: '/data/sandboxes/s1/empties/mask-0' }],
+      userReadonlyRoots: ['/root/refs'],
+    }));
+    const userIdx = tripleIdx(a, '--ro-bind', '/root/refs', '/root/refs');
+    const dirMaskIdx = a.indexOf('/root/.ssh');
+    const fileMaskIdx = tripleIdx(a, '--ro-bind', '/data/sandboxes/s1/empties/mask-0', '/root/.botmux/bots.json');
+    expect(userIdx).toBeGreaterThanOrEqual(0);
+    expect(dirMaskIdx).toBeGreaterThan(userIdx);
+    expect(fileMaskIdx).toBeGreaterThan(userIdx);
+  });
+
+  it('keeps trusted skill roots AFTER the masks (a broad hideDir must not blank skill delivery)', () => {
+    const a = buildSandboxArgs(plan({
+      hideDirs: ['/data/runtime-skills'],
+      readonlyRoots: ['/data/runtime-skills/s1/claude-plugin'],
+    }));
+    const maskIdx = a.indexOf('/data/runtime-skills');
+    const skillIdx = tripleIdx(a, '--ro-bind', '/data/runtime-skills/s1/claude-plugin', '/data/runtime-skills/s1/claude-plugin');
+    expect(skillIdx).toBeGreaterThan(maskIdx);
+  });
+
   it('no clone/scrub artefacts: never binds a per-session clone "work" dir', () => {
     const a = buildSandboxArgs(plan());
     // The old model bound a `git clone` "work" dir; the overlay model never does
@@ -120,6 +144,47 @@ describe('buildSandboxArgs (overlay model)', () => {
     const a = buildSandboxArgs(plan());
     for (const flag of ['--unshare-user', '--unshare-pid', '--unshare-ipc']) {
       expect(a).toContain(flag);
+    }
+  });
+});
+
+describe('resolveSandboxMountPath', () => {
+  it('canonicalizes a symlink mount target so bwrap does not bind over the symlink path', () => {
+    const root = tmp();
+    const realHome = join(root, 'real-home');
+    const linkHome = join(root, 'home-link');
+    mkdirSync(realHome);
+    symlinkSync(realHome, linkHome);
+
+    expect(resolveSandboxMountPath(linkHome)).toBe(realpathSync(realHome));
+
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe('sandboxedClaudeDataDir (symlink HOME redirect)', () => {
+  it('keeps the redirect inside home-upper whether the dataDir is symlink- or canonical-form', () => {
+    // The home overlay binds (and $HOME is set) at the canonical home, so copy-ups
+    // land under home-upper relative to that root. A dataDir passed in CANONICAL
+    // form under a symlink HOME used to escape via `..` (relative(symlinkHome,
+    // canonicalData)) — breaking the Claude bridge redirect for exactly the
+    // symlink-HOME case this file hardens. Both forms must stay in home-upper.
+    const root = tmp();
+    const realHome = join(root, 'real-home');
+    const linkHome = join(root, 'home-link');
+    mkdirSync(realHome);
+    symlinkSync(realHome, linkHome);
+    const prevHome = process.env.HOME;
+    process.env.HOME = linkHome; // os.homedir() reads $HOME per call on Linux
+    try {
+      const symlinkForm = join(linkHome, '.claude');
+      const canonicalForm = join(realpathSync(linkHome), '.claude');
+      const expected = join('/var/tmp/botmux-sbx', 'sid-x', 'home-upper', '.claude');
+      expect(sandboxedClaudeDataDir('sid-x', symlinkForm)).toBe(expected);
+      expect(sandboxedClaudeDataDir('sid-x', canonicalForm)).toBe(expected);
+    } finally {
+      if (prevHome !== undefined) process.env.HOME = prevHome;
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
@@ -318,6 +383,26 @@ describe('sandbox landing from upper layer', () => {
     expect(d.statText).toContain('sub/edited.txt');
   });
 
+  it('resolves a symlink dataDir to the same canonical upper prepareSandbox created', () => {
+    // prepareSandbox canonicalizes dataDir before creating <dataDir>/sandboxes/…,
+    // so /land must canonicalize too or it looks under the symlink path and finds
+    // nothing. Write the changeset under the CANONICAL dir, ask via the SYMLINK.
+    const realData = tmp(); const sid = 's-symlink-datadir';
+    const linkData = join(tmp(), 'data-link');
+    symlinkSync(realData, linkData);
+    const up = upperDir(realData, sid);           // canonical upper (where writes land)
+    mkdirSync(up, { recursive: true });
+    writeFileSync(join(up, 'x.txt'), 'hi\n');
+    // upperDir must map the symlink dataDir onto the same canonical upper
+    expect(upperDir(linkData, sid)).toBe(up);
+    const d = computeSandboxDiff(linkData, sid);  // query via the symlink
+    expect(d.ok).toBe(true);
+    if (!d.ok) return;
+    expect(d.empty).toBe(false);
+    expect(d.statText).toContain('x.txt');
+    rmSync(linkData, { force: true });
+  });
+
   it('computeSandboxDiff reports empty when the upper has no changes', () => {
     const dataDir = tmp(); const sid = 's-empty';
     makeUpper(dataDir, sid);
@@ -464,7 +549,94 @@ describe('sandbox landing from upper layer', () => {
 // ── prepareSandbox: hidePaths produce the right masks ────────────────────────
 // On Linux with root we can actually mount the overlays; verify the resulting
 // argv masks an existing dir via tmpfs and a file via an empty ro-bind.
+// ── resolveUserReadonlyRoots: tilde expansion + overlay-root guard ───────────
+describe('resolveUserReadonlyRoots', () => {
+  it('tilde-expands entries against the given home and keeps only existing paths', () => {
+    const home = tmp();
+    mkdirSync(join(home, 'refs'), { recursive: true });
+    const project = tmp();
+    expect(resolveUserReadonlyRoots(['~/refs', '~/missing-xyz'], home, project)).toEqual([join(home, 'refs')]);
+  });
+
+  it('rejects entries equal to or covering an overlay root (home / project)', () => {
+    const home = tmp();
+    const project = tmp();
+    mkdirSync(join(project, 'vendor'), { recursive: true });
+    // `~` (= home), the project root itself, and `/` all swallow an overlay root → dropped.
+    // A path strictly UNDER the project stays allowed (reference-material use case).
+    expect(resolveUserReadonlyRoots(['~', project, '/', join(project, 'vendor')], home, project))
+      .toEqual([join(project, 'vendor')]);
+  });
+
+  it('rejects a non-normalized string that resolves to an overlay root (trailing slash / dot)', () => {
+    const home = tmp();
+    const project = tmp();
+    // `/repo/` and `/repo/.` both canonicalize to the project root → dropped,
+    // even though a plain string-prefix check would let them through.
+    expect(resolveUserReadonlyRoots([`${project}/`, join(project, '.')], home, project))
+      .toEqual([]);
+  });
+
+  it('rejects a symlink that resolves to the project or home overlay root', () => {
+    const home = tmp();
+    const project = tmp();
+    const linkDir = tmp();
+    const toProject = join(linkDir, 'to-project');
+    const toHome = join(linkDir, 'to-home');
+    symlinkSync(project, toProject);
+    symlinkSync(home, toHome);
+    // Both symlinks canonicalize to an overlay root → must be dropped, else bwrap
+    // would re-mount the real tree read-only and shadow write isolation.
+    expect(resolveUserReadonlyRoots([toProject, toHome], home, project)).toEqual([]);
+  });
+
+  it('allows a symlink that resolves OUTSIDE the overlay roots', () => {
+    const home = tmp();
+    const project = tmp();
+    const snap = tmp();
+    const linkDir = tmp();
+    const link = join(linkDir, 'ref');
+    symlinkSync(snap, link);
+    // The expanded original path is returned (docs promise "mounted at the same path").
+    expect(resolveUserReadonlyRoots([link], home, project)).toEqual([link]);
+  });
+
+  it('drops non-string and empty entries', () => {
+    const home = tmp();
+    const project = tmp();
+    expect(resolveUserReadonlyRoots(['', undefined as unknown as string], home, project)).toEqual([]);
+  });
+});
+
 describe.skipIf(process.platform !== 'linux')('prepareSandbox hidePaths masks', () => {
+  it('tilde-expands hidePaths so the documented `~/...` form masks the real path', () => {
+    const src = tmp();
+    writeFileSync(join(src, 'file.txt'), 'x');
+    const prev = process.env.BOTMUX_SANDBOX;
+    delete process.env.BOTMUX_SANDBOX;
+    const dataDir = tmp();
+    const sid = 'hp-tilde-' + Math.random().toString(36).slice(2);
+    // A hidePath that does NOT exist still gets an empty-placeholder mask — at the
+    // EXPANDED path, never at a literal `~/...` dest bwrap can't resolve.
+    const rel = '.botmux-sbx-test-missing-' + Math.random().toString(36).slice(2);
+    let r: ReturnType<typeof prepareSandbox> = null;
+    try {
+      r = prepareSandbox({
+        enabled: true, cliId: 'codex', sessionId: sid, sourceWorkingDir: src,
+        dataDir, cliBin: '/bin/true', cliArgs: [],
+        hidePaths: [`~/${rel}`],
+      });
+      if (r === null) return; // overlay mount unavailable in this env — skip assertions
+      const expanded = join(resolveSandboxMountPath(homedir()), rel);
+      const idx = r.args.findIndex((x, i) => x === '--ro-bind' && r!.args[i + 2] === expanded);
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(r.args).not.toContain(`~/${rel}`);
+    } finally {
+      if (r) r.cleanup();
+      if (prev !== undefined) process.env.BOTMUX_SANDBOX = prev;
+    }
+  });
+
   it('turns an existing dir hidePath into a tmpfs mask and a file into a ro-bind empty', () => {
     const src = tmp();
     writeFileSync(join(src, 'file.txt'), 'x');
@@ -496,6 +668,44 @@ describe.skipIf(process.platform !== 'linux')('prepareSandbox hidePaths masks', 
     } finally {
       if (r) r.cleanup();
       if (prev !== undefined) process.env.BOTMUX_SANDBOX = prev;
+    }
+  });
+
+  it('sets child HOME to the canonical mount path, not a symlink form (dangles when its parent is masked)', () => {
+    // Regression: binding the home overlay at the canonical target but leaving
+    // env.HOME as the symlink string breaks the inverse of the bug this file
+    // fixes — a HOME symlink whose parent is masked inside the sandbox (e.g. a
+    // /tmp path shadowed by the tmpfs) can't resolve, so HOME dangles and the
+    // CLI can't read/write it. env.HOME MUST equal the path the overlay binds.
+    const src = tmp();
+    writeFileSync(join(src, 'file.txt'), 'x');
+    const realHome = tmp();
+    const linkHome = join(tmpdir(), 'sbx-linkhome-' + Math.random().toString(36).slice(2));
+    symlinkSync(realHome, linkHome);
+    const prevSandbox = process.env.BOTMUX_SANDBOX;
+    const prevHome = process.env.HOME;
+    delete process.env.BOTMUX_SANDBOX;
+    process.env.HOME = linkHome; // os.homedir() reads $HOME per call on Linux
+    const dataDir = tmp();
+    const sid = 'symhome-' + Math.random().toString(36).slice(2);
+    let r: ReturnType<typeof prepareSandbox> = null;
+    try {
+      r = prepareSandbox({
+        enabled: true, cliId: 'codex', sessionId: sid, sourceWorkingDir: src,
+        dataDir, cliBin: '/bin/true', cliArgs: [],
+      });
+      if (r === null) return; // overlay mount unavailable in this env — skip assertions
+      const canonicalHome = realpathSync(linkHome);
+      expect(r.env.HOME).toBe(canonicalHome);
+      expect(r.env.HOME).not.toBe(linkHome);
+      // the home overlay is bound AT that same canonical path
+      const bound = r.args.some((x, i) => x === '--bind' && r!.args[i + 2] === canonicalHome);
+      expect(bound).toBe(true);
+    } finally {
+      if (r) r.cleanup();
+      if (prevHome !== undefined) process.env.HOME = prevHome;
+      if (prevSandbox !== undefined) process.env.BOTMUX_SANDBOX = prevSandbox;
+      rmSync(linkHome, { force: true });
     }
   });
 });

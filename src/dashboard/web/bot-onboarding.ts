@@ -33,6 +33,8 @@ type OnboardingJob = {
   cliId?: string;
   workingDir?: string;
   addedBotIndex?: number;
+  liveStarted?: boolean;
+  liveStartMessage?: string;
   permission?: OnboardingPermission;
   remainingSteps?: RemainingStep[];
   error?: string;
@@ -144,8 +146,11 @@ function renderJob(job: OnboardingJob, ownerError?: string): void {
       + (job.workingDir ? ` ｜ <b>${t('botOnboarding.metaDir')}:</b> <code>${escapeHtml(job.workingDir)}</code>` : '')
       + `</p>`
     : '';
+  // 落盘完成后：新 bot 已自动上线（start-bot 成功）→ 「无需重启」；否则回退到重启提示。
   const restartHint = job.status === 'completed'
-    ? `<p class="hint-ok">${t('botOnboarding.restartHint')}</p>`
+    ? (job.liveStarted
+        ? `<p class="hint-ok">${t('botOnboarding.liveOk')}</p>`
+        : `<p class="hint-ok">${t('botOnboarding.restartHint')}</p>`)
     : '';
   d.innerHTML = `<article>
     <header>
@@ -269,8 +274,15 @@ function renderForm(options: CliOption[], errorMsg?: string): void {
         <select id="ob-cli">${optionHtml}</select>
       </label>
       <label class="onboarding-field">
-        <span>${t('botOnboarding.dirLabel')}</span>
-        <input id="ob-dir" type="text" value="~" placeholder="${t('botOnboarding.dirPlaceholder')}" autocomplete="off" spellcheck="false">
+        <span>${t('botOnboarding.dirModeLabel')}</span>
+        <select id="ob-dir-mode">
+          <option value="fixed">${t('botOnboarding.dirModeFixed')}</option>
+          <option value="card">${t('botOnboarding.dirModeCard')}</option>
+        </select>
+      </label>
+      <label class="onboarding-field">
+        <span id="ob-dir-label">${t('botOnboarding.dirLabelFixed')}</span>
+        <input id="ob-dir" type="text" value="~" placeholder="${t('botOnboarding.dirPlaceholderFixed')}" autocomplete="off" spellcheck="false">
       </label>
       <label class="onboarding-field">
         <span>${t('botOnboarding.modelLabel')}</span>
@@ -292,17 +304,28 @@ function renderForm(options: CliOption[], errorMsg?: string): void {
   const cliSelect = d.querySelector<HTMLSelectElement>('#ob-cli');
   cliSelect?.addEventListener('change', () => syncModelFieldForCli(options));
   syncModelFieldForCli(options);
+  // 目录模式切换时同步目录框的标签/占位文案（fixed=固定默认目录 / card=扫描根）。
+  const dirModeSelect = d.querySelector<HTMLSelectElement>('#ob-dir-mode');
+  const syncDirField = () => {
+    const mode = dirModeSelect?.value === 'card' ? 'card' : 'fixed';
+    const label = d.querySelector<HTMLSpanElement>('#ob-dir-label');
+    const dirInput = d.querySelector<HTMLInputElement>('#ob-dir');
+    if (label) label.textContent = mode === 'card' ? t('botOnboarding.dirLabelCard') : t('botOnboarding.dirLabelFixed');
+    if (dirInput) dirInput.placeholder = mode === 'card' ? t('botOnboarding.dirPlaceholderCard') : t('botOnboarding.dirPlaceholderFixed');
+  };
+  dirModeSelect?.addEventListener('change', syncDirField);
   form?.addEventListener('submit', ev => {
     ev.preventDefault();
     const cliId = d.querySelector<HTMLSelectElement>('#ob-cli')?.value ?? '';
     const workingDir = d.querySelector<HTMLInputElement>('#ob-dir')?.value ?? '';
+    const dirMode = d.querySelector<HTMLSelectElement>('#ob-dir-mode')?.value === 'card' ? 'card' : 'fixed';
     const model = d.querySelector<HTMLInputElement>('#ob-model')?.value ?? '';
-    void startOnboarding({ cliId, workingDir, model }, options);
+    void startOnboarding({ cliId, workingDir, dirMode, model }, options);
   });
 }
 
 async function startOnboarding(
-  input: { cliId: string; workingDir: string; model: string },
+  input: { cliId: string; workingDir: string; dirMode: 'fixed' | 'card'; model: string },
   options: CliOption[],
 ): Promise<void> {
   stopPolling();
@@ -314,6 +337,7 @@ async function startOnboarding(
       body: JSON.stringify({
         cliId: input.cliId,
         workingDir: input.workingDir.trim(),
+        dirMode: input.dirMode,
         model: input.model.trim() || undefined,
       }),
     });

@@ -9,7 +9,7 @@ import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { join } from 'node:path';
 import { getBot, getAllBots, findOncallChat, getOwnerOpenId, type BotState } from '../../bot-registry.js';
 import { config } from '../../config.js';
-import { getChatInfo, getChatMode, getCachedChatMode, listChatBotMembers, replyMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
+import { getChatInfo, getChatMode, getCachedChatMode, listChatBotMembers, replyMessage, sendMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
 import { logger } from '../../utils/logger.js';
 import { BoundedMap } from '../../utils/bounded-map.js';
 import { serializeByAnchor } from '../../utils/anchor-serializer.js';
@@ -19,6 +19,8 @@ import { resolveNonsupportMessage, stripLeadingMentions, mentionOpenId, extractM
 import { recordObservedBots, listObservedBots } from '../../services/observed-bots-store.js';
 import { isTeamBot, recordTeamBot } from '../../services/team-bots-store.js';
 import { isTeamGroupChat } from '../../services/team-groups-store.js';
+import { isPlatformTeamBot, isPlatformHallChat, isPlatformTeamMemberChat } from '../../services/platform-team-store.js';
+import { recordBotUnionId, recordBotUnionIdFromMentions } from '../../services/bot-union-ids-store.js';
 import { getDocSubscription, listAllDocSubscriptions, type DocSubscription } from '../../services/doc-subs-store.js';
 import { getDocComment, isBotAuthoredReply, hasBotSentinel, commentTriggerAllowed } from './doc-comment.js';
 import { BOTMUX_REQUIRED_SCOPES, DOC_FEATURE_SCOPES, DOC_COMMENT_EVENT, buildScopeDeepLink } from '../../setup/verify-permissions.js';
@@ -36,6 +38,9 @@ import { resolveRegularGroupMode, resolveGroupMentionMode } from '../../services
 import { buildSummaryCommandPrompt, type SummaryChatKind, type SummaryCommandMatch, type SummaryCommandRuntimeContext } from './summary-command.js';
 import { DEFAULT_SUMMARY_PROMPT, summaryRangeFromBotConfig } from '../../services/summary-range-store.js';
 import { isSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
+
+// 大厅回执互教的防环闸：每进程对同一打卡者只回一次（见 hall swallow 分支）。
+const hallEchoReplied = new Set<string>();
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -616,13 +621,20 @@ export function isKnownPeerBot(dataDir: string, larkAppId: string, senderOpenId:
  * `isKnownPeerBot` (same-deployment siblings) is checked separately by callers;
  * this covers cross-deployment TEAM peers. Returns false when neither holds, so
  * the caller falls back to the /grant request card.
+ *
+ * 平台团队与旧版联邦团队同权：isPlatformTeamBot（平台 team-sync 下发的团队 bot
+ * union_id roster）与 isTeamBot（团队群里学来的 union_id）都是 union_id 锚定的
+ * bot 专属信任；平台拉的团队群则经 platform: 前缀镜像进 team-groups，走同一个
+ * isTeamGroupChat。两条路都算团队模式，都不需要 /grant。
  */
 export function isTrustedTeamBotSender(
   dataDir: string,
   chatId: string | undefined,
   senderUnionId: string | undefined,
 ): boolean {
-  return isTeamBot(dataDir, senderUnionId) || isTeamGroupChat(dataDir, chatId);
+  return isTeamBot(dataDir, senderUnionId)
+    || isPlatformTeamBot(dataDir, senderUnionId)
+    || isTeamGroupChat(dataDir, chatId);
 }
 
 /** Update the per-bot cross-reference from @mention data in an event.
@@ -951,6 +963,8 @@ export type TalkReason =
   | 'allowedUser'
   | 'oncall'
   | 'peer'
+  | 'teamBot'
+  | 'teamMember'
   | 'allowedChatGroup'
   | 'open'
   | 'chatGrant'
@@ -1001,11 +1015,25 @@ function hasConfiguredAllowlist(bot: ReturnType<typeof getBot>): boolean {
     || (bot.config.globalGrants?.length ?? 0) > 0;
 }
 
-export function canTalk(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): boolean {
-  return evaluateTalk(larkAppId, chatId, senderOpenId).allowed;
+export function canTalk(
+  larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined,
+  senderUnionId?: string, memberUnionId?: string,
+): boolean {
+  return evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId).allowed;
 }
 
-export function evaluateTalk(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): TalkEvaluation {
+/**
+ * @param senderUnionId  BOT-trust union（teamBot 腿）——调用方必须已按 sender_type
+ *   锁定为「飞书盖章的 bot 发送方」（daemon 的 teamTrustUnionId），否则恶意成员把
+ *   真人 union 报成 bot 就能让真人继承 bot 信任。
+ * @param memberUnionId  发送方 union（teamMember 腿）——可为真人 union（未锁 bot）。
+ *   仅授 chat 作用域内的 talk、不授 operate，且要求 union 在该团队的成员名单里
+ *   （memberUnionIds 来自平台鉴权的团队成员，非机器自报），故喂真人 union 是安全的。
+ */
+export function evaluateTalk(
+  larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined,
+  senderUnionId?: string, memberUnionId?: string,
+): TalkEvaluation {
   const bot = getBot(larkAppId);
   // allowedChatGroups 是"talk-open 的 chat_id 列表"：当前消息来自其中之一即放行（仅 canTalk）。
   // 成员关系隐含在"能在该 chat 发言"里 —— 退群者发不了言自动失权，新人进群即生效，无需成员快照。
@@ -1022,6 +1050,20 @@ export function evaluateTalk(larkAppId: string, chatId: string | undefined, send
     return { allowed: true, reason: 'oncall' };
   }
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return { allowed: true, reason: 'peer' };
+  // 跨部署团队 peer bot（旧版联邦学来的 union_id / 平台 roster 下发的 union_id）——
+  // 与 isKnownPeerBot 兄弟 bot 对等的 talk 放行。没有这一腿，外部 bot 闸门
+  //（isTrustedTeamBotSender）放进来的团队 bot 消息会在 enforceMessageQuotaForCliInput
+  // 的 evaluateTalk 复查处被静默丢弃（受限 bot 上 #332 的端到端断点）。仅认租户
+  // 稳定 union_id（bot 专属，人不会进这两张表），不看 chatId，不授 operate。
+  if (senderUnionId && (isTeamBot(config.session.dataDir, senderUnionId) || isPlatformTeamBot(config.session.dataDir, senderUnionId))) {
+    return { allowed: true, reason: 'teamBot' };
+  }
+  // 平台团队成员（人）：发送者 union_id 是本群所属平台团队的成员 → talk 免 grant。
+  // 严格 chat 作用域（isPlatformTeamMemberChat 要求成员与群在同一团队），只放 talk：
+  // canOperate 不引这一腿，/restart 等仍限 allowedUsers。滕鹏飞在团队群里 @ bot 即免卡。
+  if (memberUnionId && isPlatformTeamMemberChat(config.session.dataDir, chatId, memberUnionId)) {
+    return { allowed: true, reason: 'teamMember' };
+  }
   if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return { allowed: true, reason: 'allowedChatGroup' };
 
   // globalGrants 与 allowedChatGroups 同样确立"有白名单"语义：只配 globalGrants 也算限制态，
@@ -1052,11 +1094,12 @@ export function canOperate(
   // 命令（让编排者能对子 bot 跑 /repo /cd 等）。
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
   // L2 跨部署「团队 peer bot」互信 operate（与 L1 兄弟 bot 对等，覆盖编排者给
-  // 队友派 /repo /cd 等）。**只认租户稳定的 union_id**（isTeamBot），不走
-  // isTrustedTeamBotSender 的「团队群成员」分支——那条按 chat 放行是 sender 无关
-  // 的，会把「团队群里的真人」也误放进 operate，破坏 allowedUsers 边界。union_id
-  // 是发送方专属、且必须先在团队群里被认证学习过才进表，所以人不会命中。
+  // 队友派 /repo /cd 等）。**只认租户稳定的 union_id**（isTeamBot / 平台 roster），
+  // 不走 isTrustedTeamBotSender 的「团队群成员」分支——那条按 chat 放行是 sender
+  // 无关的，会把「团队群里的真人」也误放进 operate，破坏 allowedUsers 边界。union_id
+  // 是发送方专属、且必须先被团队背书（团队群学习 / 平台 roster）才进表，人不会命中。
   if (isTeamBot(config.session.dataDir, senderUnionId)) return true;
+  if (isPlatformTeamBot(config.session.dataDir, senderUnionId)) return true;
   const allowedUsers = bot.resolvedAllowedUsers;
   // globalGrants（与 allowedChatGroups 同理）确立"有白名单"语义：只配 globalGrants 也算限制态，
   // 否则 canOperate 会 fall through 到"全开放"，把 talk-only 授权变成 operate 全开——正是 PR #46
@@ -1108,10 +1151,11 @@ async function maybeSendGrantRequestCard(
  * - 'ignore'      -> not addressed to bot at all
  */
 export async function checkGroupMessageAccess(
-  larkAppId: string, message: any, chatId: string, senderOpenId: string | undefined,
+  larkAppId: string, message: any, chatId: string, senderOpenId: string | undefined, memberUnionId?: string,
 ): Promise<'allowed' | 'not_allowed' | 'ignore'> {
   const mentioned = isBotMentioned(larkAppId, message, senderOpenId);
-  const isAllowed = canTalk(larkAppId, chatId, senderOpenId);
+  // 群消息访问检查只在人路径调用，union 走 memberUnionId 腿（不进 bot-trust）。
+  const isAllowed = canTalk(larkAppId, chatId, senderOpenId, undefined, memberUnionId);
 
   logger.debug(`Check group message access: mentioned=${mentioned}, isAllowed=${isAllowed}`);
   if (mentioned) {
@@ -1666,6 +1710,13 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // Lark open_id is per-app: these IDs are correct for our app context.
         if (message.mentions?.length > 0) {
           updateBotOpenIdCrossRef(config.session.dataDir, larkAppId, message.mentions);
+          // Learn our OWN union_id from any @ of ourselves: Lark stamps every
+          // mention with the target's union_id, and mention-driven delivery
+          // works even where the self-message echo never arrives（无 receive-all
+          // scope 的应用收不到自己发的消息；bot-only 大厅实测完全不推事件）。
+          if (recordBotUnionIdFromMentions(config.session.dataDir, larkAppId, getBot(larkAppId).botOpenId, message.mentions)) {
+            logger.info(`[${larkAppId}] learned own bot union_id from @mention`);
+          }
         }
 
         const chatId = message.chat_id;
@@ -1687,8 +1738,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         if (isBotSenderType) {
           const senderOpenId = sender.sender_id?.open_id;
           const isSelfMessage = senderOpenId === getBot(larkAppId).botOpenId;
-          // Self messages: only echoed `/close` commands matter.
+          // Self messages: learn our OWN union_id from the echo first (the only
+          // reliable source — see bot-union-ids-store; reported to the platform
+          // on heartbeat for the team roster), then only echoed `/close` matters.
           if (isSelfMessage) {
+            const selfUnionId = sender.sender_id?.union_id as string | undefined;
+            if (selfUnionId && recordBotUnionId(config.session.dataDir, larkAppId, selfUnionId)) {
+              logger.info(`[${larkAppId}] learned own bot union_id from self-message echo`);
+            }
             try {
               const body = JSON.parse(message.content ?? '{}');
               if (body.text?.trim() !== '/close') return;
@@ -1712,6 +1769,31 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           const senderUnionId = sender.sender_id?.union_id as string | undefined;
           if (senderUnionId && isTeamGroupChat(config.session.dataDir, chatId)) {
             recordTeamBot(config.session.dataDir, { unionId: senderUnionId });
+          }
+          // 机器人大厅：bot 消息只用于身份登记（上面已学 sender union / mentions
+          // 自学 / cross-ref），绝不当任务路由——大厅打卡会点名 @ 同伴，不吞掉的话
+          // 接收 bot 会把打卡当任务拉起会话在大厅里回话（实测）。只吞 bot 发送方：
+          // 人类经隐藏入口进大厅后 @ bot 仍正常应答。
+          if (isPlatformHallChat(config.session.dataDir, chatId)) {
+            // 回执互教：打卡者点名了我们且带 #hall-echo（= 它还没学到自己的
+            // union_id）→ @ 回它一次。open_id 直接取事件 sender_id（本 app 视角，
+            // 无需 cross-ref），打卡者从回执的 mentions[] 学到自己。每进程每发送者
+            // 只回一次；回执不带标记，链路必然终止。
+            try {
+              const text: unknown = JSON.parse(message.content ?? '{}')?.text;
+              if (
+                typeof text === 'string' && text.includes('#hall-echo') && senderOpenId &&
+                isBotMentioned(larkAppId, message, undefined) &&
+                !hallEchoReplied.has(`${larkAppId}::${senderOpenId}`)
+              ) {
+                hallEchoReplied.add(`${larkAppId}::${senderOpenId}`);
+                void sendMessage(larkAppId, chatId, `<at user_id="${senderOpenId}"></at> 已登记`, 'text')
+                  .then(() => logger.info(`[${larkAppId}] hall echo reply sent to ${senderOpenId.substring(0, 12)}`))
+                  .catch((e) => logger.warn(`[${larkAppId}] hall echo reply failed: ${(e as Error).message}`));
+              }
+            } catch { /* content 非 JSON → 忽略 */ }
+            logger.debug(`[${larkAppId}] hall bot message swallowed after learning (chat=${chatId.substring(0, 12)})`);
+            return;
           }
           // Foreign bot: only route on @mention of us.
           if (!isBotMentioned(larkAppId, message, undefined)) return;
@@ -1782,7 +1864,16 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // 与「同部署兄弟 bot」(isKnownPeerBot) 对等，但覆盖跨部署的团队 peer。
           // 这正是「加入团队即免 introduce/grant」的接收闸：身份只认 union_id /
           // 团队群成员，绝不认自报名字（防同名 bot 冒名蹭权）。
-          if ((ctx.scope === 'chat' || decision.source === 'regular-group-thread' || forcedTopic) && !findOncallChat(larkAppId, chatId)) {
+          //
+          // 开放模式（未配任何 allowlist：allowedUsers / allowedChatGroups /
+          // globalGrants 全空）与人侧 evaluateTalk 的 `reason:'open'`（1011 行）对齐：
+          // 「谁都能触发」本应人、bot 同权。过去这道 gate 漏了这一腿，导致开放模式下
+          // 外部 bot @ 仍被丢弃，必须真人先 @ 一次建 session（ownsSession=true）才救活。
+          // 补上 hasConfiguredAllowlist 短路后两条路径统一：一旦配了任一 allowlist，
+          // 立刻恢复「限制态」设闸，安全边界不变。
+          if ((ctx.scope === 'chat' || decision.source === 'regular-group-thread' || forcedTopic)
+              && !findOncallChat(larkAppId, chatId)
+              && hasConfiguredAllowlist(getBot(larkAppId))) {
             const ownsSession = handlers.isSessionOwner?.(ctx.anchor, larkAppId) ?? false;
             if (!ownsSession
                 && !isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)
@@ -1803,13 +1894,17 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
 
         const senderOpenId = sender?.sender_id?.open_id as string | undefined;
+        // 人的 union_id：平台团队成员 talk-免grant 腿（isPlatformTeamMemberChat）要用。
+        const humanSenderUnionId = sender?.sender_id?.union_id as string | undefined;
         // defaultOncall 自动绑定必须在 canTalk 权限判断前完成，否则已开 defaultOncall
         // 的群首次 @bot 时 oncallChats 中还没有该 chat → evaluateTalk 判无权限 → 误弹
         // 自助授权申请卡。ensureDefaultOncallBound 本身带 fast-path 短路且 idempotent。
         await ensureDefaultOncallBound(larkAppId, chatId, chatType).catch(err =>
           logger.warn(`[oncall:${larkAppId}] pre-permission auto-bind failed for ${chatId.substring(0, 12)}: ${err}`),
         );
-        const isAllowed = canTalk(larkAppId, chatId, senderOpenId);
+        // 人的路径（bot 发送方已在上面的分支 return）：union 走 memberUnionId 腿，
+        // 不进 bot-trust 腿——teamBot 只认 bot-locked union。
+        const isAllowed = canTalk(larkAppId, chatId, senderOpenId, undefined, humanSenderUnionId);
 
         // /introduce — collaboration handshake. Intercept before any routing
         // so the command never reaches a CLI session (each @ed bot's daemon
@@ -2049,9 +2144,20 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // permitted senders. (The shared fold-back's replyRootId is already
           // handled by the first clause.)
           const mentionMode = resolveGroupMentionMode(larkAppId);
+          // 话题群 owned-topic 免@续话 — single-bot groups only. In a multi-bot
+          // topic every co-resident bot owns a session on the same thread anchor,
+          // so relaxing here would make ALL of them answer a message that
+          // @mentioned only one (or none) of them; botCount > 1 keeps the
+          // "@ required" contract. `stats` is the cached group stats (fetched
+          // above when ownsSession; its 999/999 API-failure fallback also lands
+          // on the safe "require @" side). A message that @mentions another
+          // specific member is a redirect to someone else → back off, mirroring
+          // the ambient carve-out.
           const ownedTopicGroupFollowup = !explicitlyMentionedThisBot
             && isAllowed
             && ownsSession
+            && !!stats && stats.botCount <= 1
+            && !mentionsAnotherMember(larkAppId, message)
             && routing.scope === 'thread'
             && !!message.thread_id
             && await getChatMode(larkAppId, chatId) === 'topic';
@@ -2063,7 +2169,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             || (isAllowed && mentionMode === 'topic' && ownsSession && !!message.thread_id)
             || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
           if (!relax) {
-            const access = await checkGroupMessageAccess(larkAppId, message, chatId, senderOpenId);
+            const access = await checkGroupMessageAccess(larkAppId, message, chatId, senderOpenId, humanSenderUnionId);
             if (access === 'not_allowed') {
               // 入口 A：无权限者 @bot → 弹授权申请卡（@owner），代替「无操作权限」。
               // 覆盖 ownsSession 真假两种情况，但绝不把该消息喂进已有 session。

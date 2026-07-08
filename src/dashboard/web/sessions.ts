@@ -37,6 +37,7 @@ import {
   selectIdleCleanupCandidates,
   type IdleCleanupHours,
 } from '../session-cleanup.js';
+import { CLI_OPTIONS } from '../../setup/bot-config-editor.js';
 
 function th(sort: string, label: string): string {
   return `<th data-sort="${sort}" data-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
@@ -51,25 +52,10 @@ function formatTokenCount(value: unknown): string {
   return n === null ? '-' : n.toLocaleString('en-US');
 }
 
-const CLI_FILTER_OPTIONS = [
-  'claude-code',
-  'seed',
-  'relay',
-  'codex',
-  'codex-app',
-  'cursor',
-  'gemini',
-  'opencode',
-  'mtr',
-  'hermes',
-  'mira',
-  'pi',
-  'copilot',
-  'aiden',
-  'coco',
-  'oh-my-pi',
-  'unknown',
-];
+// CLI 过滤选项从 setup 的单一事实源 CLI_OPTIONS 派生，新增 CLI 自动跟随，
+// 不再手抄一份（手抄版曾漏 antigravity/traex/mir/kimi/genius）。
+// 'unknown' 兜底：没有 cliId 的会话在 filtered() 里按 'unknown' 归类。
+const CLI_FILTER_OPTIONS = [...CLI_OPTIONS.map(o => o.id), 'unknown'];
 
 type BoardColumnId = 'needs-you' | 'starting' | 'working' | 'idle';
 
@@ -291,7 +277,6 @@ function pageHtml(): string {
         <p>${t('sessions.subtitle')}</p>
       </div>
       <div class="sessions-view-controls">
-        <button type="button" id="create-session-btn" class="primary create-session-btn">＋ ${t('sessions.create.button')}</button>
         <span id="kanban-team-stats" class="kanban-team-stats" hidden></span>
         <select id="kanban-team" class="kanban-team-select" aria-label="${t('sessions.kanban.groupTeam')}" hidden></select>
         <div class="segmented kanban-groupby" id="kanban-groupby" role="group" aria-label="${t('sessions.kanban.groupBy')}" hidden>
@@ -363,7 +348,6 @@ function pageHtml(): string {
     <dialog id="drawer"></dialog>
     <dialog id="term-modal" class="term-modal"></dialog>
     <dialog id="history-modal" class="history-modal"></dialog>
-    <dialog id="create-session-modal" class="create-session-modal"></dialog>
   </section>`;
 }
 
@@ -435,19 +419,17 @@ function renderCreateSessionForm(bots: PickerBot[]): string {
     </article>`;
 }
 
-function setupCreateSessionModal(modal: HTMLDialogElement, btn: HTMLButtonElement): void {
-  btn.onclick = async () => {
-    btn.disabled = true;
-    try {
-      const bots = await fetchPickerBots();
-      if (bots.length === 0) { alert(t('sessions.create.noBots')); return; }
-      modal.innerHTML = renderCreateSessionForm(bots);
-      modal.showModal();
-      wireCreateSessionForm(modal, bots);
-    } finally {
-      btn.disabled = false;
-    }
-  };
+// 打开全局「创建会话」弹窗。按钮已提到顶栏、弹窗 #create-session-modal 挂在全局
+// chrome（index.html），任意页面均可拉起。app.ts 的顶栏按钮以动态 import 调用本函数，
+// 从而把 sessions 模块留在懒加载 chunk 里、不撑大主包。弹窗缺失时静默返回。
+export async function openCreateSessionModal(): Promise<void> {
+  const modal = document.getElementById('create-session-modal') as HTMLDialogElement | null;
+  if (!modal) return;
+  const bots = await fetchPickerBots();
+  if (bots.length === 0) { alert(t('sessions.create.noBots')); return; }
+  modal.innerHTML = renderCreateSessionForm(bots);
+  modal.showModal();
+  wireCreateSessionForm(modal, bots);
 }
 
 function wireCreateSessionForm(modal: HTMLDialogElement, bots: PickerBot[]): void {
@@ -576,9 +558,7 @@ export function wireSessionsPage(root: HTMLElement): () => void {
   const teamSelect = root.querySelector<HTMLSelectElement>('#kanban-team')!;
   const teamStats = root.querySelector<HTMLElement>('#kanban-team-stats')!;
   const viewButtons = root.querySelectorAll<HTMLButtonElement>('.sessions-view-toggle [data-view]');
-  const createSessionBtn = root.querySelector<HTMLButtonElement>('#create-session-btn')!;
-  const createSessionModal = root.querySelector<HTMLDialogElement>('#create-session-modal')!;
-  setupCreateSessionModal(createSessionModal, createSessionBtn);
+  // 「创建会话」按钮 + 弹窗已提到全局顶栏，由 wireCreateSessionButton() 一次性接线（见 app.ts）。
 
   const selected = new Set<string>();
   let sortKey = 'lastMessageAt';
@@ -2530,6 +2510,6 @@ export function wireSessionsPage(root: HTMLElement): () => void {
     drawer.close();
     termModal.close();
     historyModal.close();
-    createSessionModal.close();
+    // createSessionModal 现为全局元素（顶栏按钮拉起），不随本页卸载而关闭。
   };
 }

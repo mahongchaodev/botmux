@@ -296,6 +296,34 @@ describe('BotOnboardingManager', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('dirMode=fixed persists defaultWorkingDir (direct start) instead of workingDir', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-onboard-'));
+    const manager = new BotOnboardingManager({
+      botsJsonPath: join(dir, 'bots.json'),
+      registerApp: async () => ({ ok: true, appId: 'cli_x', appSecret: 's', brand: 'feishu' }),
+      validateCredentials: async () => ({ ok: true }),
+      automateOpenPlatform: async () => autoOk(),
+      renderQrDataUrl: () => 'data:image/svg+xml;base64,qr',
+    });
+
+    const job = manager.start({ cliId: 'codex', workingDir: dir, dirMode: 'fixed' });
+    await job.done;
+
+    batchGetIdMock.mockResolvedValueOnce({
+      code: 0,
+      data: { user_list: [{ email: 'admin@corp.com', user_id: 'ou_admin' }] },
+    });
+    const r = await manager.submitOwner(job.id, ['admin@corp.com']);
+    expect(r.ok).toBe(true);
+
+    const bots = JSON.parse(readFileSync(join(dir, 'bots.json'), 'utf-8'));
+    expect(bots[0]).toMatchObject({ larkAppId: 'cli_x', defaultWorkingDir: dir });
+    // 弹卡扫描根不落盘（回退默认 ~），bots.json 只留固定目录一个字段。
+    expect(bots[0].workingDir).toBeUndefined();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('surfaces the second (open-platform) QR and finishes with a permission summary', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-onboard-'));
     const gate = deferred<void>();
@@ -365,6 +393,68 @@ describe('BotOnboardingManager', () => {
     expect((await manager.submitOwner(job.id, ['admin@corp.com'])).ok).toBe(true);
     const bots = JSON.parse(readFileSync(join(dir, 'bots.json'), 'utf-8'));
     expect(bots[0]).toMatchObject({ larkAppId: 'cli_f', cliId: 'claude-code', allowedUsers: ['admin@corp.com'] });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('auto-owner completion calls startBotLive and records liveStarted on the snapshot', async () => {
+    // 免重启：落盘后自动拉起新 bot 的 daemon，把结果记进快照供前端展示。
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-onboard-'));
+    userGetMock.mockResolvedValueOnce({
+      code: 0,
+      data: { user: { union_id: 'on_scanner', name: 'Scanner' } },
+    });
+    const startBotLive = vi.fn(async () => ({ ok: true, message: 'botmux-1 已上线' }));
+    const manager = new BotOnboardingManager({
+      botsJsonPath: join(dir, 'bots.json'),
+      registerApp: async () => ({ ok: true, appId: 'cli_live', appSecret: 's', brand: 'feishu', userOpenId: 'ou_scanner' }),
+      validateCredentials: async () => ({ ok: true }),
+      automateOpenPlatform: async () => autoOk(),
+      renderQrDataUrl: () => 'data:image/svg+xml;base64,qr',
+      startBotLive,
+    });
+
+    const job = manager.start();
+    await job.done;
+
+    const status = manager.get(job.id);
+    expect(status?.status).toBe('completed');
+    // 落盘后才拉起（此刻 bots.json 已有该 bot）。
+    expect(startBotLive).toHaveBeenCalledWith('cli_live');
+    expect(status?.liveStarted).toBe(true);
+    expect(status?.liveStartMessage).toBe('botmux-1 已上线');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('submitOwner calls startBotLive; a throwing hook still completes with liveStarted=false', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-onboard-'));
+    const startBotLive = vi.fn(async () => { throw new Error('pm2 down'); });
+    const manager = new BotOnboardingManager({
+      botsJsonPath: join(dir, 'bots.json'),
+      registerApp: async () => ({ ok: true, appId: 'cli_live2', appSecret: 's', brand: 'feishu', userOpenId: 'ou_owner' }),
+      validateCredentials: async () => ({ ok: true }),
+      automateOpenPlatform: async () => autoOk(),
+      renderQrDataUrl: () => 'data:image/svg+xml;base64,qr',
+      startBotLive,
+    });
+    const job = manager.start();
+    await job.done;
+    expect(manager.get(job.id)?.status).toBe('needs_owner');
+
+    batchGetIdMock.mockResolvedValueOnce({
+      code: 0,
+      data: { user_list: [{ email: 'owner@corp.com', user_id: 'ou_resolved' }] },
+    });
+    const r = await manager.submitOwner(job.id, ['owner@corp.com']);
+    expect(r.ok).toBe(true);
+
+    const status = manager.get(job.id);
+    // 拉起失败绝不阻断完成——只是回退到「请重启」提示。
+    expect(status?.status).toBe('completed');
+    expect(startBotLive).toHaveBeenCalledWith('cli_live2');
+    expect(status?.liveStarted).toBe(false);
+    expect(status?.liveStartMessage).toBe('pm2 down');
 
     rmSync(dir, { recursive: true, force: true });
   });

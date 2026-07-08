@@ -51,7 +51,7 @@ import { canOperate } from '../im/lark/event-dispatcher.js';
 import { buildSafeInsightReport } from '../services/insight/report.js';
 import type { SafeInsightReport } from '../services/insight/types.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
-import { writeRoleFile, deleteRoleFile, resolveRole, resolveRoleFile, resolveTeamRoleFile, writeTeamRoleFile, deleteTeamRoleFile } from './role-resolver.js';
+import { writeRoleFile, deleteRoleFile, resolveRole, resolveRoleFile, resolveTeamRoleFile, writeTeamRoleFile, deleteTeamRoleFile, MAX_ROLE_BYTES } from './role-resolver.js';
 import { getBotCapability, setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
 import {
   deleteRoleProfileEntry,
@@ -505,7 +505,7 @@ async function handleRoleCommand(
       const content = teamSet[1].trim();
       if (!content) { await sessionReply(rootId, t('role.set_empty', undefined, loc)); return; }
       writeTeamRoleFile(larkAppId, content);
-      await sessionReply(rootId, t('role.team_saved', { bytes: Buffer.byteLength(content, 'utf-8'), max: 4096 }, loc));
+      await sessionReply(rootId, t('role.team_saved', { bytes: Buffer.byteLength(content, 'utf-8'), max: MAX_ROLE_BYTES }, loc));
       return;
     }
     if (teamArgs === 'delete' || teamArgs === '删除') {
@@ -514,7 +514,7 @@ async function handleRoleCommand(
     }
     const content = resolveTeamRoleFile(larkAppId);
     if (content) {
-      await sessionReply(rootId, `${t('role.team_current', undefined, loc)}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: Buffer.byteLength(content, 'utf-8'), max: 4096 }, loc)}`);
+      await sessionReply(rootId, `${t('role.team_current', undefined, loc)}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: Buffer.byteLength(content, 'utf-8'), max: MAX_ROLE_BYTES }, loc)}`);
     } else {
       await sessionReply(rootId, t('role.team_empty', undefined, loc));
     }
@@ -548,7 +548,7 @@ async function handleRoleCommand(
     if (content) {
       const len = Buffer.byteLength(content, 'utf-8');
       const srcLabel = source === 'chat' ? t('role.src_chat', undefined, loc) : t('role.src_team', undefined, loc);
-      await sessionReply(rootId, `${t('role.current', undefined, loc)} ${srcLabel}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: len, max: 4096 }, loc)}`);
+      await sessionReply(rootId, `${t('role.current', undefined, loc)} ${srcLabel}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: len, max: MAX_ROLE_BYTES }, loc)}`);
     } else {
       await sessionReply(rootId, t('role.empty', undefined, loc));
     }
@@ -565,7 +565,7 @@ async function handleRoleCommand(
     }
     writeRoleFile(larkAppId, chatId, content);
     const len = Buffer.byteLength(content, 'utf-8');
-    await sessionReply(rootId, t('role.saved_via_cmd', { bytes: len, max: 4096 }, loc));
+    await sessionReply(rootId, t('role.saved_via_cmd', { bytes: len, max: MAX_ROLE_BYTES }, loc));
     return;
   }
 
@@ -915,8 +915,13 @@ async function handleConfigCommand(
         value = coerced.value;
         break;
       }
-      default: // 'string'
-        value = rawValue;
+      default: { // 'string'
+        // 与 dashboard PUT 同口径：string 字段也过 coerceConfigValue（长度上限
+        // maxLen 等约束在 spec 上，避免 IM 文本入口绕过校验）。
+        const coerced = coerceConfigValue(spec, rawValue);
+        if (!coerced.ok) { await reply(t('cmd.config.write_failed', { reason: coerced.reason }, loc)); return; }
+        value = coerced.value;
+      }
     }
 
     const r = await applyConfigField(larkAppId, spec, value);
@@ -1246,7 +1251,7 @@ export async function handleCommand(
           await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
           break;
         }
-        const validation = validateWorkingDir(targetPath, loc);
+        const validation = validateWorkingDir(targetPath, loc, { autoCreate: true });
         if (!validation.ok) {
           await sessionReply(rootId, validation.error);
           break;
@@ -1256,8 +1261,12 @@ export async function handleCommand(
         ds.workingDir = targetPath;
         ds.session.workingDir = targetPath;
         sessionStore.updateSession(ds.session);
-        await sessionReply(rootId, t('cmd.cd.switched', { path: resolvedPath }, loc));
-        logger.info(`[${logTag}] Working directory changed to ${resolvedPath} by /cd command`);
+        if (validation.created) {
+          await sessionReply(rootId, t('cmd.cd.created_switched', { path: resolvedPath }, loc));
+        } else {
+          await sessionReply(rootId, t('cmd.cd.switched', { path: resolvedPath }, loc));
+        }
+        logger.info(`[${logTag}] Working directory changed to ${resolvedPath} by /cd command${validation.created ? ' (auto-created)' : ''}`);
         break;
       }
 
@@ -1912,7 +1921,7 @@ export async function handleCommand(
             await sessionReply(rootId, t('cmd.oncall.bind_usage', undefined, loc));
             break;
           }
-          const validation = validateWorkingDir(target, loc);
+          const validation = validateWorkingDir(target, loc, { autoCreate: true });
           if (!validation.ok) {
             await sessionReply(rootId, validation.error);
             break;
@@ -1930,13 +1939,14 @@ export async function handleCommand(
           const verb = result.created
             ? t('cmd.oncall.verb_bound', undefined, loc)
             : t('cmd.oncall.verb_updated', undefined, loc);
+          const createdNote = validation.created ? `\n\n${t('cmd.oncall.bind_created_note', undefined, loc)}` : '';
           await sessionReply(rootId, t('cmd.oncall.bind_success', {
             verb,
             chatId,
             target,
             resolved: resolvedPath,
-          }, loc));
-          logger.info(`[${logTag}] /oncall bind chat=${chatId} dir=${target}`);
+          }, loc) + createdNote);
+          logger.info(`[${logTag}] /oncall bind chat=${chatId} dir=${target}${validation.created ? ' (auto-created)' : ''}`);
           break;
         }
 

@@ -8,6 +8,7 @@ import {
   writeMaintenanceStateTo,
   buildRestartLauncher,
   maintenanceRestartLogPath,
+  npmGlobalUpdateCwd,
   type MaintenanceDeps,
   type MaintenanceState,
 } from '../src/core/maintenance.js';
@@ -167,6 +168,14 @@ describe('maintenanceRestartLogPath', () => {
   it('points at ~/.botmux/logs/maintenance-restart.log', () => {
     vi.stubEnv('HOME', '/home/bot');
     expect(maintenanceRestartLogPath()).toBe('/home/bot/.botmux/logs/maintenance-restart.log');
+  });
+});
+
+describe('npmGlobalUpdateCwd', () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it('runs npm global updates from HOME instead of inheriting the process cwd', () => {
+    vi.stubEnv('HOME', '/home/bot');
+    expect(npmGlobalUpdateCwd()).toBe('/home/bot');
   });
 });
 

@@ -584,12 +584,22 @@ const BOTMUX_INJECTED_ENV_KEYS = [
   // daemon's `<available_bots>` behavior instead of reading stale rcfile/tmux env.
   'BOTMUX_LARK_LIST_BOTS_API_ENABLED',
   'BOTMUX_LARK_LIST_BOTS_API_TIMEOUT_MS',
+  // Explicit true-ready command for CLIs (Hermes) that notify Botmux once the
+  // real TUI input composer has rendered. It must reach tmux panes via the
+  // per-pane env prefix; otherwise the ready-gate waits for fallback timeouts.
+  'BOTMUX_READY_COMMAND',
   // Claude Code 2.1.x resume-summary 菜单的抑制阈值（issue #62）。worker 为
   // claude-code 注入一个极大值绕过菜单；只有进了这条白名单才会被透传进 tmux pane。
   'CLAUDE_CODE_RESUME_TOKEN_THRESHOLD',
   // Seed CLI（Claude Code fork）的数据根目录。worker 为 seed 注入它指向 seed 自己的
   // `.claude-runtime`，bridge 才能盯对文件；不进白名单 tmux pane 就拿不到。
+  // v2 读隔离也用它把隔离 claude bot 的 config/transcript/memory 重定向进 per-bot
+  // BOT_HOME（`<BOTMUX_HOME>/bots/<appId>/claude`）——不进白名单 tmux pane 拿不到 →
+  // 隔离 bot 会掉回全局 ~/.claude（被 Seatbelt deny）而起不来。
   'CLAUDE_CONFIG_DIR',
+  // v2 读隔离把隔离 codex bot 的 sessions/memory/state 重定向进 per-bot BOT_HOME
+  // （`<BOTMUX_HOME>/bots/<appId>/codex`）。同理必须透传进 pane。
+  'CODEX_HOME',
   // cjadk wrapperCli（`cjadk <agent>`）启动时 worker 注入 `0`，让 cjadk 跑非交互模式
   // （跳过启动选择器、清掉吃首条/碎裂多行的输入怪癖），对齐 cjadk 官方 `cjadk feishu`
   // wrapper。只有 cjadk 启动会被设上此值，其它 bot 不带 → 不进白名单 tmux pane 拿不到，
@@ -636,14 +646,19 @@ export function buildBotmuxEnvAssignments(
  *
  * The `cd` step makes the CLI's cwd survive a wayward `cd` in the user's
  * rcfile. The `unset` step removes bare creds the pane inherited from the tmux
- * server's global env (REDACTED_ENV_UNSET_CLAUSE). The `exec /usr/bin/env` step
- * injects botmux's per-bot/per-session overrides AFTER rcfile load so they
- * can't be shadowed by leftover exports.
+ * server's global env (REDACTED_ENV_UNSET_CLAUSE). The PATH prepend puts the
+ * daemon-written wrapper dir (~/.botmux/bin, which holds THIS build's `botmux`)
+ * ahead of any npm-global botmux the rcfile put earlier in PATH — otherwise the
+ * agent's `botmux` could resolve to a stale build. Critical under read isolation:
+ * only the wrapper build has the send-cred reader; a shadowing stale build can't
+ * read bots.json (Seatbelt-denied) → `botmux send` fails "Bot not registered".
+ * The `exec /usr/bin/env` step injects botmux's per-bot/per-session overrides
+ * AFTER rcfile load so they can't be shadowed by leftover exports.
  *
  * POSIX-syntax (works in bash/zsh/sh); fish/csh/nu users get remapped to
  * bash/zsh/sh by resolveUserShell() so they hit the same SCRIPT path.
  */
-export const SHELL_WRAPPER_SCRIPT = `cd -- "$1" && shift && ${REDACTED_ENV_UNSET_CLAUSE} && exec /usr/bin/env "$@"`;
+export const SHELL_WRAPPER_SCRIPT = `cd -- "$1" && shift && ${REDACTED_ENV_UNSET_CLAUSE} && export PATH="$HOME/.botmux/bin:$PATH" && exec /usr/bin/env "$@"`;
 
 export const DIAGNOSTIC_SHELL_SCRIPT = [
   'cd -- "$1" 2>/dev/null || cd "$HOME" 2>/dev/null || cd /',
@@ -675,6 +690,8 @@ export function buildDebugKeepShellScript(shellPath: string): string {
     // Same redaction as SHELL_WRAPPER_SCRIPT — so neither the CLI nor the
     // interactive debug shell that follows sees server/rcfile-inherited creds.
     REDACTED_ENV_UNSET_CLAUSE,
+    // Same PATH prepend as SHELL_WRAPPER_SCRIPT (wrapper build wins over stale npm-global).
+    'export PATH="$HOME/.botmux/bin:$PATH"',
     '/usr/bin/env "$@"',
     `printf '\\n[botmux debug] CLI exited (status %d) — interactive shell active. Type exit to close the session.\\n' "$?" >&2`,
     `exec '${safeShell}' -i`,

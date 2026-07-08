@@ -40,6 +40,16 @@ export function claudeJsonlPathForSession(sessionId: string, cwd: string, dataDi
   return join(dataDir, 'projects', projectHash, `${sessionId}.jsonl`);
 }
 
+/** The `<dataDir>/projects/<cwd-hash>` dir holding this cwd's transcripts (and its
+ *  `memory/` subdir). Read isolation ALLOWs this back in under the whole-process
+ *  Seatbelt wrapper — the projects tree is denied, then the bot's OWN project dir
+ *  is re-allowed so its main process can read transcripts (resume) + memory, while
+ *  every OTHER bot's project dir stays denied. Always uses realpath(cwd). */
+export function claudeProjectDir(cwd: string, dataDir: string = DEFAULT_CLAUDE_DATA_DIR): string {
+  const projectHash = realpathCwd(cwd).replace(/[^A-Za-z0-9-]/g, '-');
+  return join(dataDir, 'projects', projectHash);
+}
+
 /** botmux ships its built-in skills as a Claude Code plugin here and injects it
  *  per-session via `--plugin-dir` (see buildArgs). Kept out of the global
  *  `~/.claude/skills` so a standalone `claude` never surfaces (and mis-fires)
@@ -391,7 +401,7 @@ const claudeFirstWriteSeen = new WeakSet<PtyHandle>();
  *  its on-disk session layout (per-project JSONL transcripts, `sessions/<pid>.json`
  *  pid-state, `tasks/` fd locks, keybindings.json, settings.json hooks) but
  *  relocate the data root and/or rename the binary. Seed CLI
- *  (`@bytedance-seed/claude-code`, binary `seed`) is one such fork — it reuses
+ *  is one such fork — it reuses
  *  this entire adapter, only swapping `dataDir`/`stateJsonPath`/binary. */
 export interface ClaudeFamilyVariant {
   /** CliId for this variant (`claude-code`, `seed`, …). */
@@ -439,9 +449,21 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     id: variant.id,
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
     supportsTypeAhead: true,
+    // Isolation = worker-side whole-process Seatbelt wrapper. Claude's built-in
+    // --settings sandbox is NOT used: it only sandboxes Bash (main process
+    // unsandboxed, and network Bash commands can ESCAPE it). Claude's own data
+    // is redirected into BOT_HOME via CLAUDE_CONFIG_DIR, so resume/memory work
+    // while the global ~/.claude stays denied.
+    supportsReadIsolation: true,
     claudeDataDir: variant.dataDir,
     claudeStateJsonPath: variant.stateJsonPath,
     spawnEnv: variant.spawnEnv,
+    // Only the CLI's own login/creds (variant.authPaths) are kept real+writable in the
+    // FILE sandbox. Deliberately NOT ~/.claude.json: read isolation is enforced by the
+    // worker's whole-process Seatbelt wrapper, which does NOT consult authPaths — it
+    // redirects ~/.claude via CLAUDE_CONFIG_DIR and denies the global. So adding the
+    // state file here had zero isolation benefit and only side-effected the (unrelated)
+    // file sandbox — binding ~/.claude.json real+writable, weakening its write isolation.
     authPaths: variant.authPaths,
     skillDelivery: { nativeKind: 'claude-plugin', supportsScopedSession: true, supportsExclusive: false },
 
@@ -523,6 +545,8 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
         inlineSettings.permissions = { defaultMode: 'bypassPermissions' };
       }
       // 仅在有内容（bypass 键）时才传 --settings；disableCliBypass 下没东西可传就不传。
+      // （读隔离由 worker 的整进程 Seatbelt wrapper 强制，这里不注入任何 sandbox 设置——
+      // 注入内置 sandbox 会嵌套沙箱且 permissions deny>allow 会挡掉 memory carve-out。）
       if (Object.keys(inlineSettings).length > 0) {
         args.push('--settings', JSON.stringify(inlineSettings));
       }

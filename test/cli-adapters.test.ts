@@ -42,7 +42,7 @@ import { createPiAdapter } from '../src/adapters/cli/pi.js';
 import { createCopilotAdapter } from '../src/adapters/cli/copilot.js';
 import { createOhMyPiAdapter } from '../src/adapters/cli/oh-my-pi.js';
 import { createKimiAdapter } from '../src/adapters/cli/kimi.js';
-import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
+import type { CliAdapter, CliId, PtyHandle } from '../src/adapters/cli/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -308,9 +308,12 @@ describe('codex buildArgs', () => {
     expect(args.join('\n')).not.toContain('BOTMUX_TURN_ID');
   });
 
-  it('keeps Codex home untouched', () => {
+  it('keeps the whole ~/.codex real in the sandbox (SQLite needs fcntl locks the home overlay lacks)', () => {
     expect(adapter.buildSpawnEnv).toBeUndefined();
-    expect(adapter.authPaths).toEqual(['~/.codex/auth.json']);
+    // Not just auth.json: codex's state_*.sqlite / logs_*.sqlite live under
+    // ~/.codex and time out (~57s → exit 1) if the dir is on the overlayfs home,
+    // which doesn't support POSIX byte-range locks. Bind the whole dir real.
+    expect(adapter.authPaths).toEqual(['~/.codex']);
     // skillsDir resolves under CODEX_HOME (default ~/.codex) so it tracks where
     // Codex actually scans skills when CODEX_HOME is overridden.
     expect(adapter.skillsDir).toBe(join(codexHome(), 'skills'));
@@ -646,6 +649,12 @@ describe('gemini buildArgs', () => {
 describe('opencode buildArgs', () => {
   const adapter = createOpenCodeAdapter('/usr/bin/opencode');
 
+  it('keeps the whole opencode data dir real in the sandbox (SQLite needs fcntl locks the home overlay lacks)', () => {
+    // Not just auth.json: opencode's global opencode.db (WAL) lives here and
+    // can't lock on the overlayfs home — same failure mode as codex.
+    expect(adapter.authPaths).toEqual(['~/.local/share/opencode']);
+  });
+
   it('returns empty args for basic case', () => {
     const args = adapter.buildArgs({ sessionId: 'sess-6', resume: false });
     expect(args).toEqual([]);
@@ -704,8 +713,8 @@ describe('oh-my-pi buildArgs', () => {
     expect(args).toContain('--approval-mode');
     expect(args[args.indexOf('--approval-mode') + 1]).toBe('yolo');
     expect(args).toContain('--no-title');
-    expect(args.at(-1)).toBe('hello omp');
-    expect(adapter.passesInitialPromptViaArgs).toBe(true);
+    expect(args).not.toContain('hello omp');
+    expect(adapter.passesInitialPromptViaArgs).toBe(false);
     expect(adapter.altScreen).toBe(true);
   });
 
@@ -736,6 +745,38 @@ describe('oh-my-pi buildArgs', () => {
     expect(args[idx + 1]).toBe('/repo/root');
   });
 
+  it('submits pasted tmux input with LF instead of symbolic Enter', async () => {
+    const events: string[] = [];
+    const pty = {
+      write(data: string) { events.push(`write:${JSON.stringify(data)}`); },
+      resize() {},
+      onData() {},
+      onExit() {},
+      kill() {},
+      pasteText(text: string) { events.push(`paste:${text}`); },
+      sendSpecialKeys(...keys: string[]) { events.push(`keys:${keys.join(',')}`); },
+    } satisfies PtyHandle;
+
+    await adapter.writeInput(pty, 'review this');
+
+    expect(events).toEqual(['paste:review this', 'write:"\\n"']);
+  });
+
+  it('submits raw PTY input with bracketed paste and LF', async () => {
+    const events: string[] = [];
+    const pty = {
+      write(data: string) { events.push(data); },
+      resize() {},
+      onData() {},
+      onExit() {},
+      kill() {},
+    } satisfies PtyHandle;
+
+    await adapter.writeInput(pty, 'review this');
+
+    expect(events).toEqual(['\x1b[200~review this\x1b[201~', '\n']);
+  });
+
   it('skillsDir points to ~/.omp/agent/skills', () => {
     expect(adapter.skillsDir).toBe('~/.omp/agent/skills');
   });
@@ -747,6 +788,10 @@ describe('oh-my-pi buildArgs', () => {
 
 describe('mtr buildArgs', () => {
   const adapter = createMtrAdapter('/usr/bin/mtr');
+
+  it('keeps the whole opencode data dir real in the sandbox (mtr.db needs fcntl locks the home overlay lacks)', () => {
+    expect(adapter.authPaths).toEqual(['~/.local/share/opencode']);
+  });
 
   it('fresh session passes deterministic --set-session and initial prompt', () => {
     const args = adapter.buildArgs({ sessionId: 'bm-session-1', resume: false, initialPrompt: 'hello mtr' });
@@ -802,6 +847,12 @@ describe('hermes buildArgs', () => {
     const args = adapter.buildArgs({ sessionId: 'bm-hermes-1', resume: false, initialPrompt: 'hello hermes' });
     expect(args).not.toContain('hello hermes');
     expect(adapter.passesInitialPromptViaArgs).toBeFalsy();
+  });
+
+  it('uses explicit ready signal gate without type-ahead', () => {
+    expect(adapter.injectsReadyHook).toBe(true);
+    expect(adapter.deferFirstPromptTimeoutUntilReady).toBe(true);
+    expect(adapter.supportsTypeAhead).toBeFalsy();
   });
 });
 
@@ -1008,6 +1059,16 @@ describe('readyPattern', () => {
     const adapter = createTraexAdapter('/bin/traex');
     expect(adapter.deferFirstPromptTimeoutUntilReady).toBe(true);
     expect(adapter.supportsTypeAhead).toBe(true);
+  });
+
+  it('hermes defers the first-prompt timeout without type-ahead', () => {
+    // Hermes cold-start initialization may outlive the 15s soft timeout; defer
+    // that timeout to avoid flushing the first Lark message before the composer
+    // exists. Unlike Codex/CoCo/Claude/TraeX, Hermes can drop input typed before
+    // the first real prompt, so keep type-ahead disabled.
+    const adapter = createHermesAdapter('/bin/hermes');
+    expect(adapter.deferFirstPromptTimeoutUntilReady).toBe(true);
+    expect(adapter.supportsTypeAhead).toBeUndefined();
   });
 
   it('genius matches current and legacy prompt indicators', () => {
@@ -1252,9 +1313,10 @@ describe('buildResumeCommand', () => {
     expect(a.buildResumeCommand).toBeUndefined();
   });
 
-  it('opencode does not implement buildResumeCommand', () => {
+  it('opencode emits `opencode -s <cliSessionId>` when known', () => {
     const a = createOpenCodeAdapter('/bin/opencode');
-    expect(a.buildResumeCommand).toBeUndefined();
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-oc', cliSessionId: 'ses_0123abcDEF' }))
+      .toBe('opencode -s ses_0123abcDEF');
   });
 
   it('mtr emits `mtr --session <native-session-id>`', () => {
@@ -1348,5 +1410,20 @@ describe('kimi buildArgs', () => {
 
   it('surfaces curated model choices for setup', () => {
     expect(adapter.modelChoices).toContain('kimi-k2.5');
+  });
+});
+
+describe('traex/coco sandbox authPaths', () => {
+  it('traex keeps the whole ~/.trae/cli real in the sandbox (codex-based, same SQLite lock hazard)', () => {
+    // traex keeps codex-style state_*.sqlite / logs_*.sqlite + rollout sessions
+    // under ~/.trae/cli; the daemon bridge reads them at the REAL path, and the
+    // overlayfs home lacks the fcntl locks SQLite needs (see codex.ts).
+    const adapter = createTraexAdapter('/bin/traex');
+    expect(adapter.authPaths).toEqual(['~/.trae/cli']);
+  });
+
+  it('coco keeps ~/.trae/cli (shared trae state/SQLite) AND ~/.cache/coco (transcripts the bridge reads) real', () => {
+    const adapter = createCocoAdapter('/bin/coco');
+    expect(adapter.authPaths).toEqual(['~/.trae/cli', '~/.cache/coco']);
   });
 });

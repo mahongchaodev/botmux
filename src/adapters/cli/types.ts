@@ -73,6 +73,10 @@ export interface CliAdapter {
     initialPrompt?: string;
     botName?: string;
     botOpenId?: string;
+    /** This bot's larkAppId. Lets injectsSessionContext adapters (genius) resolve
+     *  their per-bot built-in skill injection mode for the system-prompt catalog;
+     *  inline-prompt CLIs get theirs from session-manager instead. */
+    larkAppId?: string;
     /** UI / response language for prompts injected into the CLI (e.g. zh / en). */
     locale?: import('../../i18n/index.js').Locale;
     /** Optional model name from BotConfig.model. Adapters whose CLI accepts a
@@ -83,11 +87,25 @@ export interface CliAdapter {
     disableCliBypass?: boolean;
     /** Optional session-scoped skill plugin/root prepared by botmux. */
     skillPluginDir?: string;
+    /** True when this session runs under per-bot read isolation (the worker
+     *  wraps the whole CLI process in a Seatbelt sandbox). Adapters use it for
+     *  isolation-specific spawn tweaks only (e.g. Codex forwards its env to
+     *  shell subprocesses so `botmux send` finds its cred file) — the isolation
+     *  itself is enforced worker-side, not via CLI args. */
+    readIsolation?: boolean;
   }): string[];
 
   /** When true, the adapter passes the initial prompt via CLI args (e.g. -i).
    *  The worker skips queuing the prompt for stdin write. */
   readonly passesInitialPromptViaArgs?: boolean;
+
+  /** Only meaningful with passesInitialPromptViaArgs. When true, the CLI
+   *  silently drops its initial-prompt launch flag on a RESUME spawn (e.g.
+   *  OpenCode applies `--prompt` to new sessions only and ignores it with
+   *  `-s <id>`), so the worker routes the initial prompt through the normal
+   *  input queue instead of baking it into args — otherwise the message that
+   *  triggered the resume would be lost. */
+  readonly initialPromptArgsIgnoredOnResume?: boolean;
 
   /** Build a shell command string the user can paste into a terminal to
    *  resume this CLI session locally — independent of botmux. Used by the
@@ -95,9 +113,9 @@ export interface CliAdapter {
    *  conversation outside the bot.
    *
    *  Returns `null` when the CLI doesn't support precise per-session resume
-   *  from CLI args (e.g. opencode, gemini's "latest only" mode), or when
-   *  the CLI-native session id can't be resolved (e.g. codex history file
-   *  is missing). The card falls back to a static note in those cases.
+   *  from CLI args (e.g. gemini's "latest only" mode), or when the CLI-native
+   *  session id can't be resolved (e.g. codex history file is missing).
+   *  The card falls back to a static note in those cases.
    *
    *  Implementations should print the *default* binary name (`claude`,
    *  `codex`, etc.) rather than `cliPathOverride` — the override is a
@@ -229,6 +247,15 @@ export interface CliAdapter {
    *  correct for both shapes. */
   readonly supportsTypeAhead?: boolean;
 
+  /** True when this adapter supports running under per-bot read isolation (its
+   *  data root is redirectable into BOT_HOME — CLAUDE_CONFIG_DIR / CODEX_HOME —
+   *  and it runs correctly under the worker's whole-process Seatbelt wrapper,
+   *  with its own built-in sandbox bypassed so nested sandboxing can't hang).
+   *  The worker gates on this: a bot with `readIsolation` on but an adapter
+   *  that does NOT support it is fail-closed (refuse to start) rather than run
+   *  silently unisolated. */
+  readonly supportsReadIsolation?: boolean;
+
   /** When true, the worker's soft first-prompt timeout keeps queued input held
    *  until this adapter's `readyPattern` appears. Use only for CLIs whose startup
    *  screens can accept and swallow stdin before the real composer exists; the
@@ -270,7 +297,10 @@ export interface CliAdapter {
    *  must PERSIST to the real auth — otherwise the sandboxed CLI loses its login
    *  (see seed's `bytecloud-auth`). The sandbox binds each existing path rw over
    *  the isolated overlay so auth reads/refreshes/logins hit the real files.
-   *  `~` is expanded. Keep NARROW (auth only) so session history stays isolated.
+   *  `~` is expanded. Default to NARROW (auth only) so session history stays
+   *  isolated — but widen to the CLI's whole state dir when it keeps SQLite DBs
+   *  there (e.g. codex): the overlayfs home lacks the POSIX fcntl locks SQLite
+   *  needs, so a narrow carve-out leaves the CLI unable to start.
    *  undefined / empty → no carve-out. */
   readonly authPaths?: readonly string[];
 

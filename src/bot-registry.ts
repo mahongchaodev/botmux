@@ -81,6 +81,13 @@ function normalizeNonNegativeInt(raw: unknown): number | undefined {
   return raw;
 }
 
+function normalizeStringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((p: unknown): p is string => typeof p === 'string' && !!p.trim())
+    .map((p) => p.trim());
+}
+
 function normalizeSummaryRange(raw: unknown): SummaryRangeConfig | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const entry = raw as Record<string, unknown>;
@@ -271,6 +278,14 @@ export interface BotConfig {
   brand?: Brand;
   /** Optional process-name suffix; the daemon's process name is rendered as `botmux-<name>` (defaults to `botmux-<index>`). */
   name?: string;
+  /**
+   * 自定义展示名（备注名）。设置后 dashboard 全站（名册 / 会话列表 / 各 bot
+   * 下拉）用它替代飞书探测到的应用名展示；未设置则跟随飞书名称。纯展示字段：
+   * 不影响 pm2 进程名（那是 {@link name}）、不改飞书群内显示的应用名（开放
+   * 平台无改名 API，只能在开发者后台改）、也不进跨 bot @ 路由的 bots-info
+   * 名册。可从 dashboard Bot Defaults 页或 `/config displayName` 修改，热更新。
+   */
+  displayName?: string;
   cliId: CliId;
   cliPathOverride?: string;
   /**
@@ -326,6 +341,32 @@ export interface BotConfig {
    * listed here. Only meaningful when `sandbox` is true. Linux-only.
    */
   sandboxHidePaths?: string[];
+  /**
+   * Extra paths to expose read-only inside the sandbox. Useful when a bot should
+   * inspect sibling/source repos without being able to write to them. Only
+   * meaningful when `sandbox` is true. Linux-only.
+   */
+  sandboxReadonlyPaths?: string[];
+  /**
+   * Whether the sandbox keeps network access. Missing/true preserves the existing
+   * behavior; false adds bwrap --unshare-net for sessions that can run offline or
+   * rely only on already-mounted local inputs.
+   */
+  sandboxNetwork?: boolean;
+  /**
+   * Per-bot LOCAL READ ISOLATION (distinct from the Linux bwrap `sandbox`
+   * above). When true, the bot's CLI data is redirected into its own BOT_HOME
+   * and the whole CLI process is wrapped in a macOS Seatbelt sandbox, so its
+   * agent cannot read OTHER bots' session data / lark-cli credentials / the
+   * full bots.json / common host credentials. Only honored on CLIs whose
+   * adapter reports `supportsReadIsolation` and on macOS; a bot that sets this
+   * where it cannot be enforced is fail-closed (refused) rather than run
+   * unisolated. Default false → no behavior change.
+   */
+  readIsolation?: boolean;
+  /** Extra absolute paths to deny reading, appended to the built-in default
+   *  credential set. Only meaningful when `readIsolation` is true. */
+  readDenyExtraPaths?: string[];
   backendType?: BackendType;
   /**
    * Max simultaneously-LIVE sessions for this bot. When the bot's live session
@@ -347,6 +388,16 @@ export interface BotConfig {
   oncallChats?: OncallChat[];
   /** UI language for this bot: 'zh' or 'en'. Falls back to BOTMUX_LANG / LANG env when unset. */
   lang?: Locale;
+  /** How this bot's built-in botmux bridge skills reach its CLI (only meaningful
+   *  for CLIs with a global `skillsDir` — codex/gemini/opencode/…):
+   *   - `global`: install into the CLI's shared global skills dir (leaks into the
+   *     user's own standalone CLI). For users who never run the CLI by hand.
+   *   - `prompt`: inject a session-scoped skill catalog into the prompt +
+   *     `botmux skill show <name>` on demand. No leak.
+   *   - `off`: routing hints + `botmux --help` only.
+   *  Unset ⇒ fall back to the machine-wide `skills.builtinInjection` (default
+   *  `prompt`). See services skills/injection-mode.ts. */
+  skillInjection?: 'global' | 'prompt' | 'off';
   /**
    * Per-bot default working directory. When set, new topics that have no
    * oncall binding and no sibling-session inheritance skip the repo-select
@@ -357,6 +408,14 @@ export interface BotConfig {
    * NOT change the canTalk / canOperate permission model (unlike defaultOncall).
    */
   defaultWorkingDir?: string;
+  /**
+   * 「仅默认目录」模式下的开关：新会话启动前，先在 `defaultWorkingDir`（须是 git 仓库）
+   * 基于远端默认分支自动创建一个 linked worktree，再把会话 cwd 指向该 worktree，实现
+   * 每个新会话一个隔离 checkout。仅在 mode==='default'（defaultWorkingDir 有值）时有意义；
+   * 非 git 仓库 / 创建失败时回退直接用 defaultWorkingDir 启动。复用 `/repo wt` 的
+   * createRepoWorktree。见 services/default-worktree.ts。
+   */
+  defaultWorkingDirAutoWorktree?: boolean;
   /** Per-bot default: auto-bind every new group chat to oncall on first new-topic. */
   defaultOncall?: BotDefaultOncall;
   /**
@@ -464,6 +523,19 @@ export interface BotConfig {
    * card-off reaction behavior.
    */
   silentTurnReactions?: boolean;
+  /**
+   * Feishu emoji_type for the "received" turn reaction in card-off sessions.
+   * Undefined → default GoGoGo (冲!). Free-form string; a bad emoji_type just
+   * silently fails to attach (addReaction is best-effort).
+   */
+  receivedReactionEmoji?: string;
+  /**
+   * Feishu emoji_type for the "done" turn reaction. Undefined → default DONE (✅).
+   * Set this EQUAL to receivedReactionEmoji to keep the marker visually
+   * unchanged on turn-end — useful for CLIs whose idle detection can fire early
+   * (e.g. Pi during model-thinking gaps), where a premature ✅ would mislead.
+   */
+  doneReactionEmoji?: string;
   /**
    * Conversation mode for 1:1 private chats (DMs) with the bot:
    *   - 'thread' (default, stored as undefined): every top-level DM message
@@ -762,6 +834,15 @@ export function getBotBrand(larkAppId: string | undefined): Brand {
 
 export function getAllBots(): BotState[] {
   return Array.from(bots.values());
+}
+
+/**
+ * Bot 的有效展示名：自定义 displayName > 飞书探测名 botName > larkAppId。
+ * 仅用于展示面（dashboard descriptor / SessionRow）；@ 路由与 bots-info
+ * 名册仍用飞书真名。
+ */
+export function effectiveBotDisplayName(state: BotState): string {
+  return state.config.displayName || state.botName || state.config.larkAppId;
 }
 
 /** Lookup the oncall binding for a given bot+chat, if any. */
@@ -1137,6 +1218,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // feishu）。feishu 故意存成 undefined，保持旧 bots.json 干净、不写死字段。
       brand: entry.brand === 'lark' ? 'lark' : undefined,
       name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : undefined,
+      displayName: typeof entry.displayName === 'string' && entry.displayName.trim() ? entry.displayName.trim() : undefined,
       cliId: entry.cliId ?? 'claude-code',
       cliPathOverride: entry.cliPathOverride,
       wrapperCli: typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()
@@ -1150,9 +1232,11 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         : undefined,
       disableCliBypass: entry.disableCliBypass === true,
       sandbox: entry.sandbox === true,
-      sandboxHidePaths: Array.isArray(entry.sandboxHidePaths)
-        ? entry.sandboxHidePaths.filter((p: unknown): p is string => typeof p === 'string' && !!p.trim())
-        : [],
+      sandboxHidePaths: normalizeStringList(entry.sandboxHidePaths),
+      sandboxReadonlyPaths: normalizeStringList(entry.sandboxReadonlyPaths),
+      sandboxNetwork: typeof entry.sandboxNetwork === 'boolean' ? entry.sandboxNetwork : undefined,
+      readIsolation: entry.readIsolation === true,
+      readDenyExtraPaths: normalizeStringList(entry.readDenyExtraPaths),
       backendType: entry.backendType,
       // Positive integer only; ≤0 / non-int / absent → undefined (= no cap).
       maxLiveWorkers: typeof entry.maxLiveWorkers === 'number'
@@ -1169,6 +1253,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       defaultWorkingDir: typeof entry.defaultWorkingDir === 'string' && entry.defaultWorkingDir.trim()
         ? entry.defaultWorkingDir.trim()
         : undefined,
+      // Only meaningful alongside defaultWorkingDir (仅默认目录 mode); only explicit
+      // true is persisted (undefined = off) so bots.json stays clean.
+      defaultWorkingDirAutoWorktree: entry.defaultWorkingDirAutoWorktree === true || undefined,
       chatReplyModes,
       chatGrants,
       globalGrants,
@@ -1182,11 +1269,17 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       env,
       skills,
       lang: isLocale(entry.lang) ? entry.lang : undefined,
+      skillInjection: entry.skillInjection === 'global' || entry.skillInjection === 'prompt' || entry.skillInjection === 'off'
+        ? entry.skillInjection : undefined,
       // Preserve '' distinctly from undefined: '' means "brand off", undefined
       // means "use default botmux brand". Don't trim-to-undefined here.
       brandLabel: typeof entry.brandLabel === 'string' ? entry.brandLabel : undefined,
       disableStreamingCard: entry.disableStreamingCard === true || undefined,
       silentTurnReactions: entry.silentTurnReactions === true || undefined,
+      receivedReactionEmoji: typeof entry.receivedReactionEmoji === 'string' && entry.receivedReactionEmoji.trim()
+        ? entry.receivedReactionEmoji.trim() : undefined,
+      doneReactionEmoji: typeof entry.doneReactionEmoji === 'string' && entry.doneReactionEmoji.trim()
+        ? entry.doneReactionEmoji.trim() : undefined,
       // Only 'chat' is meaningful; 'thread' (and anything else) normalizes to
       // undefined — the legacy thread-per-message default. Keeps bots.json clean.
       p2pMode: entry.p2pMode === 'chat' ? 'chat' : undefined,

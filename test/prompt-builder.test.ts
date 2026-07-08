@@ -14,6 +14,7 @@ import { describe, it, expect, vi } from 'vitest';
 // ─── Mocks ────────────────────────────────────────────────────────────────
 
 vi.mock('node:child_process', () => ({
+  execFile: vi.fn(),
   execSync: vi.fn(() => ''),
   execFileSync: vi.fn(() => ''),
 }));
@@ -104,6 +105,14 @@ describe('buildNewTopicPrompt', () => {
     expect(prompt).toContain('第二行');
     expect(prompt).toContain('botmux send "第一行\\n第二行"');
     expect(prompt).toContain('字面量');
+  });
+
+  it('uses final-output routing hints for Hermes instead of normal botmux send guidance', () => {
+    const prompt = buildNewTopicPrompt('hello', SESSION_ID, 'hermes');
+    expect(prompt).toContain('普通文字回复请直接写在 assistant final');
+    expect(prompt).toContain('普通文本答案不要调用 `botmux send`');
+    expect(prompt).not.toContain("botmux send <<'EOF'");
+    expect(prompt).not.toContain('回复必须 botmux send');
   });
 
   it('should NOT embed <session_id> for CLIs with injectsSessionContext (claude-code)', () => {
@@ -291,6 +300,14 @@ describe('buildFollowUpContent', () => {
     expect(content.indexOf('<botmux_reminder>')).toBeLessThan(content.indexOf('<user_message>'));
     expect(content.indexOf('<sender ')).toBeGreaterThan(content.indexOf('</user_message>'));
     expect(content.indexOf('<mentions>')).toBeGreaterThan(content.indexOf('</user_message>'));
+  });
+
+  it('uses final-output reminder for Hermes follow-ups', () => {
+    const content = buildFollowUpContent('hello', SESSION_ID, { cliId: 'hermes' });
+
+    expect(content).toContain('普通文字回复不要调用 `botmux send`');
+    expect(content).toContain('直接把给用户看的答案写在 final');
+    expect(content).not.toContain('回复必须 botmux send');
   });
 
   it('places the short whiteboard hint before follow-up user content', () => {

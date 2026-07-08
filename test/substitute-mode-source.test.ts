@@ -9,7 +9,7 @@ describe('substitute mode daemon source ordering', () => {
     const end = source.indexOf('async function handleThreadReply(', start);
     const body = source.slice(start, end);
 
-    const resolveIdx = body.indexOf('const { pinnedWorkingDir, oncallEntry, inheritedFrom } = await resolvePinnedWorkingDir');
+    const resolveIdx = body.indexOf('const { pinnedWorkingDir, oncallEntry, inheritedFrom, pinnedFromBotDefault } = await resolvePinnedWorkingDir');
     const guardIdx = body.indexOf("tr('cmd.substitute.need_working_dir'");
     const createIdx = body.indexOf('const session = sessionStore.createSession', guardIdx);
     const inheritRejectIdx = body.indexOf('(!pinnedWorkingDir || !!inheritedFrom)');
