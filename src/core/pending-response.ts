@@ -2,4 +2,5 @@
 //   - RECEIVED lands the instant the bot starts working on the turn (冲! `GoGoGo`).
 //   - On turn completion the RECEIVED reaction is removed and DONE (✅) replaces it.
 export const RECEIVED_REACTION_EMOJI_TYPE = 'GoGoGo';
+export const SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE = 'Get';
 export const DONE_REACTION_EMOJI_TYPE = 'DONE';
