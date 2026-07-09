@@ -17,7 +17,11 @@ export function normalizeSubstituteMode(raw: unknown): SubstituteModeConfig | un
         return target.openId || target.userId || target.unionId || target.email ? [target] : [];
       })
     : [];
-  if (rec.enabled !== true || targets.length === 0) return undefined;
+  // Enable only when at least one target carries a matchable id (openId /
+  // userId / unionId). email is preserved but never matched at runtime, so an
+  // email-only target set would be a silently-dead "enabled" mode.
+  const hasMatchableTarget = targets.some(t => t.openId || t.userId || t.unionId);
+  if (rec.enabled !== true || !hasMatchableTarget) return undefined;
   return {
     enabled: true,
     targets,

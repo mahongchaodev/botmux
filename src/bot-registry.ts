@@ -1275,7 +1275,12 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
             return target.openId || target.userId || target.unionId || target.email ? [target] : [];
           })
         : [];
-      if (rawSubstituteMode.enabled === true && targets.length > 0) {
+      // Enable only when at least one target carries a matchable id. email is
+      // preserved on a target (for a future resolver) but never matched at
+      // runtime, so an email-only target set can never trigger — treating it as
+      // "enabled" would be a silently-dead config.
+      const hasMatchableTarget = targets.some((t: SubstituteTarget) => t.openId || t.userId || t.unionId);
+      if (rawSubstituteMode.enabled === true && hasMatchableTarget) {
         substituteMode = {
           enabled: true,
           targets,

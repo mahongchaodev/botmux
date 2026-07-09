@@ -2054,7 +2054,11 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         let routingSource = decision.source;
         let replyRootId: string | undefined;
         const explicitlyMentionedThisBot = isBotMentioned(larkAppId, message, senderOpenId);
-        let substituteTrigger = chatType === 'group'
+        // Cheap in-memory gate FIRST: skip the getChatMode roundtrip and the
+        // per-chat toggle disk read entirely for bots that never configured a
+        // substitute target (the overwhelming majority on the hot path).
+        let substituteTrigger = getBot(larkAppId).config.substituteMode?.enabled === true
+          && chatType === 'group'
           && await getChatMode(larkAppId, chatId) === 'group'
           && isSubstituteEnabledForChat(larkAppId, chatId)
           ? resolveSubstituteTrigger(larkAppId, message)

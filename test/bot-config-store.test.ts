@@ -199,7 +199,7 @@ describe('bot-config store', () => {
 
   it('parses substituteMode only when enabled with valid targets', async () => {
     const { registry } = await freshModules();
-    const [enabled, disabled, empty] = registry.parseBotConfigsFromText(JSON.stringify([
+    const [enabled, disabled, empty, emailOnly] = registry.parseBotConfigsFromText(JSON.stringify([
       {
         larkAppId: 'sub-on',
         larkAppSecret: 's',
@@ -226,6 +226,14 @@ describe('bot-config store', () => {
         cliId: 'codex',
         substituteMode: { enabled: true, targets: [{ name: 'No ids' }] },
       },
+      {
+        larkAppId: 'sub-email-only',
+        larkAppSecret: 's',
+        cliId: 'codex',
+        // email is preserved on a target but never matched at runtime, so an
+        // email-only target set cannot enable the mode (would be silently dead).
+        substituteMode: { enabled: true, targets: [{ email: 'ghost@example.com', name: 'Email only' }] },
+      },
     ]));
 
     expect(enabled.substituteMode).toEqual({
@@ -238,6 +246,7 @@ describe('bot-config store', () => {
     });
     expect(disabled.substituteMode).toBeUndefined();
     expect(empty.substituteMode).toBeUndefined();
+    expect(emailOnly.substituteMode).toBeUndefined();
   });
 
   it('sets and unsets JSON skills policy through /config store', async () => {

@@ -96,12 +96,19 @@ describe('substitute-mode store', () => {
     const { registry, store } = await freshModules();
     registry.loadBotConfigs().forEach(c => registry.registerBot(c));
 
-    const r = await store.updateBotSubstituteMode('app_default', {
+    // name-only → not even stored → rejected.
+    expect(await store.updateBotSubstituteMode('app_default', {
       enabled: true,
       targets: [{ name: 'No id' }],
-    });
+    })).toEqual({ ok: false, reason: 'targets_required' });
 
-    expect(r).toEqual({ ok: false, reason: 'targets_required' });
+    // email-only → stored (preserved for a future resolver) but never matched at
+    // runtime, so it cannot enable the mode — must be rejected, not silently dead.
+    expect(await store.updateBotSubstituteMode('app_default', {
+      enabled: true,
+      targets: [{ email: 'ghost@example.com', name: 'Email only' }],
+    })).toEqual({ ok: false, reason: 'targets_required' });
+
     expect(readConfig().substituteMode).toBeUndefined();
   });
 });

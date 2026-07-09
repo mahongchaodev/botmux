@@ -128,10 +128,14 @@ export function extractMentionIdentities(message: {
         if (!Array.isArray(paragraph)) continue;
         for (const node of paragraph) {
           if (node?.tag !== 'at') continue;
+          // In post/rich-text content Lark carries the mentionee's OPEN_ID in the
+          // at-node's `user_id` field (cf. isBotMentioned, which compares
+          // node.user_id against botOpenId), NOT a tenant user_id. Map it to
+          // openId only — mislabeling it as userId would both miss a userId-only
+          // target and pollute the userId leg with an open_id value.
           out.push({
             name: node.user_name,
             openId: node.user_id,
-            userId: node.user_id,
           });
         }
       }

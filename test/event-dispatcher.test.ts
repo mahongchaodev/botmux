@@ -1971,18 +1971,20 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
-  it('substituteMode: post inline at can match a userId target', async () => {
+  it('substituteMode: post inline at matches an openId target (post at carries open_id)', async () => {
+    // In post/rich-text content the at-node's `user_id` field carries an
+    // OPEN_ID (see isBotMentioned), so a post @ resolves the openId leg.
     setupBotState({
       allowedUsers: [USER_OPEN_ID],
       substituteMode: {
         enabled: true,
-        targets: [{ userId: 'u_sub', name: 'Sub Person' }],
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
       },
     });
     mockGetChatMode.mockResolvedValue('group');
     const postContent = JSON.stringify({
       zh_cn: { content: [[
-        { tag: 'at', user_id: 'u_sub', user_name: 'Sub Person' },
+        { tag: 'at', user_id: 'ou_sub', user_name: 'Sub Person' },
         { tag: 'text', text: ' help with this' },
       ]] },
     });
@@ -2001,13 +2003,19 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       scope: 'chat',
       anchor: 'chat-substitute-post',
       substituteTrigger: expect.objectContaining({
-        target: expect.objectContaining({ userId: 'u_sub' }),
+        target: expect.objectContaining({ openId: 'ou_sub' }),
       }),
     }));
   });
 
   it('substituteMode: per-chat off switch disables @substitute routing', async () => {
+    // Allowed sender + multi-member group so the ONLY path that could route this
+    // non-@bot message is the substitute trigger; with the per-chat toggle off it
+    // must not route. (Without the multi-member stats an allowed sole user would
+    // route via the sole-user免@ path, which is unrelated to substitute mode and
+    // made this assertion depend on leaked mockGetChatInfo state across tests.)
     setupBotState({
+      allowedUsers: [USER_OPEN_ID],
       substituteMode: {
         enabled: true,
         targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
@@ -2015,6 +2023,8 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
     mockIsSubstituteEnabledForChat.mockReturnValue(false);
     mockGetChatMode.mockResolvedValue('group');
+    mockGetChatInfo.mockResolvedValue({ userCount: 2, botCount: 1 });
+    handlers.isSessionOwner.mockReturnValue(false);
     const event = makeUserMessageEvent({
       senderOpenId: USER_OPEN_ID,
       content: JSON.stringify({ text: '@Sub Person help with this' }),
