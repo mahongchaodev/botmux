@@ -14,6 +14,7 @@ import { logger } from '../utils/logger.js';
 import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, isRelayableRealSession, closeSession, getActiveSessionsRegistry } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
+import { assertSafeAppId } from '../adapters/cli/read-isolation.js';
 import {
   resolveSkillInjectionModeForApp,
   builtinSkillEntries,
@@ -45,7 +46,7 @@ import { scanMultipleProjects } from '../services/project-scanner.js';
 import { buildRepoSelectCard } from '../im/lark/card-builder.js';
 import { repoPickerScanOptions } from '../global-config.js';
 import { usageLimitStateKey } from '../utils/cli-usage-limit.js';
-import { t, localeForBot, type Locale } from '../i18n/index.js';
+import { t, localeForBot, getDefaultLocale, type Locale } from '../i18n/index.js';
 import { parseWorkingDirList } from '../utils/working-dir.js';
 import { resolveRoleInjection } from './role-resolver.js';
 import { ensureDefaultWhiteboard, getWhiteboard, whiteboardEnabled } from '../services/whiteboard-store.js';
@@ -190,15 +191,32 @@ export function getProjectScanDirs(ds?: DaemonSession): string[] {
 
 // ─── Attachment download ─────────────────────────────────────────────────────
 
-export function getAttachmentsDir(messageId: string): string {
-  return join(resolve(config.session.dataDir), 'attachments', messageId);
+export function getAttachmentsDir(larkAppId: string, messageId: string): string {
+  // Per-appId bucket (attachments/<appId>/<messageId>/): the read-isolation Seatbelt
+  // profile is static at CLI spawn time, so an isolated bot's own uploads can only be
+  // re-allowed by a spawn-time-known key — its appId (see buildV2CarveOuts). The
+  // attachments/ root stays wholesale-denied, covering every sibling's bucket AND the
+  // legacy per-messageId layout. assertSafeAppId keeps the segment traversal-safe —
+  // the same guarantee the carve-out path construction relies on.
+  return join(resolve(config.session.dataDir), 'attachments', assertSafeAppId(larkAppId), messageId);
 }
 
 export async function downloadResources(larkAppId: string, messageId: string, resources: MessageResource[]): Promise<{ attachments: LarkAttachment[]; needLogin: boolean }> {
   if (resources.length === 0) return { attachments: [], needLogin: false };
 
   const attachments: LarkAttachment[] = [];
-  const dir = getAttachmentsDir(messageId);
+  // Resolve the per-appId bucket up front. assertSafeAppId (inside getAttachmentsDir)
+  // throws on a path-unsafe appId (only reachable via a hand-edited bots.json — real
+  // Feishu ids always pass). SOFT-fail rather than let it propagate: an invalid appId
+  // must not sink the whole message (event-dispatcher would drop the text too). Log and
+  // return no attachments, same shape as a download failure — the text still processes.
+  let dir: string;
+  try {
+    dir = getAttachmentsDir(larkAppId, messageId);
+  } catch (err: any) {
+    logger.warn(`[${larkAppId}] skipping attachment download — unusable appId as path segment: ${err.message}`);
+    return { attachments: [], needLogin: false };
+  }
   let needLogin = false;
 
   for (const res of resources) {
@@ -402,14 +420,14 @@ function buildHermesBotmuxHints(locale?: Locale): string[] {
   if (locale === 'en') {
     return [
       'You are running in a Feishu/Lark chat through botmux. For ordinary text replies, write the user-facing answer as your final assistant message; botmux automatically forwards that final output to Feishu/Lark.',
-      'Do not call `botmux send` for normal text answers. Use `botmux send` only for special delivery needs: files/images, voice, cross-chat/top-level sends, or explicit mention routing to another person/bot.',
+      'Do not call `botmux send` for normal text answers. Use `botmux send` only for special delivery needs: files/images/videos, voice, cross-chat/top-level sends, or explicit mention routing to another person/bot.',
       '`botmux send` / `botmux history` / `botmux quoted` / `botmux bots` are shell commands installed in $PATH; run them via Bash/terminal tools when needed.',
       'If you already used `botmux send` for special delivery in this turn, do not put a second copy of the answer, messageId, or send-success receipt in the final assistant message.',
     ];
   }
   return [
     '你运行在飞书（Lark）聊天中。普通文字回复请直接写在 assistant final 里，botmux 会自动把 final_output 转发到飞书。',
-    '普通文本答案不要调用 `botmux send`。只有需要图片/文件/语音、跨群或顶层发送、显式 @ 某人/某 bot 等特殊投递能力时，才使用 `botmux send`。',
+    '普通文本答案不要调用 `botmux send`。只有需要图片/文件/视频/语音、跨群或顶层发送、显式 @ 某人/某 bot 等特殊投递能力时，才使用 `botmux send`。',
     '`botmux send` / `botmux history` / `botmux quoted` / `botmux bots` 是已安装在 $PATH 的 shell 命令；需要时通过 Bash/terminal 工具执行。',
     '如果本轮已经为了特殊投递调用过 `botmux send`，final 里不要再写第二份正文、messageId 或“发送成功/已处理”回执。',
   ];
@@ -417,10 +435,19 @@ function buildHermesBotmuxHints(locale?: Locale): string[] {
 
 function hermesFollowupReminder(locale?: Locale): string {
   if (locale === 'en') {
-    return 'For ordinary text replies, do not call `botmux send`; put the user-facing answer in final and botmux will forward it to Feishu/Lark. Use `botmux send` only for special delivery such as files/images, voice, cross-chat/top-level sends, or explicit mention routing. If already used, do not add a second answer or send-success receipt in final.';
+    return 'For ordinary text replies, do not call `botmux send`; put the user-facing answer in final and botmux will forward it to Feishu/Lark. Use `botmux send` only for special delivery such as files/images/videos, voice, cross-chat/top-level sends, or explicit mention routing. If already used, do not add a second answer or send-success receipt in final.';
   }
-  return '普通文字回复不要调用 `botmux send`；直接把给用户看的答案写在 final，botmux 会自动转发到飞书。只有图片/文件/语音、跨群/顶层发送、特殊 @ 路由等特殊投递才用 `botmux send`；如果本轮已经用过，不要在 final 里再写第二份答案或发送成功回执。';
+  return '普通文字回复不要调用 `botmux send`；直接把给用户看的答案写在 final，botmux 会自动转发到飞书。只有图片/文件/视频/语音、跨群/顶层发送、特殊 @ 路由等特殊投递才用 `botmux send`；如果本轮已经用过，不要在 final 里再写第二份答案或发送成功回执。';
 }
+
+/**
+ * Peer count at/below which the `<available_bots>` block inlines the full
+ * roster (name + open_id). Above it the block collapses to a one-line pointer
+ * that lists names only and defers open_ids to `botmux bots list`, so a
+ * many-bot group doesn't spend a long open_id list on the first message of a
+ * topic that never collaborates.
+ */
+const AVAILABLE_BOTS_INLINE_MAX = 3;
 
 export function buildNewTopicPrompt(
   userMessage: string,
@@ -496,10 +523,27 @@ export function buildNewTopicPrompt(
     const mentionedOpenIds = new Set(mentions?.map(m => m.openId).filter(Boolean));
     const unmentionedBots = availableBots.filter(b => !mentionedOpenIds.has(b.openId));
     if (unmentionedBots.length > 0) {
-      const items = unmentionedBots.map(
-        b => `  <bot name="${xmlEscape(b.displayName)}" open_id="${xmlEscape(b.openId)}" />`,
-      );
-      botBlock = `<available_bots hint="${xmlEscape(t('ai.available_bots.hint', undefined, locale))}">\n${items.join('\n')}\n</available_bots>`;
+      // ≤ threshold peers: inline the full roster with open_ids so any
+      // cross-bot message (a question, collaboration, or full handoff) needs
+      // zero round-trip. Above it: collapse to a one-line pointer — names only
+      // for awareness, open_ids deferred to an on-demand `botmux bots list` —
+      // so a many-bot group doesn't pay a long open_id list on every solo
+      // topic. Either way this block is emitted once, on the first message.
+      if (unmentionedBots.length <= AVAILABLE_BOTS_INLINE_MAX) {
+        const items = unmentionedBots.map(
+          b => `  <bot name="${xmlEscape(b.displayName)}" open_id="${xmlEscape(b.openId)}" />`,
+        );
+        botBlock = `<available_bots hint="${xmlEscape(t('ai.available_bots.hint', undefined, locale))}">\n${items.join('\n')}\n</available_bots>`;
+      } else {
+        // Resolve the locale the same way t() does (explicit arg → process
+        // default) so the separator matches the rendered sentence's language —
+        // otherwise an undefined `locale` under an 'en' default would produce an
+        // English sentence joined with the Chinese enumeration comma.
+        const sep = (locale ?? getDefaultLocale()) === 'en' ? ', ' : '、';
+        const names = unmentionedBots.map(b => b.displayName).join(sep);
+        const line = t('ai.available_bots.collapsed_line', { count: unmentionedBots.length, names }, locale);
+        botBlock = `<available_bots hint="${xmlEscape(t('ai.available_bots.hint_collapsed', undefined, locale))}" count="${unmentionedBots.length}">\n${xmlEscape(line)}\n</available_bots>`;
+      }
     }
   }
 

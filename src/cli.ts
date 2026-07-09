@@ -62,9 +62,10 @@ import { interactiveSelect, pickChoice, pickCliSelection } from './setup/interac
 import { buildPreset, serializePreset, presetFilename } from './setup/agent-preset.js';
 import type { CliId } from './adapters/cli/types.js';
 import { logger } from './utils/logger.js';
+import { scheduleTimeZone } from './utils/timezone.js';
 import { expandHomePath, invalidWorkingDirs } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
-import { dispatchPrimaryMessage, findStdinAliasAttachment, sendFileAttachments } from './cli/send-dispatch.js';
+import { dispatchPrimaryMessage, findStdinAliasAttachment, sendFileAttachments, sendVideoAttachments, shouldSendAsPureVideo, validateVideoAttachments } from './cli/send-dispatch.js';
 import { buildPm2SpawnCommand } from './cli/pm2-command.js';
 import { callDashboard, type DashboardEndpoint, type DashboardResult } from './cli/dashboard-endpoint.js';
 import { npmGlobalUpdateCwd } from './core/maintenance.js';
@@ -3615,6 +3616,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   voice                配置语音总结（高级功能，独立于 setup）— 交互式填 TTS 引擎+凭证
        voice status    查看当前语音配置（凭证打码）
        voice disable   关闭语音功能（移除配置）
+  vc-agent tat-gate|poll
+                       飞书会议智能体 P0：校验 TAT 会中事件读取、轮询会议事件并触发 workflow
   whiteboard status|enable|disable
                        本地项目白板（默认关闭；enable 只打开能力，不创建白板）
        current --create / list / read / update / write --yes
@@ -3631,6 +3634,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   send [content]                       发消息到当前话题（支持 stdin / --content-file）
        --images <path>                 内联图片（可重复）
        --files <path>                  附件（可重复）
+       --videos <path>                 视频预览 MP4（可重复，需配套 --video-covers）
+       --video-covers <path>           视频封面图片（可重复，按顺序对应 --videos）
        --mention <open_id:name>        @提及（可重复）
        --mention-back                  @回本轮触发消息的发送者（open_id 自动取自会话）
        --no-mention                    明确声明本条不@任何人
@@ -4049,8 +4054,8 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     console.log(`定时任务 (${filtered.length}${filter ? '/' + tasks.length : ''}):\n`);
     for (const t of filtered) {
       const status = t.enabled ? '✅' : '⏸️';
-      const next = t.nextRunAt ? new Date(t.nextRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
-      const last = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
+      const next = t.nextRunAt ? new Date(t.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
+      const last = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
       const display = t.parsed?.display ?? t.schedule;
       const prompt = t.prompt ?? '';
       const chatId = t.chatId ?? '—';
@@ -4116,7 +4121,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       deliver,
     });
 
-    const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
+    const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
     console.log(`✅ 已创建定时任务 [${task.id}] ${task.name}`);
     console.log(`   规则: ${parsed.display}`);
     console.log(`   下次执行: ${next}`);
@@ -4315,6 +4320,11 @@ async function cmdQuoted(rest: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Read isolation: register this bot from its own send-cred file so the Lark
+  // client (getMessageDetail below) is available WITHOUT reading the denied
+  // bots.json — same as cmdHistory / cmdSend. Missing this was why a sandboxed
+  // isolated bot's `botmux quoted` failed "Bot not registered".
+  await registerSelfFromCredFile();
   const { larkAppId: appId } = await resolveSessionAppId(sessionIdArg);
 
   const { getMessageDetail } = await import('./im/lark/client.js');
@@ -4337,6 +4347,19 @@ async function cmdQuoted(rest: string[]): Promise<void> {
     if (rendered.msgType === 'interactive') {
       const merged = await resolveMergedCardContent(appId, messageId).catch(() => null);
       if (merged) rendered.content = merged.text;
+    }
+    // The referenced message's file/media resources arrive as key+name only. A
+    // read-isolated agent can't call the Lark resource API itself (bots.json
+    // creds are deny-read), so download the bytes HERE — via the bot client
+    // registered above — into this bot's OWN attachment bucket
+    // (attachments/<appId>/<messageId>/, read-allowed by its carve-out; sandbox
+    // denies file *reads*, not writes). Surface the local paths so the agent can
+    // actually open the file instead of only seeing its key.
+    if (rendered.resources?.length) {
+      const { downloadResources } = await import('./core/session-manager.js');
+      const { attachments, needLogin } = await downloadResources(appId, messageId, rendered.resources);
+      (rendered as { attachments?: unknown }).attachments = attachments;
+      if (needLogin) (rendered as { needLogin?: boolean }).needLogin = true;
     }
     console.log(JSON.stringify(rendered, null, 2));
   } catch (err: any) {
@@ -4416,12 +4439,23 @@ async function relaySend(rest: string[], relayDir: string): Promise<void> {
   const cfile = join(relayDir, contentBase);
   writeFileSync(cfile, content);
 
-  // Copy any --image/--file attachment into the outbox; carry only basenames.
+  // Copy attachments into the outbox; carry only basenames.
+  const copyOutboxAttachment = (p: string, out: string[]): void => {
+    if (!p || !existsSync(p)) return;
+    const base = `${id}-${randomBytes(4).toString('hex')}-${basename(p)}`;
+    try { writeFileSync(join(relayDir, base), readFileSync(p)); out.push(base); } catch { /* skip unreadable */ }
+  };
   const attachments: string[] = [];
   for (const p of argValues(rest, '--image', '--images', '--file', '--files')) {
-    if (!p || !existsSync(p)) continue;
-    const base = `${id}-${randomBytes(4).toString('hex')}-${basename(p)}`;
-    try { writeFileSync(join(relayDir, base), readFileSync(p)); attachments.push(base); } catch { /* skip unreadable */ }
+    copyOutboxAttachment(p, attachments);
+  }
+  const videos: string[] = [];
+  for (const p of argValues(rest, '--video', '--videos')) {
+    copyOutboxAttachment(p, videos);
+  }
+  const videoCovers: string[] = [];
+  for (const p of argValues(rest, '--video-cover', '--video-covers')) {
+    copyOutboxAttachment(p, videoCovers);
   }
 
   // Forward only presentation flags (must match the watcher's allowlist); path,
@@ -4438,7 +4472,7 @@ async function relaySend(rest: string[], relayDir: string): Promise<void> {
   }
   // 原子写：req.json 是 host watcher 的触发文件，rename 让它「完整出现」，
   // watcher 永远不会读到半截 JSON（tmp 后缀不匹配 .req.json 过滤）。
-  atomicWriteFileSync(join(relayDir, `${id}.req.json`), JSON.stringify({ contentFile: contentBase, attachments, flags }));
+  atomicWriteFileSync(join(relayDir, `${id}.req.json`), JSON.stringify({ contentFile: contentBase, attachments, videos, videoCovers, flags }));
 
   const resPath = join(relayDir, `${id}.res.json`);
   const deadlineMs = Date.now() + 120_000;
@@ -4513,16 +4547,30 @@ async function cmdSend(rest: string[]): Promise<void> {
   // from its own worker-written cred file instead (see registerSelfFromCredFile).
   await registerSelfFromCredFile();
   const sessionIdArg = argValue(rest, '--session-id');
+  for (const flag of ['--video', '--videos', '--video-cover', '--video-covers']) {
+    if (flagPresentButValueMissing(rest, flag, true)) {
+      console.error(`botmux send: ${flag} 需要路径参数`);
+      process.exit(2);
+    }
+  }
   const images = argValues(rest, '--image', '--images');
   const files = argValues(rest, '--file', '--files');
+  const videos = argValues(rest, '--video', '--videos');
+  const videoCovers = argValues(rest, '--video-cover', '--video-covers');
+  const videoValidation = validateVideoAttachments(videos, videoCovers);
+  if (!videoValidation.ok) {
+    console.error(`botmux send: ${videoValidation.error}`);
+    process.exit(2);
+  }
+  const videoAttachments = videoValidation.videos;
   // stdin can't be both the message body (which `botmux send` reads from it) and
-  // a `--file`/`--image` attachment — the second read sees EOF and the upload
+  // a `--file`/`--image`/`--video` attachment — the second read sees EOF and the upload
   // fails *after* the message is already sent, leaving the caller to resend.
   // Reject up front so exit≠0 reliably means "nothing was sent".
-  const stdinAlias = findStdinAliasAttachment([...images, ...files]);
+  const stdinAlias = findStdinAliasAttachment([...images, ...files, ...videos, ...videoCovers]);
   if (stdinAlias) {
     console.error(
-      `不能把 stdin（${stdinAlias}）当作 --file/--image 附件：botmux send 已从 stdin 读取消息正文，\n` +
+      `不能把 stdin（${stdinAlias}）当作 --file/--image/--video 附件：botmux send 已从 stdin 读取消息正文，\n` +
       `同一个 stdin 没法既当正文又当附件（第二次读到的是 EOF）。\n` +
       `要发送管道内容，先落到临时文件：  数据来源 > /tmp/x && botmux send --files /tmp/x …`,
     );
@@ -4586,8 +4634,8 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
   if (!contentFile) rejectLikelyWindowsStdinMojibake(content);
 
-  if (!content.trim() && images.length === 0 && files.length === 0) {
-    console.error('没有内容可发送。用法:\n  echo "消息" | botmux send\n  botmux send "消息"\n  botmux send --content-file /tmp/msg.md --images /tmp/chart.png');
+  if (!content.trim() && images.length === 0 && files.length === 0 && videoAttachments.length === 0) {
+    console.error('没有内容可发送。用法:\n  echo "消息" | botmux send\n  botmux send "消息"\n  botmux send --content-file /tmp/msg.md --images /tmp/chart.png\n  botmux send --videos /tmp/replay.mp4 --video-covers /tmp/cover.png --no-mention "视频预览"');
     process.exit(1);
   }
 
@@ -4729,8 +4777,11 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
 
   // Validate file paths
-  for (const p of [...images, ...files]) {
+  for (const p of [...images, ...files, ...videos, ...videoCovers]) {
     if (!existsSync(p)) { console.error(`文件不存在: ${p}`); process.exit(1); }
+  }
+  for (const p of [...videos, ...videoCovers]) {
+    if (!statSync(p).isFile()) { console.error(`不是普通文件: ${p}`); process.exit(1); }
   }
 
   // Register bots so Lark client works
@@ -4989,7 +5040,37 @@ async function cmdSend(rest: string[]): Promise<void> {
     // we committed to sending — that's the boundary the gate cares about.
     const sentAtMs = Date.now();
     let messageId: string;
-    {
+    let failedAttachments: { path: string; error: string }[] = [];
+    let failedVideoAttachments: { path: string; coverPath: string; error: string }[] = [];
+    // Pure-video fast path: send the preview as a standalone media message.
+    // A send that also carries mentions is deliberately excluded (media messages
+    // can't embed `<at>`), so it falls through to the card branch which renders
+    // the @ on the footer and sends the video as a follow-up attachment — same
+    // shape as an attachment-only `--files … --mention …` send, whose card body
+    // is likewise empty. See shouldSendAsPureVideo.
+    const pureVideoSend = shouldSendAsPureVideo({
+      hasBodyText: !!text.trim(),
+      imageCount: imageKeys.length,
+      fileCount: files.length,
+      videoCount: videoAttachments.length,
+      mentionCount: mentions.length,
+    });
+    if (pureVideoSend) {
+      // No card/text primary here, so the FIRST media message must carry the
+      // quote chain itself (dispatchPrimary applies the chat-scope quoteTargetId
+      // and updates primaryQuotedId). Otherwise a bare `--videos … --no-mention`
+      // reply in a 普通群 lands as a standalone message that doesn't quote the
+      // trigger — unlike file-only/image-only sends whose primary card quotes.
+      const videoResult = await sendVideoAttachments(
+        { uploadFile, uploadImage, dispatch, primaryDispatch: dispatchPrimary }, appId, videoAttachments,
+      );
+      failedVideoAttachments = videoResult.failed;
+      if (videoResult.sent.length === 0) {
+        const first = failedVideoAttachments[0]?.error ?? 'unknown error';
+        throw new Error(`视频发送失败: ${first}`);
+      }
+      messageId = videoResult.sent[0];
+    } else {
       // 回复一律卡片（纯文本 post 路径已删）。
       // Inline `@Name` → `<at id=…>` at the exact spot it's written (CJK-name
       // aware, see applyInlineMentions); any --mention not inlined here is
@@ -5094,16 +5175,27 @@ async function cmdSend(rest: string[]): Promise<void> {
     // closed a pending response card for this turn.
     if (shouldRecordBridgeMarker) recordBridgeSendMarker(sentAtMs, messageId, text);
 
-    // Send file attachments as separate messages — best-effort. The primary
-    // message is already delivered above; a failing attachment must not throw
-    // out to the catch below (which would report total failure / exit 1 for an
-    // already-sent message and make the caller resend). Warn instead, and list
-    // the failures in the success JSON.
-    const { failed: failedAttachments } = await sendFileAttachments(
-      { uploadFile, dispatch }, appId, files,
-    );
+    // Send attachments as separate messages — best-effort. The primary message
+    // is already delivered above; a failing attachment must not throw out to the
+    // catch below (which would report total failure / exit 1 for an already-sent
+    // message and make the caller resend). Warn instead, and list failures in
+    // the success JSON. Pure-video sends have no text/card primary, so the media
+    // message above is the primary and failures before any media is sent still
+    // surface as command failure.
+    if (!pureVideoSend) {
+      ({ failed: failedAttachments } = await sendFileAttachments(
+        { uploadFile, dispatch }, appId, files,
+      ));
+      const videoResult = await sendVideoAttachments(
+        { uploadFile, uploadImage, dispatch }, appId, videoAttachments,
+      );
+      failedVideoAttachments = videoResult.failed;
+    }
     for (const f of failedAttachments) {
       console.error(`⚠️ 附件未发送（主消息已送达 ${messageId}，请勿重发）: ${f.path} — ${f.error}`);
+    }
+    for (const f of failedVideoAttachments) {
+      console.error(`⚠️ 视频未发送（主消息已送达 ${messageId}，请勿重发）: ${f.path} / cover ${f.coverPath} — ${f.error}`);
     }
 
     // Bot-to-bot 转发依赖飞书"获取群组中其他机器人和用户@当前机器人的消息"权限：
@@ -5151,6 +5243,9 @@ async function cmdSend(rest: string[]): Promise<void> {
       ...(attention.requested ? { attentionRaised, attentionError } : {}),
       ...(failedAttachments.length > 0
         ? { failedAttachments: failedAttachments.map(f => f.path) }
+        : {}),
+      ...(failedVideoAttachments.length > 0
+        ? { failedVideoAttachments: failedVideoAttachments.map(f => f.path) }
         : {}),
     }));
   } catch (err: any) {
@@ -5354,7 +5449,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
  *
  * In 多话题协作模式 the sub-bot lives in its own sub-topic, where the orchestrator
  * has no session; @-ing the orchestrator there would spawn a fresh, context-less
- * one (申晗's #1 bug). Instead this routes the report INTO the orchestrator's own
+ * one (the reported #1 bug). Instead this routes the report INTO the orchestrator's own
  * thread (recorded by `botmux dispatch` in orchestrate-dispatch.json) and @-s the
  * orchestrator there, so its existing, context-rich session is the one that wakes.
  *
@@ -6624,6 +6719,11 @@ switch (command) {
   case 'quoted':   await cmdQuoted(process.argv.slice(3)); break;
   case 'lang':     await cmdLang(process.argv.slice(3)); break;
   case 'voice':    await cmdVoiceSetup(process.argv.slice(3)); break;
+  case 'vc-agent': {
+    const { cmdVcAgent } = await import('./cli/vc-agent.js');
+    await cmdVcAgent(process.argv[3] ?? '', process.argv.slice(4));
+    break;
+  }
   case 'whiteboard':
   case 'wb':       await cmdWhiteboard(process.argv[3] ?? 'status', process.argv.slice(4)); break;
   case 'thread':   {

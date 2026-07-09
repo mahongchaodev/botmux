@@ -1150,14 +1150,14 @@ export function wireSessionsPage(root: HTMLElement): () => void {
         void loadKanbanTeams();
       } else {
         const team = kanbanTeams.find(tm => tm.key === kanbanTeamKey) ?? kanbanTeams[0];
-        // 「团队群」白名单（申晗定稿）：
+        // 「团队群」白名单（既定规则）：
         //   A. dashboard 团队页发起的协作群（建群时落盘的 team↔chatId 绑定）
         //   B. 群里 /introduce 过该团队成员机器人的群——介绍记录按名字与团队
         //      roster 匹配；介绍过的若不是本团队成员，不算（防误筛）
         // 命中群里所有 bot 的会话都展示（本质 = 同团队 bot 所在群/话题的会话）。
         const teamChats = teamChatIdsFor(team);
         const teamRows = team ? rows.filter(r => teamChats.has(String(r.chatId))) : [];
-        // ── hub 团队看板合并（申晗架构：编排存团队 host）──────────────────────
+        // ── hub 团队看板合并（既定架构：编排存团队 host）──────────────────────
         // 本地行（实时）+ 对方部署上报的裁剪行（host 快照）；共享编排的列/排序
         // 覆盖个人看板字段——团队视图里大家看到同一份摆放。
         if (team) void ensureTeamBoard(team);

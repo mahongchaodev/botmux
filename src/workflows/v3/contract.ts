@@ -184,11 +184,11 @@ export type GoalAnswer =
 
 /**
  * v3 goal-mode is delivered via the native `/goal` command, which only Claude
- * Code, Codex, and Seed support (老滕 directive 2026-06-01, Seed added
+ * Code, Codex, and Seed support (2026-06-01, Seed added
  * 2026-06-02).  We deliberately do NOT abstract goal delivery across every CLI
  * — instead the feature is scoped to the CLIs whose command mechanism can host
- * `/goal`.  Seed is Claude Code fork ( binary `seed` ):
- * identical flags, slash commands, and session layout — it
+ * `/goal`.  Seed is a Claude Code-compatible CLI (binary `seed`): identical
+ * flags, slash commands, and session layout — it
  * reuses the entire claude-family adapter, so `/goal`, paste-detection
  * avoidance, and the manifest watcher all behave exactly as on claude-code with
  * zero CLI-specific branching.  The runtime rejects a run whose nodes resolve
@@ -224,6 +224,12 @@ export interface BotSnapshot {
    *  `override.permissionMode:'restricted'` can additionally set this per
    *  dispatch; nothing can clear it (no-escalation red line, P2). */
   disableCliBypass?: boolean;
+  /** Frozen per-bot sandbox policy. Workflow workers must not silently lose
+   *  these fields when spawning outside the main forkWorker path. */
+  sandbox?: boolean;
+  sandboxHidePaths?: string[];
+  sandboxReadonlyPaths?: string[];
+  sandboxNetwork?: boolean;
   /** The resolved working directory for this run. */
   workingDir: string;
 }
