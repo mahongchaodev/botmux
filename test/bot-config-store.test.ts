@@ -197,7 +197,7 @@ describe('bot-config store', () => {
     expect(invalid.silentTurnReactions).toBeUndefined();
   });
 
-  it('parses substituteMode only when enabled with valid targets', async () => {
+  it('parses substituteMode, retaining a disabled config\'s targets', async () => {
     const { registry } = await freshModules();
     const [enabled, disabled, empty, emailOnly] = registry.parseBotConfigsFromText(JSON.stringify([
       {
@@ -244,7 +244,15 @@ describe('bot-config store', () => {
         { openId: 'ou_target', email: 'target@example.com' },
       ],
     });
-    expect(disabled.substituteMode).toBeUndefined();
+    // A disabled config keeps its target list so the dashboard toggle can flip
+    // back on without re-entering everyone; only the runtime trigger stays off.
+    expect(disabled.substituteMode).toEqual({
+      enabled: false,
+      disclosure: 'prefix',
+      targets: [{ userId: 'u_target' }],
+    });
+    // Enabled-but-unmatchable stays dropped: an ON state with no openId/userId/
+    // unionId target could never trigger (name-only and email-only are dead).
     expect(empty.substituteMode).toBeUndefined();
     expect(emailOnly.substituteMode).toBeUndefined();
   });

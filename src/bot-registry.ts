@@ -11,6 +11,7 @@ import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
 import type { BotSkillPolicy, SkillSelector } from './core/skills/types.js';
 import { normalizeStartupCommandList } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
+import { normalizeSubstituteMode } from './services/substitute-mode-normalize.js';
 
 export type ChatReplyMode = 'chat' | 'new-topic' | 'shared' | 'chat-topic';
 export type ContentTriggerScope = 'topic' | 'regularGroup' | 'both';
@@ -1260,34 +1261,10 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         .filter((x: any): x is string => typeof x === 'string');
     }
 
-    let substituteMode: SubstituteModeConfig | undefined;
-    const rawSubstituteMode = entry.substituteMode;
-    if (rawSubstituteMode && typeof rawSubstituteMode === 'object' && !Array.isArray(rawSubstituteMode)) {
-      const targets = Array.isArray(rawSubstituteMode.targets)
-        ? rawSubstituteMode.targets.flatMap((raw: any): SubstituteTarget[] => {
-            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
-            const target: SubstituteTarget = {};
-            if (typeof raw.openId === 'string' && raw.openId.trim()) target.openId = raw.openId.trim();
-            if (typeof raw.userId === 'string' && raw.userId.trim()) target.userId = raw.userId.trim();
-            if (typeof raw.unionId === 'string' && raw.unionId.trim()) target.unionId = raw.unionId.trim();
-            if (typeof raw.email === 'string' && raw.email.trim()) target.email = raw.email.trim();
-            if (typeof raw.name === 'string' && raw.name.trim()) target.name = raw.name.trim();
-            return target.openId || target.userId || target.unionId || target.email ? [target] : [];
-          })
-        : [];
-      // Enable only when at least one target carries a matchable id. email is
-      // preserved on a target (for a future resolver) but never matched at
-      // runtime, so an email-only target set can never trigger — treating it as
-      // "enabled" would be a silently-dead config.
-      const hasMatchableTarget = targets.some((t: SubstituteTarget) => t.openId || t.userId || t.unionId);
-      if (rawSubstituteMode.enabled === true && hasMatchableTarget) {
-        substituteMode = {
-          enabled: true,
-          targets,
-          disclosure: rawSubstituteMode.disclosure === 'none' ? 'none' : 'prefix',
-        };
-      }
-    }
+    // Shared normalizer (with substitute-mode-store): keeps a disabled config's
+    // target list so the dashboard toggle can flip without re-entering everyone;
+    // only an enabled-but-unmatchable config collapses to undefined.
+    const substituteMode: SubstituteModeConfig | undefined = normalizeSubstituteMode(entry.substituteMode);
 
     // chatReplyModes：只保留每群显式设置，非法值丢弃。四态 chat｜chat-topic｜
     // new-topic｜shared 都保留解析；写入路径会删除「与 per-bot 默认相同」的条目

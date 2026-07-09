@@ -74,6 +74,32 @@ describe('substitute-mode store', () => {
     expect(readConfig().substituteMode).toEqual(registry.getBot('app_default').config.substituteMode);
   });
 
+  it('persists a disabled config with its targets and reloads it', async () => {
+    writeConfig();
+    const { registry, store } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+
+    const r = await store.updateBotSubstituteMode('app_default', {
+      enabled: false,
+      targets: [{ openId: 'ou_bob', name: 'Bob' }],
+    });
+    expect(r).toEqual({
+      ok: true,
+      substituteMode: { enabled: false, disclosure: 'prefix', targets: [{ openId: 'ou_bob', name: 'Bob' }] },
+    });
+    expect(readConfig().substituteMode.enabled).toBe(false);
+
+    // Loader keeps the disabled config (so the dashboard toggle can flip on
+    // without re-entering the list) instead of dropping it.
+    const reloaded = await freshModules();
+    reloaded.registry.loadBotConfigs().forEach(c => reloaded.registry.registerBot(c));
+    expect(reloaded.registry.getBot('app_default').config.substituteMode).toEqual({
+      enabled: false,
+      disclosure: 'prefix',
+      targets: [{ openId: 'ou_bob', name: 'Bob' }],
+    });
+  });
+
   it('turns substituteMode off by deleting the key', async () => {
     writeConfig({
       substituteMode: {

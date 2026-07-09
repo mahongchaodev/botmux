@@ -6,6 +6,7 @@
 import { store } from './store.js';
 import { botAvatarHtml, escapeHtml, loadNameMaps, loadingHtml, t } from './ui.js';
 import type { PageDisposer } from './react-mount.js';
+import { parseSubstituteTargets, formatSubstituteTargets } from './substitute-targets.js';
 
 let cache: { bots: any[] } = { bots: [] };
 let loadError: string | null = null;
@@ -172,34 +173,55 @@ function agentSelectionKey(bot: any, sessionFallback: string): string {
   return cli || 'claude-code';
 }
 
-function substituteTargetsText(mode: any): string {
-  const targets = Array.isArray(mode?.targets) ? mode.targets : [];
-  return JSON.stringify(targets, null, 2);
-}
-
-function parseSubstituteTargets(raw: string): Array<Record<string, string>> | null {
-  const text = raw.trim();
-  if (!text) return [];
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { return null; }
-  if (!Array.isArray(parsed)) return null;
-  const out: Array<Record<string, string>> = [];
-  for (const item of parsed) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
-    const src = item as Record<string, unknown>;
-    const target: Record<string, string> = {};
-    for (const key of ['openId', 'userId', 'unionId', 'email', 'name']) {
-      const val = src[key];
-      if (typeof val === 'string' && val.trim()) target[key] = val.trim();
-    }
-    if (!target.openId && !target.userId && !target.unionId && !target.email) return null;
-    out.push(target);
-  }
-  return out;
-}
-
 function selectedCliOption(key: string): CliOption | undefined {
   return cliOptions.find(o => o.id === key);
+}
+
+// A single resolved-target chip: ✓ green when resolved to a person, ✗ red when
+// the email / id could not be resolved (out of 通讯录可见范围). Shared by the
+// initial render and the post-save refresh.
+function substituteChipHtml(c: { ok: boolean; name?: string; input?: string }): string {
+  const label = (c.name && c.name.trim()) || c.input || '';
+  const color = c.ok ? '#16a34a' : '#dc2626';
+  const suffix = c.ok ? '' : ` · ${t('botDefaults.substituteUnresolved')}`;
+  return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;margin:0 6px 6px 0;`
+    + `border-radius:12px;font-size:12px;line-height:1.6;border:1px solid ${color}40;color:${color};background:${color}14">`
+    + `<span>${c.ok ? '✓' : '✗'}</span><span>${escapeHtml(label)}${escapeHtml(suffix)}</span></span>`;
+}
+
+// Chips rendered on first paint from the already-resolved stored targets.
+function substituteChipsHtml(mode: any): string {
+  const targets = Array.isArray(mode?.targets) ? mode.targets : [];
+  return targets
+    .map((tg: any) => substituteChipHtml({
+      ok: true,
+      name: (typeof tg?.name === 'string' && tg.name) || tg?.email || tg?.openId || tg?.unionId || tg?.userId,
+      input: tg?.email || tg?.openId,
+    }))
+    .join('');
+}
+
+// Chips rendered after a save, from the server's per-entry resolution report.
+function substituteChipsFromResolution(resolution: any): string {
+  if (!Array.isArray(resolution) || resolution.length === 0) return '';
+  return resolution
+    .map((r: any) => substituteChipHtml({ ok: r?.ok === true, name: r?.name, input: r?.input }))
+    .join('');
+}
+
+// Re-derive the editor text from the resolution report so a save keeps every
+// line the user typed — resolved ones gain a `# name` annotation, failed ones
+// stay verbatim to be fixed. Empty report (e.g. the "off" button) clears it.
+function editorTextFromResolution(resolution: any): string {
+  if (!Array.isArray(resolution)) return '';
+  return resolution
+    .map((r: any) => {
+      const input = String(r?.input ?? '').trim();
+      if (!input) return '';
+      return r?.ok && typeof r?.name === 'string' && r.name.trim() ? `${input}  # ${r.name.trim()}` : input;
+    })
+    .filter(Boolean)
+    .join('\n');
 }
 
 function modelSuggestionsForOption(opt: CliOption | undefined): string[] {
@@ -760,10 +782,11 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
           </select>
         </label>
       </div>
-      <textarea data-input="substituteTargets" rows="6"
+      <textarea data-input="substituteTargets" rows="5"
         placeholder="${escapeHtml(t('botDefaults.substituteTargetsPlaceholder'))}"
-        style="width:100%;box-sizing:border-box;font:13px/1.5 ui-monospace,Menlo,monospace;padding:10px">${escapeHtml(substituteTargetsText(mode))}</textarea>
+        style="width:100%;box-sizing:border-box;font:13px/1.5 ui-monospace,Menlo,monospace;padding:10px">${escapeHtml(formatSubstituteTargets(mode))}</textarea>
       <small class="bd-help">${t('botDefaults.substituteTargetsHelp')}</small>
+      <div class="substitute-chips" data-substitute-chips style="margin:6px 0 0">${substituteChipsHtml(mode)}</div>
       <div class="actions">
         <button type="button" class="primary" data-action="save-substitute-mode">${t('botDefaults.substituteSave')}</button>
         <button type="button" data-action="off-substitute-mode">${t('botDefaults.substituteOff')}</button>
@@ -1678,10 +1701,11 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
       const substituteSaveBtn = card.querySelector<HTMLButtonElement>('button[data-action=save-substitute-mode]');
       const substituteOffBtn = card.querySelector<HTMLButtonElement>('button[data-action=off-substitute-mode]');
       const substituteStatusEl = card.querySelector<HTMLSpanElement>('[data-substitute-status]');
+      const substituteChipsEl = card.querySelector<HTMLElement>('[data-substitute-chips]');
 
       async function putSubstituteMode(body: any, btn: HTMLButtonElement) {
         if (!substituteStatusEl) return;
-        substituteStatusEl.textContent = '';
+        substituteStatusEl.textContent = t('botDefaults.substituteResolving');
         substituteStatusEl.className = 'oncall-status';
         btn.disabled = true;
         try {
@@ -1691,6 +1715,9 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
             body: JSON.stringify(body),
           });
           const resp = await r.json().catch(() => ({}));
+          // Resolution chips render on success AND failure so the user can always
+          // see which entries resolved to a person and which didn't.
+          if (substituteChipsEl) substituteChipsEl.innerHTML = substituteChipsFromResolution(resp.resolution);
           if (r.ok && resp.ok) {
             substituteStatusEl.textContent = `✓ ${t('botDefaults.cardPrefSaved')}`;
             substituteStatusEl.classList.add('hint-ok');
@@ -1698,9 +1725,15 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
             if (cached) cached.substituteMode = resp.substituteMode ?? null;
             if (substituteEnabledCb) substituteEnabledCb.checked = !!resp.substituteMode?.enabled;
             if (substituteDisclosureSel) substituteDisclosureSel.value = resp.substituteMode?.disclosure === 'none' ? 'none' : 'prefix';
-            if (substituteTargetsTa) substituteTargetsTa.value = substituteTargetsText(resp.substituteMode);
+            // Re-render the editor from the resolution report (not the stored
+            // config): a disabled save keeps the list, and failed entries stay
+            // visible so they can be corrected instead of silently vanishing.
+            if (substituteTargetsTa) substituteTargetsTa.value = editorTextFromResolution(resp.resolution);
           } else {
-            substituteStatusEl.textContent = `✗ ${resp.error ?? r.status}`;
+            const reason = resp.error === 'targets_required'
+              ? t('botDefaults.substituteTargetsRequired')
+              : (resp.error ?? r.status);
+            substituteStatusEl.textContent = `✗ ${reason}`;
             substituteStatusEl.classList.add('hint-warn-inline');
           }
         } catch (e: any) {
@@ -1714,9 +1747,9 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
       if (substituteSaveBtn && substituteTargetsTa && substituteDisclosureSel && substituteEnabledCb) {
         substituteSaveBtn.addEventListener('click', () => {
           if (!substituteStatusEl) return;
-          const targets = parseSubstituteTargets(substituteTargetsTa.value);
-          if (!targets) {
-            substituteStatusEl.textContent = `✗ ${t('botDefaults.substituteTargetsInvalid')}`;
+          const { targets, invalid } = parseSubstituteTargets(substituteTargetsTa.value);
+          if (invalid.length) {
+            substituteStatusEl.textContent = `✗ ${t('botDefaults.substituteTargetsInvalid')}: ${invalid.join('; ')}`;
             substituteStatusEl.className = 'oncall-status hint-warn-inline';
             return;
           }
