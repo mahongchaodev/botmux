@@ -60,6 +60,14 @@ import type { VcMeetingPushContext, VcMeetingPushEventKind } from '../../vc-agen
 // 大厅回执互教的防环闸：每进程对同一打卡者只回一次（见 hall swallow 分支）。
 const hallEchoReplied = new Set<string>();
 
+function vcMeetingEventPayloadForLog(data: any): string {
+  try {
+    return JSON.stringify(data?.event ?? data);
+  } catch (err) {
+    return `[unserializable:${err instanceof Error ? err.message : String(err)}]`;
+  }
+}
+
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
 /** Set the bot's open_id. Callers should also call writeBotInfoFile() to persist. */
@@ -2380,6 +2388,9 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
                 : 'meeting_activity';
           const parsed = parseVcMeetingPushEvent({ data, larkAppId, kind, eventType: et as VcMeetingPushEventType });
           logger.info(`[ws-event] ${larkAppId} event_type=${et} eventId=${parsed.eventId ?? '?'} meetingId=${parsed.meeting.id || '?'} items=${Array.isArray((data?.event ?? data)?.meeting_actitivty_items) ? (data?.event ?? data).meeting_actitivty_items.length : '?'}`);
+          if (et === VC_BOT_MEETING_ACTIVITY_EVENT && process.env.DEBUG) {
+            logger.info(`[ws-event:raw] ${larkAppId} event_type=${et} eventId=${parsed.eventId ?? '?'} payload=${vcMeetingEventPayloadForLog(data)}`);
+          }
         } else if (process.env.DEBUG) {
           logger.info(`[ws-event] ${larkAppId} event_type=${et}`);
         }
