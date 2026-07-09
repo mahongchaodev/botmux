@@ -102,8 +102,10 @@ describe('substitute-mode store', () => {
       targets: [{ name: 'No id' }],
     })).toEqual({ ok: false, reason: 'targets_required' });
 
-    // email-only → stored (preserved for a future resolver) but never matched at
-    // runtime, so it cannot enable the mode — must be rejected, not silently dead.
+    // email-only target set → rejected (targets_required), nothing persisted.
+    // email is preserved only when it rides alongside a matchable id
+    // (openId/userId/unionId); on its own it never matches at runtime, so it
+    // must not be able to enable a silently-dead mode.
     expect(await store.updateBotSubstituteMode('app_default', {
       enabled: true,
       targets: [{ email: 'ghost@example.com', name: 'Email only' }],
