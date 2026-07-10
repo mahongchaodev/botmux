@@ -2165,6 +2165,54 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  it('substituteMode direct: legacy binding without targetOpenId still matches by substituteOpenId', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-direct-legacy',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendUserMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'ou_sub',
+      expect.stringContaining('@Sub Person help with this'),
+      'text',
+    );
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
   it('substituteMode direct: stale entered-only binding is ignored when the user is no longer a target', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],

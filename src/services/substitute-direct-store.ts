@@ -84,7 +84,7 @@ function normalize(raw: unknown): Store {
     bindings[k] = {
       larkAppId: b.larkAppId,
       substituteOpenId: b.substituteOpenId,
-      targetOpenId: typeof b.targetOpenId === 'string' ? b.targetOpenId : undefined,
+      targetOpenId: typeof b.targetOpenId === 'string' ? b.targetOpenId : b.substituteOpenId,
       substituteUserId: typeof b.substituteUserId === 'string' ? b.substituteUserId : undefined,
       substituteUnionId: typeof b.substituteUnionId === 'string' ? b.substituteUnionId : undefined,
       targetName: typeof b.targetName === 'string' ? b.targetName : undefined,
@@ -148,8 +148,9 @@ export function getSubstituteDirectChatByTarget(
   const store = readStore();
   for (const binding of Object.values(store.bindings)) {
     if (binding.larkAppId !== larkAppId) continue;
+    const bindingTargetOpenId = binding.targetOpenId ?? binding.substituteOpenId;
     const matched = (target.openId && binding.substituteOpenId === target.openId)
-      || (target.openId && binding.targetOpenId === target.openId)
+      || (target.openId && bindingTargetOpenId === target.openId)
       || (target.userId && binding.substituteUserId === target.userId)
       || (target.unionId && binding.substituteUnionId === target.unionId);
     if (!matched) continue;
