@@ -56,6 +56,9 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   getSubstituteDirectChat: (_app: string, openId: string, chatId: string) => mockDirect.get(openId)?.chats?.[chatId],
   upsertSubstituteDirectChat: (input: any) => {
     const cur = mockDirect.get(input.substituteOpenId) ?? { chats: {} };
+    cur.substituteUserId = input.substituteUserId;
+    cur.substituteUnionId = input.substituteUnionId;
+    cur.targetName = input.targetName;
     cur.chats = {};
     cur.chats[input.chatId] = { ...input };
     cur.activeChatId = input.chatId;
@@ -345,6 +348,31 @@ describe('tryHandleSubstituteCommand', () => {
     expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_enter_ok' });
     expect(result.card.type).toBe('raw');
     expect(mockDirect.get(USER)?.chats?.oc_group).toBeTruthy();
+  });
+
+  it('operator entering direct mode stores state under the configured substitute target', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        substituteMode: {
+          enabled: true,
+          targets: [{ openId: 'ou_sub', userId: 'u_sub', unionId: 'on_sub', name: 'Sub' }],
+          disclosure: 'prefix',
+        },
+      },
+    });
+
+    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
+
+    expect(mockDirect.get(USER)).toBeUndefined();
+    expect(mockDirect.get('ou_sub')).toMatchObject({
+      substituteUserId: 'u_sub',
+      substituteUnionId: 'on_sub',
+      targetName: 'Sub',
+      activeChatId: 'oc_group',
+      chats: {
+        oc_group: expect.objectContaining({ mode: 'direct', targetName: 'Sub' }),
+      },
+    });
   });
 
   it('card action can enable and disable substitute for the target group', async () => {

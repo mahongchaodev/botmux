@@ -17,6 +17,9 @@ export interface SubstituteDirectChat {
 export interface SubstituteDirectBinding {
   larkAppId: string;
   substituteOpenId: string;
+  substituteUserId?: string;
+  substituteUnionId?: string;
+  targetName?: string;
   activeChatId?: string;
   chats: Record<string, SubstituteDirectChat>;
   updatedAt: number;
@@ -80,6 +83,9 @@ function normalize(raw: unknown): Store {
     bindings[k] = {
       larkAppId: b.larkAppId,
       substituteOpenId: b.substituteOpenId,
+      substituteUserId: typeof b.substituteUserId === 'string' ? b.substituteUserId : undefined,
+      substituteUnionId: typeof b.substituteUnionId === 'string' ? b.substituteUnionId : undefined,
+      targetName: typeof b.targetName === 'string' ? b.targetName : undefined,
       activeChatId,
       chats,
       updatedAt: typeof b.updatedAt === 'number' ? b.updatedAt : 0,
@@ -127,9 +133,34 @@ export function getSubstituteDirectChat(
   return getSubstituteDirectBinding(larkAppId, substituteOpenId)?.chats[chatId];
 }
 
+export function getSubstituteDirectChatByTarget(
+  larkAppId: string,
+  target: { openId?: string; userId?: string; unionId?: string } | undefined,
+  chatId: string | undefined,
+): { chat: SubstituteDirectChat; substituteOpenId: string } | undefined {
+  if (!target || !chatId) return undefined;
+  if (target.openId) {
+    const chat = getSubstituteDirectChat(larkAppId, target.openId, chatId);
+    if (chat) return { chat, substituteOpenId: target.openId };
+  }
+  const store = readStore();
+  for (const binding of Object.values(store.bindings)) {
+    if (binding.larkAppId !== larkAppId) continue;
+    const matched = (target.openId && binding.substituteOpenId === target.openId)
+      || (target.userId && binding.substituteUserId === target.userId)
+      || (target.unionId && binding.substituteUnionId === target.unionId);
+    if (!matched) continue;
+    const chat = binding.chats[chatId];
+    if (chat) return { chat, substituteOpenId: binding.substituteOpenId };
+  }
+  return undefined;
+}
+
 export function upsertSubstituteDirectChat(input: {
   larkAppId: string;
   substituteOpenId: string;
+  substituteUserId?: string;
+  substituteUnionId?: string;
   chatId: string;
   chatName?: string | null;
   targetName?: string;
@@ -145,6 +176,9 @@ export function upsertSubstituteDirectChat(input: {
     chats: {},
     updatedAt: 0,
   };
+  current.substituteUserId = input.substituteUserId;
+  current.substituteUnionId = input.substituteUnionId;
+  current.targetName = input.targetName;
   current.chats = {};
   current.chats[input.chatId] = {
     chatId: input.chatId,

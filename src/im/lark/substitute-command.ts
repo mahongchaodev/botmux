@@ -32,6 +32,14 @@ function substituteTargetForOpenId(larkAppId: string, openId: string | undefined
   return cfg?.targets?.find(t => t.openId === openId);
 }
 
+function substituteTargetForDirectAction(larkAppId: string, openId: string | undefined) {
+  const directTarget = substituteTargetForOpenId(larkAppId, openId);
+  if (directTarget?.openId) return directTarget;
+  const cfg = getBot(larkAppId).config.substituteMode;
+  const targetsWithOpenId = cfg?.targets?.filter(t => t.openId) ?? [];
+  return targetsWithOpenId.length === 1 ? targetsWithOpenId[0] : undefined;
+}
+
 function canUseDirectControls(larkAppId: string, openId: string | undefined): boolean {
   if (!openId) return false;
   return canOperate(larkAppId, undefined, openId) || !!substituteTargetForOpenId(larkAppId, openId);
@@ -153,26 +161,32 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
   const row = rows.find(r => r.chatId === chatId);
   if (!row) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
   if (action === 'substitute_direct_enter') {
-    const target = substituteTargetForOpenId(larkAppId, openId);
+    const target = substituteTargetForDirectAction(larkAppId, openId);
+    if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
     upsertSubstituteDirectChat({
       larkAppId,
-      substituteOpenId: openId,
+      substituteOpenId: target.openId,
+      substituteUserId: target.userId,
+      substituteUnionId: target.unionId,
       chatId: row.chatId,
       chatName: row.name,
-      targetName: target?.name,
+      targetName: target.name,
       mode: 'direct',
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
     });
     return { ok: true, message: t('cmd.substitute.direct_enter_ok', { chat: row.name || row.chatId }, loc) };
   }
   if (action === 'substitute_direct_intervene') {
-    const target = substituteTargetForOpenId(larkAppId, openId);
+    const target = substituteTargetForDirectAction(larkAppId, openId);
+    if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
     upsertSubstituteDirectChat({
       larkAppId,
-      substituteOpenId: openId,
+      substituteOpenId: target.openId,
+      substituteUserId: target.userId,
+      substituteUnionId: target.unionId,
       chatId: row.chatId,
       chatName: row.name,
-      targetName: target?.name,
+      targetName: target.name,
       mode: 'intervene',
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
     });

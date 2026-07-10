@@ -38,7 +38,7 @@ import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
 import { tryHandleSubstituteCommand } from './substitute-command.js';
 import { consumeSubstituteDirectInterventionNotes, forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
-import { getSubstituteDirectChat } from '../../services/substitute-direct-store.js';
+import { getSubstituteDirectChat, getSubstituteDirectChatByTarget } from '../../services/substitute-direct-store.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled, clearPending } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
@@ -2094,18 +2094,22 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             && isSubstituteEnabledForChat(larkAppId, chatId)) {
           const targets = getBot(larkAppId).config.substituteMode?.targets ?? [];
           for (const mention of extractMentionIdentities(message)) {
-            if (!mention.openId) continue;
-            if (!targets.some(t => t.openId === mention.openId)) continue;
-            const direct = getSubstituteDirectChat(larkAppId, mention.openId, chatId);
+            const target = targets.find(t => substituteTargetMatchesMention(t, mention));
+            if (!target) continue;
+            const direct = getSubstituteDirectChatByTarget(larkAppId, {
+              openId: target.openId ?? mention.openId,
+              userId: target.userId ?? mention.userId,
+              unionId: target.unionId ?? mention.unionId,
+            }, chatId);
             if (!direct) continue;
             substituteTrigger = {
               target: {
-                name: direct.targetName ?? mention.name,
-                openId: mention.openId,
-                userId: mention.userId,
-                unionId: mention.unionId,
+                name: direct.chat.targetName ?? target.name ?? mention.name,
+                openId: direct.substituteOpenId,
+                userId: target.userId ?? mention.userId,
+                unionId: target.unionId ?? mention.unionId,
               },
-              disclosure: direct.disclosure ?? 'prefix',
+              disclosure: direct.chat.disclosure ?? 'prefix',
             };
             break;
           }
