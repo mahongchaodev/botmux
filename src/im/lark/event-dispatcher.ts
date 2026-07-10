@@ -2120,10 +2120,18 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           if (stripped.startsWith('/')) substituteTrigger = undefined;
         }
         if (substituteTrigger) {
-          const directChat = getSubstituteDirectChat(larkAppId, substituteTrigger.target.openId, chatId);
-          if (directChat?.mode === 'direct') {
+          const direct = getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId);
+          if (direct?.chat.mode === 'direct') {
             if (isAllowed) {
-              const forwarded = await forwardSubstituteGroupMessageToDm({ larkAppId, chatId, message, trigger: substituteTrigger });
+              const forwarded = await forwardSubstituteGroupMessageToDm({
+                larkAppId,
+                chatId,
+                message,
+                trigger: {
+                  ...substituteTrigger,
+                  target: { ...substituteTrigger.target, openId: direct.substituteOpenId },
+                },
+              });
               if (!forwarded) {
                 await replyMessage(larkAppId, messageId, t('substitute.direct.no_open_id', undefined, localeForBot(larkAppId)), 'text', false)
                   .catch(err => logger.warn(`[substitute-direct] no-open-id notice failed: ${err?.message ?? err}`));
@@ -2133,7 +2141,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           }
           substituteTrigger.interventionNotes = consumeSubstituteDirectInterventionNotes({
             larkAppId,
-            substituteOpenId: substituteTrigger.target.openId,
+            substituteOpenId: direct?.substituteOpenId ?? substituteTrigger.target.openId,
             chatId,
           });
           routing.scope = 'chat';

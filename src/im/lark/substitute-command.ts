@@ -41,7 +41,7 @@ function substituteTargetForDirectAction(larkAppId: string, openId: string | und
 }
 
 function substituteBindingOpenIdForControls(larkAppId: string, openId: string | undefined): string | undefined {
-  return substituteTargetForDirectAction(larkAppId, openId)?.openId ?? openId;
+  return openId;
 }
 
 function canUseDirectControls(larkAppId: string, openId: string | undefined): boolean {
@@ -170,7 +170,8 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
     if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
     upsertSubstituteDirectChat({
       larkAppId,
-      substituteOpenId: target.openId,
+      substituteOpenId: openId,
+      targetOpenId: target.openId,
       substituteUserId: target.userId,
       substituteUnionId: target.unionId,
       chatId: row.chatId,
@@ -186,7 +187,8 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
     if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
     upsertSubstituteDirectChat({
       larkAppId,
-      substituteOpenId: target.openId,
+      substituteOpenId: openId,
+      targetOpenId: target.openId,
       substituteUserId: target.userId,
       substituteUnionId: target.unionId,
       chatId: row.chatId,

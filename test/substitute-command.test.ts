@@ -56,6 +56,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   getSubstituteDirectChat: (_app: string, openId: string, chatId: string) => mockDirect.get(openId)?.chats?.[chatId],
   upsertSubstituteDirectChat: (input: any) => {
     const cur = mockDirect.get(input.substituteOpenId) ?? { chats: {} };
+    cur.targetOpenId = input.targetOpenId;
     cur.substituteUserId = input.substituteUserId;
     cur.substituteUnionId = input.substituteUnionId;
     cur.targetName = input.targetName;
@@ -363,8 +364,9 @@ describe('tryHandleSubstituteCommand', () => {
 
     await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
 
-    expect(mockDirect.get(USER)).toBeUndefined();
-    expect(mockDirect.get('ou_sub')).toMatchObject({
+    expect(mockDirect.get('ou_sub')).toBeUndefined();
+    expect(mockDirect.get(USER)).toMatchObject({
+      targetOpenId: 'ou_sub',
       substituteUserId: 'u_sub',
       substituteUnionId: 'on_sub',
       targetName: 'Sub',

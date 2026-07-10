@@ -17,6 +17,7 @@ export interface SubstituteDirectChat {
 export interface SubstituteDirectBinding {
   larkAppId: string;
   substituteOpenId: string;
+  targetOpenId?: string;
   substituteUserId?: string;
   substituteUnionId?: string;
   targetName?: string;
@@ -83,6 +84,7 @@ function normalize(raw: unknown): Store {
     bindings[k] = {
       larkAppId: b.larkAppId,
       substituteOpenId: b.substituteOpenId,
+      targetOpenId: typeof b.targetOpenId === 'string' ? b.targetOpenId : undefined,
       substituteUserId: typeof b.substituteUserId === 'string' ? b.substituteUserId : undefined,
       substituteUnionId: typeof b.substituteUnionId === 'string' ? b.substituteUnionId : undefined,
       targetName: typeof b.targetName === 'string' ? b.targetName : undefined,
@@ -147,6 +149,7 @@ export function getSubstituteDirectChatByTarget(
   for (const binding of Object.values(store.bindings)) {
     if (binding.larkAppId !== larkAppId) continue;
     const matched = (target.openId && binding.substituteOpenId === target.openId)
+      || (target.openId && binding.targetOpenId === target.openId)
       || (target.userId && binding.substituteUserId === target.userId)
       || (target.unionId && binding.substituteUnionId === target.unionId);
     if (!matched) continue;
@@ -159,6 +162,7 @@ export function getSubstituteDirectChatByTarget(
 export function upsertSubstituteDirectChat(input: {
   larkAppId: string;
   substituteOpenId: string;
+  targetOpenId?: string;
   substituteUserId?: string;
   substituteUnionId?: string;
   chatId: string;
@@ -176,6 +180,7 @@ export function upsertSubstituteDirectChat(input: {
     chats: {},
     updatedAt: 0,
   };
+  current.targetOpenId = input.targetOpenId;
   current.substituteUserId = input.substituteUserId;
   current.substituteUnionId = input.substituteUnionId;
   current.targetName = input.targetName;

@@ -149,6 +149,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     for (const binding of mockDirectBindings.values()) {
       if (binding.larkAppId !== appId) continue;
       const matched = (target?.openId && binding.substituteOpenId === target.openId)
+        || (target?.openId && binding.targetOpenId === target.openId)
         || (target?.userId && binding.substituteUserId === target.userId)
         || (target?.unionId && binding.substituteUnionId === target.unionId);
       if (!matched) continue;
@@ -160,6 +161,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   upsertSubstituteDirectChat: (input: any) => {
     const k = directKey(input.larkAppId, input.substituteOpenId);
     const binding = mockDirectBindings.get(k) ?? { larkAppId: input.larkAppId, substituteOpenId: input.substituteOpenId, chats: {} };
+    binding.targetOpenId = input.targetOpenId;
     binding.substituteUserId = input.substituteUserId;
     binding.substituteUnionId = input.substituteUnionId;
     binding.targetName = input.targetName;
@@ -2111,9 +2113,10 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
         disclosure: 'prefix',
       },
     });
-    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_owner'), {
       larkAppId: MY_APP_ID,
-      substituteOpenId: 'ou_sub',
+      substituteOpenId: 'ou_owner',
+      targetOpenId: 'ou_sub',
       substituteUserId: 'u_sub',
       targetName: 'Sub Person',
       activeChatId: 'chat-substitute-direct',
@@ -2144,7 +2147,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
     expect(mockSendUserMessage).toHaveBeenCalledWith(
       MY_APP_ID,
-      'ou_sub',
+      'ou_owner',
       expect.stringContaining('@Sub Person help with this'),
       'text',
     );
