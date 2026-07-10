@@ -2151,6 +2151,16 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       expect.stringContaining('@Sub Person help with this'),
       'text',
     );
+    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_owner'))).toMatchObject({
+      targetOpenId: 'ou_sub',
+      substituteUserId: 'u_sub',
+      chats: {
+        'chat-substitute-direct': expect.objectContaining({
+          mode: 'direct',
+          targetName: 'Sub Person',
+        }),
+      },
+    });
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });

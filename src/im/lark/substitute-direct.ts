@@ -5,6 +5,7 @@ import {
   getActiveSubstituteDirectChat,
   getSubstituteDirectChat,
   upsertSubstituteDirectChat,
+  type SubstituteDirectChat,
 } from '../../services/substitute-direct-store.js';
 import { getBot, resolveBrandLabel } from '../../bot-registry.js';
 import { getChatName, getMessageDetail, MessageWithdrawnError, replyMessage, sendMessage, sendUserMessage } from './client.js';
@@ -42,10 +43,11 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   chatId: string;
   message: any;
   trigger: SubstituteTrigger;
+  direct?: { substituteOpenId: string; chat: SubstituteDirectChat };
 }): Promise<boolean> {
-  const targetOpenId = input.trigger.target.openId;
+  const targetOpenId = input.direct?.substituteOpenId ?? input.trigger.target.openId;
   if (!targetOpenId) return false;
-  const existing = getSubstituteDirectChat(input.larkAppId, targetOpenId, input.chatId);
+  const existing = input.direct?.chat ?? getSubstituteDirectChat(input.larkAppId, targetOpenId, input.chatId);
   if (!existing || existing.mode !== 'direct') return false;
   const loc = localeForBot(input.larkAppId);
   const body = textFromMessage(input.message);
@@ -54,6 +56,9 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   upsertSubstituteDirectChat({
     larkAppId: input.larkAppId,
     substituteOpenId: targetOpenId,
+    targetOpenId: input.trigger.target.openId,
+    substituteUserId: input.trigger.target.userId,
+    substituteUnionId: input.trigger.target.unionId,
     chatId: input.chatId,
     chatName,
     targetName: input.trigger.target.name,

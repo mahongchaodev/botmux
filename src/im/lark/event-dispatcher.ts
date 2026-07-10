@@ -2127,10 +2127,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
                 larkAppId,
                 chatId,
                 message,
-                trigger: {
-                  ...substituteTrigger,
-                  target: { ...substituteTrigger.target, openId: direct.substituteOpenId },
-                },
+                trigger: substituteTrigger,
+                direct,
               });
               if (!forwarded) {
                 await replyMessage(larkAppId, messageId, t('substitute.direct.no_open_id', undefined, localeForBot(larkAppId)), 'text', false)
