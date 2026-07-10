@@ -10,6 +10,7 @@ import {
 } from '../../services/substitute-direct-store.js';
 import { getBot } from '../../bot-registry.js';
 import { leaveChat, listChats } from '../../services/groups-store.js';
+import { chatAppLink, normalizeBrand } from './lark-hosts.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
 
@@ -90,8 +91,9 @@ function renderDirectChatList(rows: DirectChatRow[], loc: any): string {
   ].join('\n');
 }
 
-function buildDirectChatCard(rows: DirectChatRow[], invokerOpenId: string, loc: any): string {
+function buildDirectChatCard(larkAppId: string, rows: DirectChatRow[], invokerOpenId: string, loc: any): string {
   const elements: any[] = [];
+  const brand = normalizeBrand(getBot(larkAppId).config.brand);
   if (rows.length === 0) {
     elements.push({ tag: 'div', text: { tag: 'lark_md', content: t('cmd.substitute.direct_list_empty', undefined, loc) } });
   } else {
@@ -144,6 +146,12 @@ function buildDirectChatCard(rows: DirectChatRow[], invokerOpenId: string, loc: 
               text: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_text', { chat: label }, loc) },
             },
             value: { action: 'substitute_direct_leave_group', chat_id: r.chatId, invoker_open_id: invokerOpenId },
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_open_chat', undefined, loc) },
+            type: 'default',
+            multi_url: { url: chatAppLink(r.chatId, brand) },
           },
         ],
       });
@@ -233,7 +241,7 @@ export async function handleSubstituteDirectCardAction(input: {
   const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId);
   return {
     toast: { type: result.ok ? 'success' : 'error', content: result.message },
-    card: { type: 'raw', data: JSON.parse(buildDirectChatCard(rows, input.operatorOpenId, loc)) },
+    card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc)) },
   };
 }
 
@@ -271,7 +279,7 @@ export async function tryHandleSubstituteCommand(
         return true;
       }
       await (messageId
-        ? replyMessage(larkAppId, messageId, buildDirectChatCard(await listSubstituteDirectChats(larkAppId, senderOpenId), senderOpenId, loc), 'interactive', false)
+        ? replyMessage(larkAppId, messageId, buildDirectChatCard(larkAppId, await listSubstituteDirectChats(larkAppId, senderOpenId), senderOpenId, loc), 'interactive', false)
             .catch(err => logger.warn(`[substitute] reply failed: ${err?.message ?? err}`))
         : Promise.resolve());
       return true;

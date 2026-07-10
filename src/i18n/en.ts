@@ -261,6 +261,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_btn_exit': 'Exit direct',
   'cmd.substitute.direct_btn_exit_intervene': 'Exit intervention',
   'cmd.substitute.direct_btn_leave_group': 'Leave group',
+  'cmd.substitute.direct_btn_open_chat': 'Open chat',
   'cmd.substitute.direct_leave_group_confirm_title': 'Confirm leaving group',
   'cmd.substitute.direct_leave_group_confirm_text': 'Make the bot leave "{chat}"? After leaving, /substitute list will no longer show this group.',
   'cmd.substitute.direct_not_invoker': 'This substitute direct card belongs to someone else. Send /substitute list in DM to open your own card.',

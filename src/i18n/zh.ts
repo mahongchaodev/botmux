@@ -264,6 +264,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_btn_exit': '退出直通',
   'cmd.substitute.direct_btn_exit_intervene': '退出干预',
   'cmd.substitute.direct_btn_leave_group': '退出群聊',
+  'cmd.substitute.direct_btn_open_chat': '进入群聊',
   'cmd.substitute.direct_leave_group_confirm_title': '确认退出群聊',
   'cmd.substitute.direct_leave_group_confirm_text': '确认让 bot 退出「{chat}」？退出后 /substitute list 将不再列出该群。',
   'cmd.substitute.direct_not_invoker': '这张替身直通卡片属于别人，请在单聊里发送 /substitute list 打开自己的卡片。',
