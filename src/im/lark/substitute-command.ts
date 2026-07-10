@@ -40,6 +40,10 @@ function substituteTargetForDirectAction(larkAppId: string, openId: string | und
   return targetsWithOpenId.length === 1 ? targetsWithOpenId[0] : undefined;
 }
 
+function substituteBindingOpenIdForControls(larkAppId: string, openId: string | undefined): string | undefined {
+  return substituteTargetForDirectAction(larkAppId, openId)?.openId ?? openId;
+}
+
 function canUseDirectControls(larkAppId: string, openId: string | undefined): boolean {
   if (!openId) return false;
   return canOperate(larkAppId, undefined, openId) || !!substituteTargetForOpenId(larkAppId, openId);
@@ -49,7 +53,8 @@ type DirectChatRow = { chatId: string; name?: string; enabled: boolean; active: 
 
 async function listSubstituteDirectChats(larkAppId: string, openId: string | undefined): Promise<DirectChatRow[]> {
   if (!canUseDirectControls(larkAppId, openId)) return [];
-  const binding = getSubstituteDirectBinding(larkAppId, openId);
+  const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
+  const binding = getSubstituteDirectBinding(larkAppId, bindingOpenId);
   const chats = await listChats(larkAppId);
   const rows: DirectChatRow[] = [];
   for (const c of chats) {
@@ -199,13 +204,13 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
     return { ok: true, message: t(enabled ? 'cmd.substitute.updated_on' : 'cmd.substitute.updated_off', undefined, loc) };
   }
   if (action === 'substitute_direct_exit') {
-    const existed = clearSubstituteDirectChat(larkAppId, openId, row.chatId);
+    const existed = clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.chatId);
     return { ok: existed, message: existed ? t('cmd.substitute.direct_exit_ok', { chat: row.name || row.chatId }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc) };
   }
   if (action === 'substitute_direct_leave_group') {
     const left = await leaveChat(larkAppId, row.chatId);
     if (!left.ok) return { ok: false, message: t('cmd.substitute.direct_leave_group_failed', { reason: left.error }, loc) };
-    clearSubstituteDirectChat(larkAppId, openId, row.chatId);
+    clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.chatId);
     return { ok: true, message: t('cmd.substitute.direct_leave_group_ok', { chat: row.name || row.chatId }, loc) };
   }
   return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
@@ -283,17 +288,18 @@ export async function tryHandleSubstituteCommand(
     }
     if (arg === 'exit' || arg === 'leave' || arg === '退出') {
       const targetChatId = parts[1];
-      const binding = getSubstituteDirectBinding(larkAppId, senderOpenId);
+      const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, senderOpenId);
+      const binding = getSubstituteDirectBinding(larkAppId, bindingOpenId);
       const active = !targetChatId && binding?.activeChatId ? binding.chats[binding.activeChatId] : undefined;
       if (targetChatId === 'all' || targetChatId === '全部') {
-        const existed = clearSubstituteDirectChat(larkAppId, senderOpenId);
+        const existed = clearSubstituteDirectChat(larkAppId, bindingOpenId);
         await reply(existed ? t('cmd.substitute.direct_exit_ok', { chat: t('cmd.substitute.direct_all', undefined, loc) }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc));
         return true;
       }
       const result = targetChatId
         ? await applyDirectAction(larkAppId, senderOpenId, targetChatId, 'substitute_direct_exit', loc)
         : {
-            ok: clearSubstituteDirectChat(larkAppId, senderOpenId, binding?.activeChatId),
+            ok: clearSubstituteDirectChat(larkAppId, bindingOpenId, binding?.activeChatId),
             message: active ? t('cmd.substitute.direct_exit_ok', { chat: active.chatName ?? active.chatId }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc),
           };
       await reply(result.message);

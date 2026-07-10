@@ -375,6 +375,34 @@ describe('tryHandleSubstituteCommand', () => {
     });
   });
 
+  it('operator card action enter refreshes the card as direct mode on', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        substituteMode: {
+          enabled: true,
+          targets: [{ openId: 'ou_sub', name: 'Sub' }],
+          disclosure: 'prefix',
+        },
+      },
+    });
+
+    const result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+
+    const actions = result.card.data.elements.flatMap((el: any) => el.actions ?? []);
+    expect(actions.map((a: any) => a.text.content)).toEqual([
+      'cmd.substitute.direct_btn_disable_substitute',
+      'cmd.substitute.direct_btn_exit',
+      'cmd.substitute.direct_btn_intervene',
+      'cmd.substitute.direct_btn_leave_group',
+    ]);
+  });
+
   it('card action can enable and disable substitute for the target group', async () => {
     await handleSubstituteDirectCardAction({
       larkAppId: APP,
