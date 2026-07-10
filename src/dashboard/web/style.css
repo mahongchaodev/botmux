@@ -10958,6 +10958,7 @@ tbody tr[data-chat]:hover {
 
 .groups-list-wrap {
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   height: 100%;
   min-height: 0;
   border-color: var(--border-soft);
@@ -10985,6 +10986,8 @@ tbody tr[data-chat]:hover {
   align-self: start;
   min-height: 94px;
   padding: 12px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
 }
 
 .groups-list-row > .orb-avatar {
@@ -11201,6 +11204,64 @@ tbody tr[data-chat]:hover {
   border: 1px dashed var(--border-soft);
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--surface-muted) 28%, transparent);
+}
+
+.groups-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--surface-muted) 42%, var(--surface));
+}
+
+.groups-pagination-status {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.groups-pagination-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.groups-pagination-actions button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.groups-pagination-actions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--accent-strong);
+}
+
+.groups-pagination-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .groups-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .groups-pagination-actions {
+    align-self: stretch;
+  }
+  .groups-pagination-actions button {
+    flex: 1 1 0;
+  }
 }
 
 .groups-page .groups-list-row .overview-list-tail button {
