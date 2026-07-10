@@ -11,6 +11,7 @@ import {
 import { getBot } from '../../bot-registry.js';
 import { leaveChat, listChats } from '../../services/groups-store.js';
 import { chatAppLink, normalizeBrand } from './lark-hosts.js';
+import { directMultiUrl } from './card-builder.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
 
@@ -151,7 +152,7 @@ function buildDirectChatCard(larkAppId: string, rows: DirectChatRow[], invokerOp
             tag: 'button',
             text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_open_chat', undefined, loc) },
             type: 'default',
-            multi_url: { url: chatAppLink(r.chatId, brand) },
+            multi_url: directMultiUrl(chatAppLink(r.chatId, brand)),
           },
         ],
       });

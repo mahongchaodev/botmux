@@ -202,6 +202,9 @@ describe('tryHandleSubstituteCommand', () => {
       expect(actions.map((a: any) => a.text.content)).toEqual([...labels, 'cmd.substitute.direct_btn_open_chat']);
       expect(actions.map((a: any) => a.value?.action)).toEqual([...actionValues, undefined]);
       expect(actions[4].multi_url?.url).toContain('openChatId=oc_group');
+      expect(actions[4].multi_url?.pc_url).toBe(actions[4].multi_url?.url);
+      expect(actions[4].multi_url?.android_url).toBe(actions[4].multi_url?.url);
+      expect(actions[4].multi_url?.ios_url).toBe(actions[4].multi_url?.url);
     };
 
     await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
