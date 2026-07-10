@@ -14,6 +14,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mock external modules ──────────────────────────────────────────────────
 
+const { MockMessageWithdrawnError } = vi.hoisted(() => ({
+  MockMessageWithdrawnError: class MessageWithdrawnError extends Error {
+    constructor(messageId: string) {
+      super(`withdrawn: ${messageId}`);
+      this.name = 'MessageWithdrawnError';
+    }
+  },
+}));
+
 const mockExistsSync = vi.fn(() => true);
 const mockReadFileSync = vi.fn(() => '[]');
 const mockWriteFileSync = vi.fn();
@@ -77,6 +86,7 @@ const mockGetMessageDetail = vi.fn(async () => ({ items: [] as any[] }));
 // 需要模拟真人的用例用 mockResolvedValueOnce(true)。
 const mockIsHumanOpenId = vi.fn(async () => false);
 vi.mock('../src/im/lark/client.js', () => ({
+  MessageWithdrawnError: MockMessageWithdrawnError,
   getChatInfo: (...args: any[]) => mockGetChatInfo(...args),
   getChatMode: (...args: any[]) => mockGetChatMode(...args),
   getCachedChatMode: (...args: any[]) => mockGetCachedChatMode(...args),
@@ -2058,6 +2068,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       'text',
     );
     expect(mockSendUserMessage.mock.calls[0][2]).toContain('@Sub Person help with this');
+    expect(mockSendUserMessage.mock.calls[0][2]).toContain('[原群消息: msg-substitute-direct]');
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))).toMatchObject({
@@ -2212,6 +2223,127 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(mockSendMessage.mock.calls[0][2]).toContain('[签名](https://example.com)');
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: quoted DM reply quotes the original group message', async () => {
+    setupBotState({
+      allowedUsers: ['ou_owner_only'],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetMessageDetail.mockResolvedValueOnce({
+      items: [{
+        content: JSON.stringify({ text: '来自群聊\n[原群消息: group-original-msg]' }),
+      }],
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: 'ou_sub',
+      content: JSON.stringify({ text: '我来处理' }),
+      messageId: 'msg-substitute-dm-quoted-reply',
+      rootId: 'dm-forwarded-msg',
+      threadId: null,
+      chatId: 'dm-chat',
+      chatType: 'p2p',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockGetMessageDetail).toHaveBeenCalledWith(MY_APP_ID, 'dm-forwarded-msg');
+    expect(mockReplyMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'group-original-msg',
+      expect.stringContaining('我先代 Sub Person 回复: 我来处理'),
+      'interactive',
+      false,
+      undefined,
+      expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),
+    );
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: quoted DM reply falls back when the original group message was withdrawn', async () => {
+    setupBotState({
+      allowedUsers: ['ou_owner_only'],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetMessageDetail.mockResolvedValueOnce({
+      items: [{
+        content: JSON.stringify({ text: '来自群聊\n[原群消息: group-withdrawn-msg]' }),
+      }],
+    });
+    mockReplyMessage.mockRejectedValueOnce(new MockMessageWithdrawnError('group-withdrawn-msg'));
+    const event = makeUserMessageEvent({
+      senderOpenId: 'ou_sub',
+      content: JSON.stringify({ text: '我来处理' }),
+      messageId: 'msg-substitute-dm-withdrawn',
+      rootId: 'dm-forwarded-msg',
+      threadId: null,
+      chatId: 'dm-chat',
+      chatType: 'p2p',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockReplyMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'group-withdrawn-msg',
+      expect.any(String),
+      'interactive',
+      false,
+      undefined,
+      expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),
+    );
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'chat-substitute-direct',
+      expect.stringContaining('我先代 Sub Person 回复: 我来处理'),
+      'interactive',
+      undefined,
+      expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),
+    );
   });
 
   it('substituteMode direct: DM reply uses the DM sender name', async () => {
