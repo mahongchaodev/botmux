@@ -137,7 +137,7 @@ export function getSubstituteDirectChat(
 
 export function getSubstituteDirectChatByTarget(
   larkAppId: string,
-  target: { openId?: string; userId?: string; unionId?: string } | undefined,
+  target: { openId?: string; userId?: string; unionId?: string; name?: string } | undefined,
   chatId: string | undefined,
 ): { chat: SubstituteDirectChat; substituteOpenId: string } | undefined {
   if (!target || !chatId) return undefined;
@@ -152,7 +152,8 @@ export function getSubstituteDirectChatByTarget(
     const matched = (target.openId && binding.substituteOpenId === target.openId)
       || (target.openId && bindingTargetOpenId === target.openId)
       || (target.userId && binding.substituteUserId === target.userId)
-      || (target.unionId && binding.substituteUnionId === target.unionId);
+      || (target.unionId && binding.substituteUnionId === target.unionId)
+      || (!!target.name && (binding.targetName === target.name || binding.chats[chatId]?.targetName === target.name));
     if (!matched) continue;
     const chat = binding.chats[chatId];
     if (chat) return { chat, substituteOpenId: binding.substituteOpenId };

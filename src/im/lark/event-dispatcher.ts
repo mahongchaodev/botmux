@@ -965,7 +965,8 @@ function substituteTargetMatchesMention(target: {
   return Boolean(
     (target.openId && mention.openId === target.openId) ||
     (target.userId && mention.userId === target.userId) ||
-    (target.unionId && mention.unionId === target.unionId),
+    (target.unionId && mention.unionId === target.unionId) ||
+    ((target as { name?: string }).name && mention.name === (target as { name?: string }).name),
   );
 }
 
@@ -2100,6 +2101,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
               openId: target.openId ?? mention.openId,
               userId: target.userId ?? mention.userId,
               unionId: target.unionId ?? mention.unionId,
+              name: target.name ?? mention.name,
             }, chatId);
             if (!direct) continue;
             substituteTrigger = {
@@ -2121,6 +2123,11 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
         if (substituteTrigger) {
           const direct = getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId);
+          logger.info(
+            `[substitute-direct:${larkAppId}] lookup chat=${chatId.substring(0, 12)} ` +
+            `target=${substituteTrigger.target.openId ?? substituteTrigger.target.userId ?? substituteTrigger.target.unionId ?? substituteTrigger.target.name ?? 'unknown'} ` +
+            `direct=${direct ? `${direct.substituteOpenId.substring(0, 12)}:${direct.chat.mode ?? 'direct'}` : 'none'}`,
+          );
           if (direct?.chat.mode === 'direct') {
             if (isAllowed) {
               const forwarded = await forwardSubstituteGroupMessageToDm({
