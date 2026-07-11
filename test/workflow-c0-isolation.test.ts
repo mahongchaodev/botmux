@@ -124,6 +124,7 @@ describe('Slice C0 — chat side-effect isolation', () => {
     ['template', 'resume'],
     ['template', 'cancel'],
     ['template', 'migrate-v3'],
+    ['template', 'archive-runs'],
     ['v3', 'run'],
   ])('botmux %s %s refuses recursive/legacy workflow execution', (root, sub) => {
     const out = runCli([root, sub, 'target'], { BOTMUX_WORKFLOW: '1' });

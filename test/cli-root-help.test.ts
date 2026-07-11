@@ -30,6 +30,8 @@ describe('botmux root help workflow surface', () => {
       expect(stdout).toContain('workflow approve-dag|start');
       expect(stdout).toContain('template migrate-v3 [id|path ...]');
       expect(stdout).toContain('v2 定义迁移：默认 dry-run');
+      expect(stdout).toContain('template archive-runs [--commit|--verify <archive>]');
+      expect(stdout).toContain('v2 历史 run 私有静态归档');
       expect(stdout).toContain('template <run|resume|cancel|ls|tail|validate|show>');
       expect(stdout).toContain('v2 执行兼容面（仅保留迁移窗口）');
       expect(stdout).not.toContain('workflow <run|resume|cancel|ls|tail|validate|show>');

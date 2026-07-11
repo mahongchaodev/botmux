@@ -1323,7 +1323,8 @@ describe('handleCommand', () => {
       expect(replyContent).toContain('/workflow <目标>');
       expect(replyContent).toContain('/workflow run <名称>');
       expect(replyContent).toContain('/workflow save last');
-      expect(replyContent).toContain('/template run|cancel');
+      expect(replyContent).toContain('/template cancel');
+      expect(replyContent).toContain('botmux template migrate-v3');
       expect(replyContent).toContain('/compact'); // passthrough list
       expect(replyContent).toContain('/model');
       expect(replyContent).toContain('Claude'); // CLI display name

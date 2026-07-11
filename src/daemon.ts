@@ -3100,6 +3100,7 @@ ipcRoute('POST', '/api/workflows/definitions/:id/run', async (req, res, params) 
     const status =
       result.error === 'unknown_workflow' ? 404 :
         result.error === 'invalid_params' ? 400 :
+          result.error === 'legacy_workflow_retired' ? 409 :
           500;
     return jsonRes(res, status, result);
   }

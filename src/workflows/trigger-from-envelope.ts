@@ -38,8 +38,10 @@ export async function triggerWorkflowFromEnvelope(
   if (!workflowId) {
     return { ok: false, triggerId, errorCode: 'target_required', error: 'workflow target requires workflowId' };
   }
-  // chatBinding needs a chat to post the workflow's messages into.
-  if (!chatId) {
+  const dryRun = req.options?.dryRun === true;
+  // A real run needs a chat for cards and ownership. Dry-run is a definition +
+  // parameter preflight and deliberately has no chat-side effects.
+  if (!chatId && !dryRun) {
     return { ok: false, triggerId, errorCode: 'target_required', error: 'workflow target requires chatId for chat binding' };
   }
 
@@ -53,24 +55,29 @@ export async function triggerWorkflowFromEnvelope(
     options: req.options ?? {},
   });
 
-  if (req.options?.dryRun) {
-    return {
-      ok: true,
-      triggerId,
-      action: 'dry_run',
-      target: { kind: 'workflow', chatId },
-      message: `dry run: would start workflow "${workflowId}" with param "${EVENT_PARAM_NAME}" (${eventJson.length} bytes)`,
-    };
-  }
-
-  const result = await deps.runWorkflow({
+  const commonInput = {
     workflowId,
-    rawParams: { [EVENT_PARAM_NAME]: { kind: 'string', value: eventJson } },
-    chatBinding: { chatId, larkAppId: deps.larkAppId },
+    rawParams: { [EVENT_PARAM_NAME]: { kind: 'string' as const, value: eventJson } },
     initiator: req.source.connectorId ? `webhook:${req.source.connectorId}` : `external:${req.source.type}`,
-  });
+  };
+  const result = dryRun
+    ? await deps.runWorkflow({ ...commonInput, dryRun: true })
+    : await deps.runWorkflow({
+        ...commonInput,
+        dryRun: false,
+        chatBinding: { chatId: chatId!, larkAppId: deps.larkAppId },
+      });
 
   if (result.ok) {
+    if (result.dryRun) {
+      return {
+        ok: true,
+        triggerId,
+        action: 'dry_run',
+        target: { kind: 'workflow', ...(chatId ? { chatId } : {}) },
+        message: `dry run: validated workflow "${workflowId}" with param "${EVENT_PARAM_NAME}" (${eventJson.length} bytes)`,
+      };
+    }
     return {
       ok: true,
       triggerId,
@@ -81,6 +88,17 @@ export async function triggerWorkflowFromEnvelope(
   }
 
   // Map workflow failure → stable trigger errorCode for the UI.
+  if (result.error === 'legacy_workflow_retired') {
+    return {
+      ok: false,
+      triggerId,
+      errorCode: 'legacy_workflow_retired',
+      error: result.message,
+      reason: result.reason,
+      ...(result.targetWorkflowId ? { targetWorkflowId: result.targetWorkflowId } : {}),
+      ...(result.targetRevisionId ? { targetRevisionId: result.targetRevisionId } : {}),
+    };
+  }
   const errorCode: TriggerResponse['errorCode'] =
     result.error === 'unknown_workflow' || result.error === 'invalid_params'
       ? 'bad_request'

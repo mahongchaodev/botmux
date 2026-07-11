@@ -107,6 +107,11 @@ export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
 /** Legacy v2 runtime kept under the migration namespace for one version. */
 export async function cmdTemplate(sub: string, rest: string[]): Promise<void> {
   switch (sub) {
+    case 'archive-runs': {
+      const { cmdWorkflowRunArchive } = await import('./workflow-run-archive.js');
+      await cmdWorkflowRunArchive(rest);
+      return;
+    }
     case 'migrate-v3': {
       const { cmdWorkflowMigration } = await import('./workflow-migration.js');
       await cmdWorkflowMigration(rest);
@@ -161,12 +166,12 @@ Saved Workflow:
   cancel <runId> [--reason <text>] [--bot <larkAppId>]
       持久化 v3 run 取消意图并由所属 daemon 中断活动节点
 
-v2 模板迁移期入口: botmux template <run|resume|cancel|ls|tail|validate|show>
+v2 迁移/归档入口: botmux template <migrate-v3|archive-runs|run|resume|cancel|ls|tail|validate|show>
 `);
 }
 
 function printTemplateHelp(): void {
-  console.log(`用法: botmux template <migrate-v3|run|resume|cancel|ls|tail|validate|show> [...]
+  console.log(`用法: botmux template <migrate-v3|archive-runs|run|resume|cancel|ls|tail|validate|show> [...]
 
 子命令:
   migrate-v3 [workflowId|path ...] [--all] [--json]
@@ -180,6 +185,11 @@ function printTemplateHelp(): void {
       基线被外部编辑推进时，可显式加 --supersede-pending 保留旧 allocation 审计后重立。
       迁移不会改写旧 workflow JSON；
       独立 ledger 进入 pending 后 v2 新 run 即 fail-closed，崩溃靠重跑本命令恢复。
+
+  archive-runs [--commit] [--verify <archiveId|path>] [--json]
+      默认只读扫描 v2 run 目录；--commit 创建私有、内容寻址的静态归档并立即校验；
+      --verify 在删除 v2 runtime 前同时复核归档字节、源目录和 ops projection。
+      可用 --runs-dir / --archive-dir 显式覆盖路径。归档含日志/参数等敏感审计数据。
 
   run <id> [--param key=value ...] [--param-json key=<json> ...] [--run-id <id>] [--bot-resolver echo]
       离线驱动 workflow（stub spawn）。事件 / 状态打到 stdout。
@@ -225,9 +235,14 @@ function printTemplateHelp(): void {
 async function cmdWorkflowRun(rest: string[]): Promise<void> {
   const id = positionals(rest)[0];
   if (!id) {
-    console.error('用法: botmux workflow run <id> [--param key=value ...] [--param-json key=<json> ...]');
+    console.error('用法: botmux template run <id> [--param key=value ...] [--param-json key=<json> ...]');
     process.exit(1);
   }
+  console.warn(
+    '⚠️  v2 template run 仅在迁移窗口保留；请先运行 `botmux template migrate-v3 ' +
+    `${id}` +
+    '`，迁移后改用 `/workflow run <Saved Workflow>`。',
+  );
   const runId = argValue(rest, '--run-id') ?? mintWorkflowRunId(id);
   const rawParams = collectRawParams(rest);
 

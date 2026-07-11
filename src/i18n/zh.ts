@@ -516,7 +516,7 @@ export const messages: Record<string, string> = {
   'help.pair': '/pair <配对码>      - 绑定团队平台网页登录配对码',
   'help.heading_workflow': '🧭 Workflow：',
   'help.workflow_run': '/workflow <目标>；/workflow run <名称> [key=value ...] - 即兴编排或运行 Saved Workflow',
-  'help.workflow_cancel': '/workflow save last [名称]；/workflow list|show；/workflow cancel <runId>；/template run|cancel - 固化/查看/取消，及 v2 迁移期入口',
+  'help.workflow_cancel': '/workflow save last [名称]；/workflow list|show|cancel；v2 旧 run 仅用 /template cancel，定义请执行 botmux template migrate-v3',
   'help.heading_role': '🎭 角色与能力：',
   'help.role_show': '/role              - 查看当前生效 Role',
   'help.role_set': '/role set <Markdown> - 设置本群 Role（覆盖团队级）',

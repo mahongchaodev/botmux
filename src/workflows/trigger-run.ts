@@ -18,13 +18,29 @@ import { replay } from './events/replay.js';
 import { getRunsDir } from './runs-dir.js';
 import type { WorkflowDefinition } from './definition.js';
 import type { WorkflowRuntimeContext, WorkerSpawnFn } from './runtime.js';
+import type { LegacyWorkflowRetirementReason } from '../services/trigger-types.js';
+import {
+  LegacyWorkflowChangedAfterMigrationError,
+  LegacyWorkflowIdentityConflictError,
+  LegacyWorkflowMigratedError,
+} from './migration/v2-ledger.js';
 
-export type TriggerInput = {
+type TriggerInputBase = {
   workflowId: string;
   rawParams: Record<string, RawParamInput>;
-  chatBinding: { chatId: string; larkAppId: string };
   initiator: string;
 };
+
+export type TriggerInput =
+  | (TriggerInputBase & {
+      /** Validate the real definition and parameters without minting a run. */
+      dryRun: true;
+      chatBinding?: never;
+    })
+  | (TriggerInputBase & {
+      dryRun?: false;
+      chatBinding: { chatId: string; larkAppId: string };
+    });
 
 export type TriggerDeps = {
   spawnSubagent: WorkerSpawnFn;
@@ -47,13 +63,23 @@ export type TriggerDeps = {
   makeEventLog?: (runId: string) => EventLog;
 };
 
-export type TriggerSuccess = {
+export type TriggerStartedSuccess = {
   ok: true;
+  dryRun: false;
   runId: string;
   workflowId: string;
   status: string;
   lastSeq: number;
 };
+
+export type TriggerValidatedSuccess = {
+  ok: true;
+  dryRun: true;
+  workflowId: string;
+  status: 'validated';
+};
+
+export type TriggerSuccess = TriggerStartedSuccess | TriggerValidatedSuccess;
 
 export type TriggerFailure =
   | {
@@ -71,9 +97,75 @@ export type TriggerFailure =
       ok: false;
       error: 'load_definition_failed' | 'internal_error';
       message: string;
+    }
+  | {
+      ok: false;
+      error: 'legacy_workflow_retired';
+      reason: LegacyWorkflowRetirementReason;
+      message: string;
+      targetWorkflowId?: string;
+      targetRevisionId?: string;
     };
 
 export type TriggerResult = TriggerSuccess | TriggerFailure;
+
+function classifyLegacyWorkflowRetirement(err: unknown): Extract<
+  TriggerFailure,
+  { error: 'legacy_workflow_retired' }
+> | undefined {
+  if (err instanceof LegacyWorkflowMigratedError) {
+    const message = err.revision.state === 'pending'
+      ? `Legacy workflow '${err.source.legacy.workflowId}' migration is incomplete; ` +
+        `re-run botmux template migrate-v3 to recover it. v2 execution stays disabled.`
+      : `Legacy workflow '${err.source.legacy.workflowId}' has migrated to Saved Workflow ` +
+        `${err.source.target.workflowId}@${err.revision.targetRevisionId}; run the Saved Workflow instead.`;
+    return {
+      ok: false,
+      error: 'legacy_workflow_retired',
+      reason: err.revision.state === 'pending' ? 'pending' : 'migrated',
+      message,
+      targetWorkflowId: err.source.target.workflowId,
+      targetRevisionId: err.revision.targetRevisionId,
+    };
+  }
+  if (err instanceof LegacyWorkflowChangedAfterMigrationError) {
+    return {
+      ok: false,
+      error: 'legacy_workflow_retired',
+      reason: 'changed_after_migration',
+      message:
+        `Legacy workflow '${err.source.legacy.workflowId}' changed after migration. ` +
+        'v2 execution stays disabled; re-run botmux template migrate-v3 to append a v3 revision.',
+      targetWorkflowId: err.source.target.workflowId,
+    };
+  }
+  if (err instanceof LegacyWorkflowIdentityConflictError) {
+    // A copied definition can match multiple independently migrated source
+    // paths. Only expose a target when the evidence identifies one uniquely;
+    // never guess which v3 definition the caller intended.
+    const exactMatches = err.matches.filter(
+      (source) => source.revisions[err.current.contentHash] !== undefined,
+    );
+    const targetWorkflowIds = new Set(err.matches.map((source) => source.target.workflowId));
+    const targetWorkflowId = targetWorkflowIds.size === 1
+      ? err.matches[0]?.target.workflowId
+      : undefined;
+    const targetRevisionId = exactMatches.length === 1
+      ? exactMatches[0]?.revisions[err.current.contentHash]?.targetRevisionId
+      : undefined;
+    return {
+      ok: false,
+      error: 'legacy_workflow_retired',
+      reason: 'identity_conflict',
+      message:
+        `Legacy workflow '${err.current.workflowId}' conflicts with existing migration evidence. ` +
+        'v2 execution stays disabled; explicitly migrate this asset or run its Saved Workflow target.',
+      ...(targetWorkflowId ? { targetWorkflowId } : {}),
+      ...(targetRevisionId ? { targetRevisionId } : {}),
+    };
+  }
+  return undefined;
+}
 
 export async function triggerWorkflowRun(
   input: TriggerInput,
@@ -84,6 +176,8 @@ export async function triggerWorkflowRun(
   try {
     def = await loadDef(input.workflowId);
   } catch (err) {
+    const retirement = classifyLegacyWorkflowRetirement(err);
+    if (retirement) return retirement;
     const message = err instanceof Error ? err.message : String(err);
     if (message.startsWith(`Workflow '${input.workflowId}' not found`)) {
       return { ok: false, error: 'unknown_workflow', message };
@@ -111,6 +205,15 @@ export async function triggerWorkflowRun(
     return { ok: false, error: 'internal_error', message };
   }
 
+  if (input.dryRun) {
+    return {
+      ok: true,
+      dryRun: true,
+      workflowId: def.workflowId,
+      status: 'validated',
+    };
+  }
+
   try {
     const runId = (deps.makeRunId ?? ((d) => mintWorkflowRunId(d.workflowId, Date.now())))(def);
     const log = deps.makeEventLog ? deps.makeEventLog(runId) : new EventLog(runId, getRunsDir());
@@ -136,6 +239,7 @@ export async function triggerWorkflowRun(
     const snapshot = replay(await log.readAll());
     return {
       ok: true,
+      dryRun: false,
       runId,
       workflowId: def.workflowId,
       status: snapshot.run.status,

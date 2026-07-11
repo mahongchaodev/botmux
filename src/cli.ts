@@ -4198,6 +4198,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   workflow retry|grant [...]           处理受阻节点 / loop
   template migrate-v3 [id|path ...] [--all] [--commit ...]
                                        v2 定义迁移：默认 dry-run，写入需显式 owner/app/scope
+  template archive-runs [--commit|--verify <archive>]
+                                       v2 历史 run 私有静态归档；默认 dry-run，删除执行面前须双关校验
   template <run|resume|cancel|ls|tail|validate|show> [...]
                                        v2 执行兼容面（仅保留迁移窗口）
   （完整参数见 \`botmux workflow help\` / \`botmux template help\`）
@@ -7412,7 +7414,7 @@ if (process.env.BOTMUX_WORKFLOW === '1') {
     'cancel',
   ]);
   const templateSub = command === 'template' ? (process.argv[3] ?? '') : '';
-  const blockedTemplateSub = new Set(['migrate-v3', 'run', 'resume', 'cancel']);
+  const blockedTemplateSub = new Set(['migrate-v3', 'archive-runs', 'run', 'resume', 'cancel']);
   const v3Sub = command === 'v3' ? (process.argv[3] ?? '') : '';
   const workflowMutation =
     (command === 'workflow' && blockedWorkflowSub.has(workflowSub)) ||

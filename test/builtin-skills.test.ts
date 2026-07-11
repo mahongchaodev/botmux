@@ -97,7 +97,9 @@ describe('built-in botmux-workflow-create skill', () => {
     expect(skill!.content).toContain('缺少必填参数：');
     expect(skill!.content).toContain('必须是 number');
     expect(skill!.content).toContain('必须是 boolean');
-    expect(skill!.content).toContain('暂不支持 object / array');
+    expect(skill!.content).toContain('历史启动语法（仅用于读懂存量资产');
+    expect(skill!.content).toContain('botmux template migrate-v3 <workflowId>');
+    expect(skill!.content).toContain('不要再建议 `/template run`');
     expect(skill!.content).toContain('object / array');
     expect(skill!.content).toContain('default');
   });

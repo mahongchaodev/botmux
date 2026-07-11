@@ -1124,6 +1124,8 @@ ipcRoute('POST', '/api/trigger', async (req, res) => {
           ? 404
         : result.errorCode === 'wait_timeout'
           ? 504
+        : result.errorCode === 'legacy_workflow_retired'
+          ? 409
         : result.errorCode === 'target_required' || result.errorCode === 'bad_request'
           ? 400
           : 500;

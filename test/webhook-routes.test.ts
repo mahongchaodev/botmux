@@ -41,10 +41,15 @@ function sign(secret: string, ts: string, raw: string): string {
   return createHmac('sha256', secret).update(ts).update('.').update(raw).digest('base64url');
 }
 
-async function postWebhook(connectorId: string, nonce: string, body: unknown): Promise<any> {
+async function postWebhook(
+  connectorId: string,
+  nonce: string,
+  body: unknown,
+  query = '',
+): Promise<any> {
   const raw = JSON.stringify(body);
   const ts = String(Math.floor(Date.now() / 1000));
-  const res = await fetch(`${baseUrl}/webhook/${encodeURIComponent(connectorId)}`, {
+  const res = await fetch(`${baseUrl}/webhook/${encodeURIComponent(connectorId)}${query}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -55,6 +60,45 @@ async function postWebhook(connectorId: string, nonce: string, body: unknown): P
     body: raw,
   });
   return { status: res.status, body: await res.json() };
+}
+
+async function seedWorkflowConnector(input: {
+  mode: 'fixed' | 'dynamic' | 'new-group';
+  dedup?: boolean;
+}): Promise<ConnectorDefinition> {
+  const { createWebhookSecret } = await import('../src/services/webhook-key.js');
+  const { upsertConnector } = await import('../src/services/connector-store.js');
+  const secret = createWebhookSecret('secret');
+  return upsertConnector({
+    id: `conn_workflow_${input.mode.replace('-', '_')}_${input.dedup ? 'dedup' : 'plain'}`,
+    name: 'Legacy workflow connector',
+    enabled: true,
+    verify: {
+      type: 'hmac-sha256',
+      secretRef: secret.ref,
+      signatureHeader: 'x-botmux-signature',
+      timestampHeader: 'x-botmux-timestamp',
+      nonceHeader: 'x-botmux-nonce',
+      toleranceSeconds: 300,
+    },
+    target: {
+      mode: input.mode,
+      kind: 'workflow',
+      botId: 'app1',
+      ...(input.mode === 'fixed' ? { chatId: 'oc_legacy' } : {}),
+      workflowId: 'weekly-report',
+    },
+    promptEnvelope: {
+      sourceName: 'legacy-workflow',
+      headerAllowlist: [],
+      includeRawText: false,
+      maxBodyBytes: 1024,
+    },
+    loggingPolicy: { storePayload: false, storeHeaders: false, retentionDays: 14 },
+    lifecycleExtractors: input.dedup ? { dedupKey: '$.alert.id' } : null,
+    createdAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  });
 }
 
 async function seedNewGroupConnector(): Promise<ConnectorDefinition> {
@@ -415,6 +459,156 @@ describe('webhook token mode', () => {
 });
 
 describe('webhook new-group lifecycle', () => {
+  it('rejects turn dry-run before lifecycle reservation or group creation', async () => {
+    const createLifecycleGroup = vi.fn(async () => ({ chatId: 'oc_should_not_exist', creatorLarkAppId: 'app1' }));
+    const proxyToDaemon = vi.fn();
+    await startWebhookServer({ createLifecycleGroup, proxyToDaemon });
+    await seedNoDedupConnector();
+
+    const res = await fetch(`${baseUrl}/webhook/conn_nodedup/tok_plain_value?dryRun=true`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"x":1}',
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, errorCode: 'bad_request' });
+    expect(createLifecycleGroup).not.toHaveBeenCalled();
+    expect(proxyToDaemon).not.toHaveBeenCalled();
+  });
+
+  it('preflights a workflow before lifecycle reservation and returns retirement failure unchanged', async () => {
+    const createLifecycleGroup = vi.fn(async () => ({ chatId: 'oc_should_not_exist', creatorLarkAppId: 'app1' }));
+    const captured: any[] = [];
+    const proxyToDaemon = vi.fn(async (_appId: string, path: string, init: RequestInit) => {
+      captured.push({ path, body: JSON.parse(String(init.body)) });
+      return {
+        status: 409,
+        text: async () => JSON.stringify({
+          ok: false,
+          triggerId: 'trg_retired',
+          errorCode: 'legacy_workflow_retired',
+          error: 'legacy definition is migrated',
+          reason: 'migrated',
+          targetWorkflowId: 'wf_target',
+          targetRevisionId: 'rev_target',
+        }),
+      };
+    }) as any;
+    await startWebhookServer({ createLifecycleGroup, proxyToDaemon });
+    const connector = await seedWorkflowConnector({ mode: 'new-group', dedup: true });
+
+    const result = await postWebhook(connector.id, 'nonce_wf_retired', {
+      alert: { id: 'cpu-high' },
+    });
+
+    expect(result.status).toBe(409);
+    expect(result.body).toEqual({
+      ok: false,
+      triggerId: 'trg_retired',
+      errorCode: 'legacy_workflow_retired',
+      error: 'legacy definition is migrated',
+      reason: 'migrated',
+      targetWorkflowId: 'wf_target',
+      targetRevisionId: 'rev_target',
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].path).toBe('/api/trigger');
+    expect(captured[0].body.target).toEqual({
+      kind: 'workflow',
+      botId: 'app1',
+      workflowId: 'weekly-report',
+    });
+    expect(captured[0].body.options).toMatchObject({ dryRun: true, dedupKey: 'cpu-high' });
+    expect(createLifecycleGroup).not.toHaveBeenCalled();
+    const { listWebhookLifecycleRecords } = await import('../src/services/webhook-lifecycle-store.js');
+    expect(listWebhookLifecycleRecords({ connectorId: connector.id }, dataDir)).toEqual([]);
+  });
+
+  it('creates a workflow lifecycle group only after a successful chatless dry-run preflight', async () => {
+    const createLifecycleGroup = vi.fn(async () => ({ chatId: 'oc_new_workflow', creatorLarkAppId: 'app1' }));
+    const captured: any[] = [];
+    const proxyToDaemon = vi.fn(async (_appId: string, _path: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      captured.push(body);
+      if (body.options?.dryRun) {
+        return {
+          status: 200,
+          text: async () => JSON.stringify({ ok: true, triggerId: 'trg_preflight', action: 'dry_run' }),
+        };
+      }
+      return {
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          triggerId: 'trg_actual',
+          action: 'delivered',
+          target: { kind: 'workflow', chatId: body.target.chatId, workflowRunId: 'run_1' },
+        }),
+      };
+    }) as any;
+    await startWebhookServer({ createLifecycleGroup, proxyToDaemon });
+    const connector = await seedWorkflowConnector({ mode: 'new-group', dedup: true });
+
+    const result = await postWebhook(connector.id, 'nonce_wf_ok', {
+      alert: { id: 'disk-high' },
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body.lifecycle).toMatchObject({
+      dedupKey: 'disk-high',
+      action: 'create',
+      chatId: 'oc_new_workflow',
+    });
+    expect(captured).toHaveLength(2);
+    expect(captured[0].target.chatId).toBeUndefined();
+    expect(captured[0].options).toMatchObject({ dryRun: true, dedupKey: 'disk-high' });
+    expect(captured[1].target).toMatchObject({
+      kind: 'workflow',
+      workflowId: 'weekly-report',
+      chatId: 'oc_new_workflow',
+    });
+    expect(captured[1].options?.dryRun).toBeUndefined();
+    expect(createLifecycleGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a successful externally-requested workflow dry run without creating a group', async () => {
+    const createLifecycleGroup = vi.fn(async () => ({ chatId: 'oc_should_not_exist', creatorLarkAppId: 'app1' }));
+    const captured: any[] = [];
+    const proxyToDaemon = vi.fn(async (_appId: string, _path: string, init: RequestInit) => {
+      captured.push(JSON.parse(String(init.body)));
+      return {
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          triggerId: 'trg_external_dry',
+          action: 'dry_run',
+          message: 'validated legacy workflow',
+        }),
+      };
+    }) as any;
+    await startWebhookServer({ createLifecycleGroup, proxyToDaemon });
+    const connector = await seedWorkflowConnector({ mode: 'new-group' });
+
+    const result = await postWebhook(
+      connector.id,
+      'nonce_wf_external_dry',
+      { hello: 'world' },
+      '?dryRun=true',
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({
+      ok: true,
+      triggerId: 'trg_external_dry',
+      action: 'dry_run',
+      message: 'validated legacy workflow',
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].target.chatId).toBeUndefined();
+    expect(captured[0].options).toMatchObject({ dryRun: true });
+    expect(createLifecycleGroup).not.toHaveBeenCalled();
+  });
+
   it('creates one lifecycle group and reuses it for duplicate firing events', async () => {
     const createLifecycleGroup = vi.fn(async () => ({ chatId: 'oc_new', creatorLarkAppId: 'app1' }));
     const proxyToDaemon = vi.fn(async (_appId: string, _path: string, init: RequestInit) => ({
@@ -467,5 +661,45 @@ describe('webhook new-group lifecycle', () => {
     expect(createLifecycleGroup).toHaveBeenCalledTimes(2);
     expect(proxyToDaemon).toHaveBeenCalledTimes(2);
     expect((await a.json()).lifecycle).toMatchObject({ action: 'create', chatId: 'oc_fresh' });
+  });
+});
+
+describe('legacy workflow connector retirement window', () => {
+  it('keeps fixed workflow connectors on the real trigger path so the daemon guard fails loud', async () => {
+    const captured: any[] = [];
+    const proxyToDaemon = vi.fn(async (_appId: string, path: string, init: RequestInit) => {
+      captured.push({ path, body: JSON.parse(String(init.body)) });
+      return {
+        status: 409,
+        text: async () => JSON.stringify({
+          ok: false,
+          triggerId: 'trg_fixed_retired',
+          errorCode: 'legacy_workflow_retired',
+          error: 'legacy definition is pending migration',
+          reason: 'pending',
+          targetWorkflowId: 'wf_target',
+        }),
+      };
+    }) as any;
+    await startWebhookServer({ proxyToDaemon });
+    const connector = await seedWorkflowConnector({ mode: 'fixed' });
+
+    const result = await postWebhook(connector.id, 'nonce_fixed_retired', { hello: 'world' });
+
+    expect(result.status).toBe(409);
+    expect(result.body).toMatchObject({
+      ok: false,
+      errorCode: 'legacy_workflow_retired',
+      reason: 'pending',
+      targetWorkflowId: 'wf_target',
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].path).toBe('/api/trigger');
+    expect(captured[0].body.target).toMatchObject({
+      kind: 'workflow',
+      workflowId: 'weekly-report',
+      chatId: 'oc_legacy',
+    });
+    expect(captured[0].body.options?.dryRun).toBeUndefined();
   });
 });
