@@ -727,19 +727,27 @@ export async function deliverWritableTerminalCardTo(
   return deliverWriteLinkCard(ds, operatorOpenId, cardJson);
 }
 
+export interface SubstituteControlCardDelivery {
+  sent: number;
+  total: number;
+}
+
 /**
  * DM a writable-terminal control card to the bot's owner(s) for a substitute-mode session.
  * Guards against duplicate sends via `session.substituteControlCardSent`.
  */
-export async function deliverSubstituteControlCard(ds: DaemonSession): Promise<void> {
-  if (ds.session.substituteControlCardSent) return;
+export async function deliverSubstituteControlCard(ds: DaemonSession): Promise<SubstituteControlCardDelivery> {
+  if (ds.session.substituteControlCardSent) return { sent: 0, total: 0 };
   const cardJson = buildWritableTerminalCard(ds);
-  if (!cardJson) return;
+  if (!cardJson) {
+    logger.warn(`[${tag(ds)}] substitute control card skipped: terminal not ready`);
+    return { sent: 0, total: 0 };
+  }
 
   const audience = resolvePrivateCardAudience(ds);
   if (audience.length === 0) {
     logger.debug(`[${tag(ds)}] substitute control card skipped: no owner audience`);
-    return;
+    return { sent: 0, total: 0 };
   }
 
   let sent = 0;
@@ -761,6 +769,8 @@ export async function deliverSubstituteControlCard(ds: DaemonSession): Promise<v
     sessionStore.updateSession(ds.session);
     logger.info(`[${tag(ds)}] substitute control card DM'd to ${sent}/${audience.length} owner(s)`);
   }
+
+  return { sent, total: audience.length };
 }
 
 /**
