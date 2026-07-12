@@ -28,6 +28,7 @@ export type BotSubstituteMode = {
   disclosure: 'prefix' | 'none';
   chats?: string[];
   replyMode?: 'thread' | 'quote';
+  disableControlCard?: boolean;
 };
 
 export type BotDefaultsRow = {
