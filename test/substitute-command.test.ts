@@ -85,7 +85,7 @@ vi.mock('../src/utils/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-import { handleSubstituteDirectCardAction, tryHandleSubstituteCommand } from '../src/im/lark/substitute-command.js';
+import { handleSubstituteDirectCardAction, tryHandleEchoCommand } from '../src/im/lark/substitute-command.js';
 
 const APP = 'app-x';
 const USER = 'ou_user';
@@ -114,7 +114,7 @@ function cardActions(card: any): any[] {
   return (card?.elements ?? []).flatMap((el: any) => el.actions ?? []);
 }
 
-describe('tryHandleSubstituteCommand', () => {
+describe('tryHandleEchoCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsBotMentioned.mockReturnValue(true);
@@ -137,52 +137,29 @@ describe('tryHandleSubstituteCommand', () => {
   });
 
   it('non-command messages are ignored', async () => {
-    expect(await tryHandleSubstituteCommand(APP, msg('hello'), USER)).toBe(false);
+    expect(await tryHandleEchoCommand(APP, msg('hello'), USER)).toBe(false);
   });
 
-  it('status reports current per-chat state', async () => {
-    expect(await tryHandleSubstituteCommand(APP, msg('/substitute'), USER)).toBe(true);
-    expect(lastReply()).toBe('cmd.substitute.status_on');
-
-    mockIsSubstituteEnabledForChat.mockReturnValue(false);
-    await tryHandleSubstituteCommand(APP, msg('/substitute status'), USER);
-    expect(lastReply()).toBe('cmd.substitute.status_off');
-  });
-
-  it('on/off requires canOperate and writes the per-chat toggle', async () => {
-    expect(await tryHandleSubstituteCommand(APP, msg('/substitute off'), USER)).toBe(true);
-    expect(mockSetSubstituteEnabledForChat).toHaveBeenCalledWith(APP, 'oc_group', false);
-    expect(lastReply()).toBe('cmd.substitute.updated_off');
-
-    await tryHandleSubstituteCommand(APP, msg('/substitute on'), USER);
-    expect(mockSetSubstituteEnabledForChat).toHaveBeenCalledWith(APP, 'oc_group', true);
-    expect(lastReply()).toBe('cmd.substitute.updated_on');
-  });
-
-  it('denies mutations for non-operators', async () => {
-    mockCanOperate.mockReturnValue(false);
-    await tryHandleSubstituteCommand(APP, msg('/substitute off'), USER);
+  it('/substitute text commands are no longer handled', async () => {
+    expect(await tryHandleEchoCommand(APP, msg('/substitute list', 'p2p'), USER)).toBe(false);
+    expect(await tryHandleEchoCommand(APP, msg('/substitute off'), USER)).toBe(false);
+    expect(mockReplyMessage).not.toHaveBeenCalled();
     expect(mockSetSubstituteEnabledForChat).not.toHaveBeenCalled();
-    expect(lastReply()).toBe('cmd.substitute.owner_only');
   });
 
-  it('only works in regular groups', async () => {
-    await tryHandleSubstituteCommand(APP, msg('/substitute off', 'p2p'), USER);
-    expect(lastReply()).toBe('cmd.substitute.unsupported');
-
-    mockGetChatMode.mockResolvedValue('topic');
-    await tryHandleSubstituteCommand(APP, msg('/substitute off'), USER);
-    expect(lastReply()).toBe('cmd.substitute.unsupported');
+  it('/echo is the only text command and does not accept subcommands', async () => {
+    expect(await tryHandleEchoCommand(APP, msg('/echo list', 'p2p'), USER)).toBe(true);
+    expect(lastReply()).toBe('cmd.echo.usage');
   });
 
   it('DM list shows substitute groups', async () => {
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
     expect(lastReply()).toContain('cmd.substitute.direct_list_header');
     expect(lastReply()).toContain('oc_group');
   });
 
   it('DM list uses a compact manage button per group', async () => {
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
     let manageActions = cardActions(lastReplyCard())
       .filter((a: any) => a.value?.action === 'substitute_direct_manage');
     expect(manageActions).toHaveLength(1);
@@ -190,7 +167,7 @@ describe('tryHandleSubstituteCommand', () => {
     expect(manageActions[0].value.chat_id).toBe('oc_group');
 
     mockIsSubstituteEnabledForChat.mockReturnValue(false);
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
     expect(lastReply()).toContain('cmd.substitute.direct_substitute_off');
     manageActions = cardActions(lastReplyCard())
       .filter((a: any) => a.value?.action === 'substitute_direct_manage');
@@ -226,7 +203,13 @@ describe('tryHandleSubstituteCommand', () => {
       'substitute_direct_leave_group',
     ]);
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
     result = await handleSubstituteDirectCardAction({
       larkAppId: APP,
       operatorOpenId: USER,
@@ -253,7 +236,7 @@ describe('tryHandleSubstituteCommand', () => {
       chatMode: 'group',
     })));
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
 
     const card = lastReplyCard();
     expect(cardActions(card).filter((a: any) => a.value?.action === 'substitute_direct_manage')).toHaveLength(5);
@@ -266,7 +249,7 @@ describe('tryHandleSubstituteCommand', () => {
   it('DM list does not require the sender to already be a substitute target', async () => {
     mockGetBot.mockReturnValue({ config: { substituteMode: { enabled: true, targets: [], disclosure: 'prefix' } } });
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
 
     expect(lastReply()).toContain('cmd.substitute.direct_list_header');
     expect(lastReply()).toContain('oc_group');
@@ -276,7 +259,7 @@ describe('tryHandleSubstituteCommand', () => {
     mockCanOperate.mockReturnValue(false);
     mockGetBot.mockReturnValue({ config: { substituteMode: { enabled: true, targets: [], disclosure: 'prefix' } } });
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
 
     expect(lastReply()).toBe('cmd.substitute.direct_forbidden');
   });
@@ -291,7 +274,7 @@ describe('tryHandleSubstituteCommand', () => {
       },
     });
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
 
     expect(lastReply()).toBe('cmd.substitute.direct_forbidden');
   });
@@ -303,53 +286,101 @@ describe('tryHandleSubstituteCommand', () => {
     ]);
     mockGetChatMode.mockImplementation(async (_app, chatId) => chatId === 'oc_topic' ? 'topic' : 'group');
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
 
     expect(lastReply()).toContain('oc_group');
     expect(lastReply()).not.toContain('oc_topic');
   });
 
-  it('DM enter/exit toggles direct mode for a group', async () => {
-    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
-    expect(lastReply()).toBe('cmd.substitute.direct_enter_ok');
+  it('card actions enter/exit direct mode for a group', async () => {
+    let result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+    expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_enter_ok' });
     expect(mockDirect.get(USER)?.chats?.oc_group).toBeTruthy();
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute exit oc_group', 'p2p'), USER);
-    expect(lastReply()).toBe('cmd.substitute.direct_exit_ok');
+    result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_exit',
+      chatId: 'oc_group',
+    });
+    expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_exit_ok' });
     expect(mockDirect.get(USER)?.chats?.oc_group).toBeFalsy();
   });
 
-  it('DM enter keeps only one active substitute group', async () => {
+  it('card enter keeps only one active substitute group', async () => {
     mockListChats.mockResolvedValue([
       { chatId: 'oc_group', name: 'Group', chatMode: 'group' },
       { chatId: 'oc_group_2', name: 'Group 2', chatMode: 'group' },
     ]);
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
     expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['oc_group']);
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group_2', 'p2p'), USER);
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group_2',
+    });
     expect(mockDirect.get(USER)?.activeChatId).toBe('oc_group_2');
     expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['oc_group_2']);
     expect(mockDirect.get(USER)?.chats?.oc_group_2?.mode).toBe('direct');
   });
 
   it('DM leave-group makes the bot leave the selected group and removes direct state', async () => {
-    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
-    await tryHandleSubstituteCommand(APP, msg('/substitute leave-group oc_group', 'p2p'), USER);
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+    const result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_leave_group',
+      chatId: 'oc_group',
+    });
     expect(mockLeaveChat).toHaveBeenCalledWith(APP, 'oc_group');
-    expect(lastReply()).toBe('cmd.substitute.direct_leave_group_ok');
+    expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_leave_group_ok' });
     expect(mockDirect.get(USER)?.chats?.oc_group).toBeFalsy();
   });
 
   it('DM leave-group requires operator permission', async () => {
-    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
     mockCanOperate.mockReturnValue(false);
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute leave-group oc_group', 'p2p'), USER);
+    const result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_leave_group',
+      chatId: 'oc_group',
+    });
 
     expect(mockLeaveChat).not.toHaveBeenCalled();
-    expect(lastReply()).toBe('cmd.substitute.owner_only');
+    expect(result.toast).toEqual({ type: 'error', content: 'cmd.substitute.owner_only' });
   });
 
   it('card action enter updates direct mode and returns an updated card', async () => {
@@ -377,7 +408,13 @@ describe('tryHandleSubstituteCommand', () => {
       },
     });
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
 
     expect(mockDirect.get('ou_sub')).toBeUndefined();
     expect(mockDirect.get(USER)).toMatchObject({

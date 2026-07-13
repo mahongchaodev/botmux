@@ -36,7 +36,7 @@ import {
 import { type Brand, larkHosts, normalizeBrand, sdkDomain } from './lark-hosts.js';
 import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
-import { tryHandleSubstituteCommand } from './substitute-command.js';
+import { tryHandleEchoCommand } from './substitute-command.js';
 import { forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
 import { getSubstituteDirectChat, getSubstituteDirectChatByTarget } from '../../services/substitute-direct-store.js';
 import { buildGrantCard } from './card-builder.js';
@@ -2038,7 +2038,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           return;
         }
 
-        if (await tryHandleSubstituteCommand(larkAppId, message, senderOpenId)) {
+        if (await tryHandleEchoCommand(larkAppId, message, senderOpenId)) {
           return;
         }
 

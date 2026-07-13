@@ -1,11 +1,10 @@
-import { canOperate, canTalk, extractMessageTextForRouting, isBotMentioned } from './event-dispatcher.js';
+import { canOperate, extractMessageTextForRouting } from './event-dispatcher.js';
 import { stripLeadingMentions } from './message-parser.js';
 import { getChatMode, replyMessage } from './client.js';
 import { isSubstituteEnabledForChat, setSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
 import {
   clearSubstituteDirectChat,
   getSubstituteDirectBinding,
-  getSubstituteDirectChat,
   upsertSubstituteDirectChat,
 } from '../../services/substitute-direct-store.js';
 import { getBot } from '../../bot-registry.js';
@@ -93,22 +92,6 @@ async function listSubstituteDirectChats(larkAppId: string, openId: string | und
     });
   }
   return rows;
-}
-
-function renderDirectChatList(rows: DirectChatRow[], loc: any): string {
-  if (rows.length === 0) return t('cmd.substitute.direct_list_empty', undefined, loc);
-  return [
-    t('cmd.substitute.direct_list_header', undefined, loc),
-    ...rows.map((r, idx) => {
-      const state = r.enabled
-        ? (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
-        : t('cmd.substitute.direct_state_off', undefined, loc);
-      const sub = r.substituteEnabled ? t('cmd.substitute.direct_substitute_on', undefined, loc) : t('cmd.substitute.direct_substitute_off', undefined, loc);
-      return `${idx + 1}. ${r.name || r.chatId} (${r.chatId}) - ${state} / ${sub}`;
-    }),
-    '',
-    t('cmd.substitute.direct_list_usage', undefined, loc),
-  ].join('\n');
 }
 
 function directChatStateText(r: DirectChatRow, loc: any): string {
@@ -405,7 +388,7 @@ export async function handleSubstituteDirectCardAction(input: {
   };
 }
 
-export async function tryHandleSubstituteCommand(
+export async function tryHandleEchoCommand(
   larkAppId: string,
   message: any,
   senderOpenId: string | undefined,
@@ -413,95 +396,29 @@ export async function tryHandleSubstituteCommand(
   const rawText = extractMessageTextForRouting(message);
   if (!rawText) return false;
   const text = stripLeadingMentions(rawText.trim(), message?.mentions ?? []);
-  const match = /^\/substitute(?:\s+(.+))?\s*$/i.exec(text);
+  const match = /^\/echo(?:\s+(.+))?\s*$/i.exec(text);
   if (!match) return false;
 
   const isP2p = message.chat_type === 'p2p';
-  if (!isP2p && !isBotMentioned(larkAppId, message, senderOpenId)) return true;
-
-  const chatId: string | undefined = message.chat_id;
   const messageId: string | undefined = message.message_id;
   const loc = localeForBot(larkAppId);
   const reply = (content: string) => messageId
     ? replyMessage(larkAppId, messageId, content, 'text', false)
-        .catch(err => logger.warn(`[substitute] reply failed: ${err?.message ?? err}`))
+        .catch(err => logger.warn(`[echo] reply failed: ${err?.message ?? err}`))
     : Promise.resolve();
 
-  const argLine = match[1]?.trim() ?? 'status';
-  const parts = argLine.split(/\s+/);
-  const arg = parts[0]?.toLowerCase() ?? 'status';
-
-  if (isP2p) {
-    if (arg === 'list' || arg === 'status' || arg === '列表') {
-      if (!senderOpenId) return true;
-      if (!canUseDirectControls(larkAppId, senderOpenId)) {
-        await reply(t('cmd.substitute.direct_forbidden', undefined, loc));
-        return true;
-      }
-      await (messageId
-        ? replyMessage(larkAppId, messageId, buildDirectChatCard(larkAppId, await listSubstituteDirectChats(larkAppId, senderOpenId), senderOpenId, loc), 'interactive', false)
-            .catch(err => logger.warn(`[substitute] reply failed: ${err?.message ?? err}`))
-        : Promise.resolve());
-      return true;
-    }
-    if (arg === 'enter' || arg === 'join' || arg === '进入') {
-      const targetChatId = parts[1];
-      const result = await applyDirectAction(larkAppId, senderOpenId, targetChatId, 'substitute_direct_enter', loc);
-      await reply(result.message);
-      return true;
-    }
-    if (arg === 'exit' || arg === 'leave' || arg === '退出') {
-      const targetChatId = parts[1];
-      const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, senderOpenId);
-      const binding = getSubstituteDirectBinding(larkAppId, bindingOpenId);
-      const active = !targetChatId && binding?.activeChatId ? binding.chats[binding.activeChatId] : undefined;
-      if (targetChatId === 'all' || targetChatId === '全部') {
-        const existed = clearSubstituteDirectChat(larkAppId, bindingOpenId);
-        await reply(existed ? t('cmd.substitute.direct_exit_ok', { chat: t('cmd.substitute.direct_all', undefined, loc) }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc));
-        return true;
-      }
-      const result = targetChatId
-        ? await applyDirectAction(larkAppId, senderOpenId, targetChatId, 'substitute_direct_exit', loc)
-        : {
-            ok: clearSubstituteDirectChat(larkAppId, bindingOpenId, binding?.activeChatId),
-            message: active ? t('cmd.substitute.direct_exit_ok', { chat: active.chatName ?? active.chatId }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc),
-          };
-      await reply(result.message);
-      return true;
-    }
-    if (arg === 'leave-group' || arg === 'quit-group' || arg === '退群') {
-      const targetChatId = parts[1];
-      const result = await applyDirectAction(larkAppId, senderOpenId, targetChatId, 'substitute_direct_leave_group', loc);
-      await reply(result.message);
-      return true;
-    }
-    await reply(t('cmd.substitute.unsupported', undefined, loc));
+  if (!isP2p || match[1]?.trim()) {
+    await reply(t('cmd.echo.usage', undefined, loc));
     return true;
   }
-
-  if (!chatId || (await getChatMode(larkAppId, chatId)) !== 'group') {
-    await reply(t('cmd.substitute.unsupported', undefined, loc));
+  if (!senderOpenId) return true;
+  if (!canUseDirectControls(larkAppId, senderOpenId)) {
+    await reply(t('cmd.substitute.direct_forbidden', undefined, loc));
     return true;
   }
-
-  if (!arg || arg === 'status') {
-    if (!canTalk(larkAppId, chatId, senderOpenId) && !isBotMentioned(larkAppId, message, senderOpenId)) return true;
-    const enabled = isSubstituteEnabledForChat(larkAppId, chatId);
-    await reply(t(enabled ? 'cmd.substitute.status_on' : 'cmd.substitute.status_off', undefined, loc));
-    return true;
-  }
-
-  const enable = arg === 'on' || arg === 'enable' || arg === '开启' || arg === '开';
-  const disable = arg === 'off' || arg === 'disable' || arg === '关闭' || arg === '关';
-  if (!enable && !disable) {
-    await reply(t('cmd.substitute.usage', undefined, loc));
-    return true;
-  }
-  if (!canOperate(larkAppId, chatId, senderOpenId)) {
-    await reply(t('cmd.substitute.owner_only', undefined, loc));
-    return true;
-  }
-  setSubstituteEnabledForChat(larkAppId, chatId, enable);
-  await reply(t(enable ? 'cmd.substitute.updated_on' : 'cmd.substitute.updated_off', undefined, loc));
+  await (messageId
+    ? replyMessage(larkAppId, messageId, buildDirectChatCard(larkAppId, await listSubstituteDirectChats(larkAppId, senderOpenId), senderOpenId, loc), 'interactive', false)
+        .catch(err => logger.warn(`[echo] reply failed: ${err?.message ?? err}`))
+    : Promise.resolve());
   return true;
 }
