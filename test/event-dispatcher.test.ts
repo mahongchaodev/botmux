@@ -2406,6 +2406,47 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  it('substituteMode direct: DM reply renders mentioned group members as real at tags', async () => {
+    setupBotState({
+      allowedUsers: ['ou_owner_only'],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: 'ou_sub',
+      content: JSON.stringify({ text: '@_user_1 请看' }),
+      messageId: 'msg-substitute-dm-mention',
+      chatId: 'dm-chat',
+      chatType: 'p2p',
+      mentions: [{ key: '@_user_1', name: 'Alice', id: { open_id: 'ou_alice' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendMessage.mock.calls[0][2]).toContain('<at id=ou_alice></at> 请看');
+    expect(mockSendMessage.mock.calls[0][2]).not.toContain('@_user_1');
+  });
+
   it('substituteMode direct: quoted DM reply quotes the original group message', async () => {
     setupBotState({
       allowedUsers: ['ou_owner_only'],

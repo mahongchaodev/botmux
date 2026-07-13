@@ -10,18 +10,18 @@ import {
 import { getBot, resolveBrandLabel } from '../../bot-registry.js';
 import { getChatName, getMessageDetail, MessageWithdrawnError, replyMessage, sendMessage, sendUserMessage } from './client.js';
 import { resolveName } from './identity-cache.js';
-import { stripLeadingMentions } from './message-parser.js';
+import { mentionOpenId, stripLeadingMentions } from './message-parser.js';
 import { buildMarkdownCard } from './md-card.js';
 import { t, localeForBot } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
 
 const ORIGINAL_GROUP_MESSAGE_ID_RE = /\[原群消息:\s*([^\]\s]+)\]/;
 
-function textFromMessage(message: any): string | null {
+function textFromMessage(message: any, opts?: { renderAt?: boolean }): string | null {
   if (!message?.content) return null;
   try {
     const obj = JSON.parse(message.content);
-    if (typeof obj?.text === 'string') return obj.text;
+    if (typeof obj?.text === 'string') return opts?.renderAt ? renderMentionKeys(obj.text, message?.mentions) : obj.text;
     const inner = obj?.zh_cn ?? obj?.en_us ?? obj;
     if (Array.isArray(inner?.content)) {
       const parts: string[] = [];
@@ -29,13 +29,29 @@ function textFromMessage(message: any): string | null {
         if (!Array.isArray(para)) continue;
         for (const node of para) {
           if (node?.tag === 'text' && typeof node.text === 'string') parts.push(node.text);
-          else if (node?.tag === 'at' && typeof node.user_name === 'string') parts.push(`@${node.user_name}`);
+          else if (node?.tag === 'at' && typeof node.user_name === 'string') {
+            const openId = typeof node.user_id === 'string' ? node.user_id : undefined;
+            parts.push(opts?.renderAt && openId ? `<at id=${openId}></at>` : `@${node.user_name}`);
+          }
         }
       }
       return parts.join('').trim() || null;
     }
   } catch { /* ignore malformed content */ }
   return null;
+}
+
+function renderMentionKeys(text: string, mentions: any[] | undefined): string {
+  if (!mentions?.length) return text;
+  let out = text;
+  const sorted = [...mentions].sort((a, b) => String(b?.key ?? '').length - String(a?.key ?? '').length);
+  for (const mention of sorted) {
+    if (!mention?.key) continue;
+    const openId = mentionOpenId(mention);
+    if (!openId) continue;
+    out = out.split(mention.key).join(`<at id=${openId}></at>`);
+  }
+  return out;
 }
 
 export async function forwardSubstituteGroupMessageToDm(input: {
@@ -50,7 +66,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   const existing = input.direct?.chat ?? getSubstituteDirectChat(input.larkAppId, targetOpenId, input.chatId);
   if (!existing || existing.mode !== 'direct') return false;
   const loc = localeForBot(input.larkAppId);
-  const body = textFromMessage(input.message);
+  const body = textFromMessage(input.message, { renderAt: true });
   if (!body) return true;
   const chatName = await getChatName(input.larkAppId, input.chatId).catch(() => null);
   upsertSubstituteDirectChat({
@@ -103,8 +119,9 @@ export async function forwardSubstituteDmMessageToGroup(input: {
   const chat = getActiveSubstituteDirectChat(input.larkAppId, input.senderOpenId);
   if (!chat) return false;
   const loc = localeForBot(input.larkAppId);
-  const body = textFromMessage(input.message);
-  const stripped = body ? stripLeadingMentions(body.trim(), input.message?.mentions ?? []).trim() : '';
+  const rawBody = textFromMessage(input.message);
+  const body = textFromMessage(input.message, { renderAt: true });
+  const stripped = rawBody ? stripLeadingMentions(rawBody.trim(), input.message?.mentions ?? []).trim() : '';
   if (stripped.startsWith('/')) return false;
   if (!body) {
     await replyMessage(input.larkAppId, input.message.message_id, t('substitute.direct.unsupported_dm', undefined, loc), 'text', false)
