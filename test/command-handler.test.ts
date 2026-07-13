@@ -209,7 +209,12 @@ vi.mock('../src/im/lark/card-builder.js', () => ({
 }));
 
 vi.mock('../src/im/lark/client.js', () => ({
-  UserTokenMissingError: class UserTokenMissingError extends Error {},
+  UserTokenMissingError: class UserTokenMissingError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'UserTokenMissingError';
+    }
+  },
   deleteMessage: vi.fn(),
   sendMessage: vi.fn(async () => 'card-msg-id'),
   listChatBotMembers: vi.fn(async () => []),
@@ -331,12 +336,25 @@ vi.mock('../src/utils/user-token.js', () => ({
   DOC_COMMENT_OAUTH_SCOPES: ['docs:document.comment:read'],
 }));
 
-vi.mock('../src/im/lark/doc-comment.js', () => ({
-  resolveDocFile: vi.fn(async () => ({ fileToken: 'doc_token_12345678901234567890', fileType: 'docx' })),
-  listDocComments: vi.fn(async () => []),
-  subscribeDocFile: vi.fn(async () => {}),
-  unsubscribeDocFile: vi.fn(async () => {}),
-}));
+vi.mock('../src/im/lark/doc-comment.js', () => {
+  class DocSubscriptionPermissionError extends Error {
+    readonly larkCode = 1069603;
+    constructor(readonly details: { source: 'user' | 'tenant' | 'both' | 'unknown' }) {
+      super(`订阅文档被飞书拒绝（source: ${details.source}）。`);
+      this.name = 'DocSubscriptionPermissionError';
+    }
+    get source() {
+      return this.details.source;
+    }
+  }
+  return {
+    DocSubscriptionPermissionError,
+    resolveDocFile: vi.fn(async () => ({ fileToken: 'doc_token_12345678901234567890', fileType: 'docx' })),
+    listDocComments: vi.fn(async () => []),
+    subscribeDocFile: vi.fn(async () => {}),
+    unsubscribeDocFile: vi.fn(async () => {}),
+  };
+});
 
 vi.mock('../src/services/doc-subs-store.js', () => ({
   putDocSubscription: vi.fn(() => ({})),
@@ -420,12 +438,12 @@ import { getSessionWorkingDir, buildNewTopicPrompt, buildNewTopicCliInput, ensur
 import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
-import { deleteMessage, sendMessage, listChatBotMembers } from '../src/im/lark/client.js';
+import { deleteMessage, sendMessage, listChatBotMembers, UserTokenMissingError } from '../src/im/lark/client.js';
 import { buildSlashListCard, buildSessionClosedCard } from '../src/im/lark/card-builder.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
 import { getAllBots, getBot, findOncallChat, effectiveDefaultWorkingDir } from '../src/bot-registry.js';
 import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES } from '../src/utils/user-token.js';
-import { resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../src/im/lark/doc-comment.js';
+import { DocSubscriptionPermissionError, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../src/im/lark/doc-comment.js';
 import { putDocSubscription, removeDocSubscription, listAllDocSubscriptions, getDocSubscription } from '../src/services/doc-subs-store.js';
 import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -969,6 +987,60 @@ describe('handleCommand', () => {
         expect.any(String),
         LARK_APP_ID,
         expect.objectContaining({ managedBy: 'subscribe-lark-doc' }),
+      );
+    });
+
+    it.each([
+      ['user', '当前用户身份'],
+      ['tenant', '机器人应用身份'],
+      ['both', '当前用户身份和机器人应用身份'],
+      ['unknown', '调用身份'],
+    ] as const)(
+      '/subscribe-lark-doc reports the actual 1069603 identity source: %s',
+      async (source, expectedIdentity) => {
+        vi.mocked(resolveUserToken).mockResolvedValue('uat-doc');
+        vi.mocked(subscribeDocFile).mockRejectedValueOnce(
+          new DocSubscriptionPermissionError({ source }),
+        );
+        const deps = makeDeps(makeDaemonSession());
+
+        await handleCommand(
+          '/subscribe-lark-doc',
+          ROOT_ID,
+          makeLarkMessage('/subscribe-lark-doc https://example.feishu.cn/docx/AbCdEf12345678901234'),
+          deps,
+          LARK_APP_ID,
+        );
+
+        const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+        expect(replyContent).toContain(expectedIdentity);
+        expect(replyContent).toContain('文档访问记录功能');
+        expect(replyContent).toContain('1069603');
+        expect(generateAuthUrl).not.toHaveBeenCalled();
+      },
+    );
+
+    it('/subscribe-lark-doc still prompts document OAuth for a runtime-expired user token', async () => {
+      vi.mocked(resolveUserToken).mockResolvedValue('uat-doc');
+      vi.mocked(subscribeDocFile).mockRejectedValueOnce(new UserTokenMissingError('User Token 已失效'));
+      const deps = makeDeps(makeDaemonSession());
+
+      await handleCommand(
+        '/subscribe-lark-doc',
+        ROOT_ID,
+        makeLarkMessage('/subscribe-lark-doc https://example.feishu.cn/docx/AbCdEf12345678901234'),
+        deps,
+        LARK_APP_ID,
+      );
+
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('文档权限');
+      expect(replyContent).toContain('https://open.feishu.cn/auth/v1/test');
+      expect(generateAuthUrl).toHaveBeenCalledWith(
+        LARK_APP_ID,
+        'secret-1',
+        'feishu',
+        DOC_COMMENT_OAUTH_SCOPES,
       );
     });
 
