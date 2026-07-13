@@ -67,7 +67,6 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   if (!existing || existing.mode !== 'direct') return false;
   const loc = localeForBot(input.larkAppId);
   const body = textFromMessage(input.message, { renderAt: true });
-  if (!body) return true;
   const chatName = await getChatName(input.larkAppId, input.chatId).catch(() => null);
   upsertSubstituteDirectChat({
     larkAppId: input.larkAppId,
@@ -82,10 +81,16 @@ export async function forwardSubstituteGroupMessageToDm(input: {
     disclosure: input.trigger.disclosure,
     lastGroupMessageId: input.message?.message_id,
   });
+  const forwardedContent = body
+    ? `${body}\n\n[原群消息: ${input.message?.message_id ?? ''}]`
+    : t('substitute.direct.dm_non_text', {
+        messageType: input.message?.message_type ?? input.message?.msg_type ?? t('substitute.direct.non_text_fallback', undefined, loc),
+        messageId: input.message?.message_id ?? '',
+      }, loc);
   const content = t('substitute.direct.dm', {
     chat: chatName ?? input.chatId,
     target: input.trigger.target.name ?? targetOpenId,
-    content: `${body}\n\n[原群消息: ${input.message?.message_id ?? ''}]`,
+    content: forwardedContent,
   }, loc);
   await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
   logger.info(`[substitute-direct:${input.larkAppId}] group ${input.chatId.substring(0, 12)} → DM ${targetOpenId.substring(0, 12)}`);

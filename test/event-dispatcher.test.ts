@@ -2105,6 +2105,58 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
   });
 
+  it('substituteMode direct: @substitute with a non-text group message notifies the substitute DM', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatName.mockResolvedValue('Ops Group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ image_key: 'img_x' }),
+      messageId: 'msg-substitute-direct-image',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+    event.message.message_type = 'image';
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendUserMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'ou_sub',
+      expect.stringContaining('对方发了一条非文本消息'),
+      'text',
+    );
+    expect(mockSendUserMessage.mock.calls[0][2]).toContain('image');
+    expect(mockSendUserMessage.mock.calls[0][2]).toContain('[原群消息: msg-substitute-direct-image]');
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
   it('substituteMode direct: binding matches a substitute mention by userId', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],
