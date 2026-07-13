@@ -721,7 +721,15 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   }
 
   if (isSubstituteDirectAction(value?.action) && larkAppId) {
-    const rawPage = value!.page ?? (data.action as { option?: string } | undefined)?.option;
+    const option = (data.action as { option?: unknown } | undefined)?.option;
+    const optionPage = typeof option === 'string'
+      ? option
+      : option && typeof option === 'object' && 'value' in option && typeof (option as { value?: unknown }).value === 'string'
+        ? (option as { value: string }).value
+        : undefined;
+    const rawPage = value!.action === 'substitute_direct_page'
+      ? (optionPage ?? value!.page)
+      : (value!.page ?? optionPage);
     const page = Number.parseInt(String(rawPage ?? '1'), 10);
     return handleSubstituteDirectCardAction({
       larkAppId,
