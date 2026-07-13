@@ -2089,33 +2089,6 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           && isSubstituteEnabledForChat(larkAppId, chatId)
           ? resolveSubstituteTrigger(larkAppId, message)
           : undefined;
-        if (!substituteTrigger && getBot(larkAppId).config.substituteMode?.enabled === true
-            && chatType === 'group'
-            && await getChatMode(larkAppId, chatId) === 'group'
-            && isSubstituteEnabledForChat(larkAppId, chatId)) {
-          const targets = getBot(larkAppId).config.substituteMode?.targets ?? [];
-          for (const mention of extractMentionIdentities(message)) {
-            const target = targets.find(t => substituteTargetMatchesMention(t, mention));
-            if (!target) continue;
-            const direct = getSubstituteDirectChatByTarget(larkAppId, {
-              openId: target.openId ?? mention.openId,
-              userId: target.userId ?? mention.userId,
-              unionId: target.unionId ?? mention.unionId,
-              name: target.name ?? mention.name,
-            }, chatId);
-            if (!direct) continue;
-            substituteTrigger = {
-              target: {
-                name: direct.chat.targetName ?? target.name ?? mention.name,
-                openId: direct.substituteOpenId,
-                userId: target.userId ?? mention.userId,
-                unionId: target.unionId ?? mention.unionId,
-              },
-              disclosure: direct.chat.disclosure ?? 'prefix',
-            };
-            break;
-          }
-        }
         if (substituteTrigger && !explicitlyMentionedThisBot) {
           const rawText = extractMessageTextForRouting(message);
           const stripped = rawText ? stripLeadingMentions(rawText.trim(), message?.mentions ?? []).trim() : '';
