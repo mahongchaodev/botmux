@@ -2,11 +2,13 @@
 //
 // The web terminal grants write access one of two ways:
 //
-//  1. Platform-injected role — when a central platform fronts `/s`, it
+//  1. Private write-link token — the `?token=<workerToken>` query param. An
+//     explicitly issued write link is an independent capability and wins
+//     outright, including for a viewer the platform sees as guest/teammate.
+//
+//  2. Platform-injected role — when a central platform fronts `/s`, it
 //     authenticates the viewer and injects `X-Botmux-Role` (owner | teammate |
 //     guest), first stripping any client-supplied copy. Only `owner` may write.
-//
-//  2. Legacy write token — the `?token=<workerToken>` query param.
 //
 // The role header is trustworthy ONLY on a request that actually came through
 // the platform's authenticated reverse proxy. The dashboard `/s` bridge and the
@@ -41,11 +43,16 @@ export interface TerminalWriteInput {
 export function resolveTerminalWrite(
   { role, tokenMatches, platformBound, platformProxied }: TerminalWriteInput,
 ): { hasWrite: boolean; platformReadonly: boolean } {
+  // A matching private write-link token is an independent capability: the owner
+  // explicitly issued that link, so it grants write even for a viewer the
+  // platform authenticated as guest/teammate. Without it, a verified platform
+  // role decides; a role header outside the verified-proxy path is ignored.
+  if (tokenMatches) return { hasWrite: true, platformReadonly: false };
   if (platformBound && platformProxied && typeof role === 'string' && role) {
     const hasWrite = role === 'owner';
     return { hasWrite, platformReadonly: !hasWrite };
   }
-  return { hasWrite: tokenMatches, platformReadonly: false };
+  return { hasWrite: false, platformReadonly: false };
 }
 
 /** Constant-time equality (avoids leaking the dashboard token through compare timing). */
