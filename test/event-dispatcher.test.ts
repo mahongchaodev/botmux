@@ -2214,7 +2214,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
-  it('substituteMode direct: binding falls back to target name when mention ids do not match', async () => {
+  it('substituteMode: same display name with mismatched ids does not trigger substitute mode', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],
       substituteMode: {
@@ -2241,6 +2241,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       updatedAt: Date.now(),
     });
     mockGetChatMode.mockResolvedValue('group');
+    mockGetChatInfo.mockResolvedValue({ userCount: 2, botCount: 1 });
     const event = makeUserMessageEvent({
       senderOpenId: USER_OPEN_ID,
       content: JSON.stringify({ text: '@Sub Person help with this' }),
@@ -2253,12 +2254,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     await capturedHandlers['im.message.receive_v1'](event);
     await flushEventWork();
 
-    expect(mockSendUserMessage).toHaveBeenCalledWith(
-      MY_APP_ID,
-      'ou_owner',
-      expect.stringContaining('@Sub Person help with this'),
-      'text',
-    );
+    expect(mockSendUserMessage).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });

@@ -965,8 +965,7 @@ function substituteTargetMatchesMention(target: {
   return Boolean(
     (target.openId && mention.openId === target.openId) ||
     (target.userId && mention.userId === target.userId) ||
-    (target.unionId && mention.unionId === target.unionId) ||
-    ((target as { name?: string }).name && mention.name === (target as { name?: string }).name),
+    (target.unionId && mention.unionId === target.unionId),
   );
 }
 
