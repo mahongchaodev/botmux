@@ -274,7 +274,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_leave_group_ok': '✅ Bot left group chat: {chat}',
   'cmd.substitute.direct_leave_group_failed': '⚠️ Failed to leave group chat: {reason}',
   'substitute.direct.dm': 'Substitute direct message from "{chat}" (@{target}):\n{content}\n\nReply in this DM and I will forward it back to that group. Send /substitute exit to leave this direct bridge.',
-  'substitute.direct.dm_non_text': 'They sent a non-text message ({messageType}). Please open the group chat to view it.\n\n[Original group message: {messageId}]',
+  'substitute.direct.dm_non_text': 'They sent a non-text message ({messageType}). Please open the group chat to view it.',
   'substitute.direct.group': '{name}: {content}',
   'substitute.direct.group_prefix': 'Answering for {name}: {content}',
   'substitute.direct.group_fallback_name': 'Substitute',

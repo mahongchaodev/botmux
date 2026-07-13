@@ -166,8 +166,9 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     binding.substituteUserId = input.substituteUserId;
     binding.substituteUnionId = input.substituteUnionId;
     binding.targetName = input.targetName;
+    const prior = binding.chats?.[input.chatId];
     binding.chats = {};
-    binding.chats[input.chatId] = { ...input, updatedAt: Date.now() };
+    binding.chats[input.chatId] = { ...input, dmToGroupMessageIds: prior?.dmToGroupMessageIds, updatedAt: Date.now() };
     binding.activeChatId = input.chatId;
     binding.updatedAt = Date.now();
     mockDirectBindings.set(k, binding);
@@ -194,6 +195,21 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     const notes = [...(chat?.interventionNotes ?? [])];
     if (chat) chat.interventionNotes = [];
     return notes;
+  },
+  recordSubstituteDirectForwardedMessage: (input: any) => {
+    const binding = mockDirectBindings.get(directKey(input.larkAppId, input.substituteOpenId));
+    const chat = input.chatId ? binding?.chats?.[input.chatId] : undefined;
+    if (!chat || !input.dmMessageId || !input.groupMessageId) return;
+    chat.dmToGroupMessageIds = { ...(chat.dmToGroupMessageIds ?? {}), [input.dmMessageId]: input.groupMessageId };
+  },
+  getSubstituteDirectQuotedGroupMessageId: (appId: string, openId: string | undefined, dmMessageId: string | undefined) => {
+    const binding = mockDirectBindings.get(directKey(appId, openId));
+    if (!binding || !dmMessageId) return undefined;
+    for (const chat of Object.values<any>(binding.chats ?? {})) {
+      const hit = chat.dmToGroupMessageIds?.[dmMessageId];
+      if (hit) return hit;
+    }
+    return undefined;
   },
 }));
 
@@ -2091,7 +2107,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       'text',
     );
     expect(mockSendUserMessage.mock.calls[0][2]).toContain('@Sub Person help with this');
-    expect(mockSendUserMessage.mock.calls[0][2]).toContain('[原群消息: msg-substitute-direct]');
+    expect(mockSendUserMessage.mock.calls[0][2]).not.toContain('[原群消息:');
+    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct']?.dmToGroupMessageIds)
+      .toEqual({ 'sent-dm-msg': 'msg-substitute-direct' });
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))).toMatchObject({
@@ -2152,7 +2170,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       'text',
     );
     expect(mockSendUserMessage.mock.calls[0][2]).toContain('image');
-    expect(mockSendUserMessage.mock.calls[0][2]).toContain('[原群消息: msg-substitute-direct-image]');
+    expect(mockSendUserMessage.mock.calls[0][2]).not.toContain('[原群消息:');
+    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct']?.dmToGroupMessageIds)
+      .toEqual({ 'sent-dm-msg': 'msg-substitute-direct-image' });
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
@@ -2515,15 +2535,11 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
           targetName: 'Sub Person',
           mode: 'direct',
           disclosure: 'prefix',
+          dmToGroupMessageIds: { 'dm-forwarded-msg': 'group-original-msg' },
           updatedAt: Date.now(),
         },
       },
       updatedAt: Date.now(),
-    });
-    mockGetMessageDetail.mockResolvedValueOnce({
-      items: [{
-        content: JSON.stringify({ text: '来自群聊\n[原群消息: group-original-msg]' }),
-      }],
     });
     const event = makeUserMessageEvent({
       senderOpenId: 'ou_sub',
@@ -2538,7 +2554,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     await capturedHandlers['im.message.receive_v1'](event);
     await flushEventWork();
 
-    expect(mockGetMessageDetail).toHaveBeenCalledWith(MY_APP_ID, 'dm-forwarded-msg');
+    expect(mockGetMessageDetail).not.toHaveBeenCalled();
     expect(mockReplyMessage).toHaveBeenCalledWith(
       MY_APP_ID,
       'group-original-msg',
@@ -2573,15 +2589,11 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
           targetName: 'Sub Person',
           mode: 'direct',
           disclosure: 'prefix',
+          dmToGroupMessageIds: { 'dm-forwarded-msg': 'group-withdrawn-msg' },
           updatedAt: Date.now(),
         },
       },
       updatedAt: Date.now(),
-    });
-    mockGetMessageDetail.mockResolvedValueOnce({
-      items: [{
-        content: JSON.stringify({ text: '来自群聊\n[原群消息: group-withdrawn-msg]' }),
-      }],
     });
     mockReplyMessage.mockRejectedValueOnce(new MockMessageWithdrawnError('group-withdrawn-msg'));
     const event = makeUserMessageEvent({

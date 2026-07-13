@@ -277,7 +277,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_leave_group_ok': '✅ 已让 bot 退出群聊：{chat}',
   'cmd.substitute.direct_leave_group_failed': '⚠️ 退出群聊失败：{reason}',
   'substitute.direct.dm': '来自群聊「{chat}」的替身直通消息（@{target}）：\n{content}\n\n直接回复本单聊即可由我转发回该群；发送 /substitute exit 可退出本次直通。',
-  'substitute.direct.dm_non_text': '对方发了一条非文本消息（{messageType}），请进入群聊查看。\n\n[原群消息: {messageId}]',
+  'substitute.direct.dm_non_text': '对方发了一条非文本消息（{messageType}），请进入群聊查看。',
   'substitute.direct.group': '{name}: {content}',
   'substitute.direct.group_prefix': '我先代 {name} 回复: {content}',
   'substitute.direct.group_fallback_name': '替身',

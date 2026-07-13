@@ -3,19 +3,19 @@ import {
   appendSubstituteInterventionNote,
   consumeSubstituteInterventionNotes,
   getActiveSubstituteDirectChat,
+  getSubstituteDirectQuotedGroupMessageId,
   getSubstituteDirectChat,
+  recordSubstituteDirectForwardedMessage,
   upsertSubstituteDirectChat,
   type SubstituteDirectChat,
 } from '../../services/substitute-direct-store.js';
 import { getBot, resolveBrandLabel } from '../../bot-registry.js';
-import { getChatName, getMessageDetail, MessageWithdrawnError, replyMessage, sendMessage, sendUserMessage } from './client.js';
+import { getChatName, MessageWithdrawnError, replyMessage, sendMessage, sendUserMessage } from './client.js';
 import { resolveName } from './identity-cache.js';
 import { mentionOpenId, stripLeadingMentions } from './message-parser.js';
 import { buildMarkdownCard } from './md-card.js';
 import { t, localeForBot } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
-
-const ORIGINAL_GROUP_MESSAGE_ID_RE = /\[原群消息:\s*([^\]\s]+)\]/;
 
 function textFromMessage(message: any, opts?: { renderAt?: boolean }): string | null {
   if (!message?.content) return null;
@@ -82,37 +82,25 @@ export async function forwardSubstituteGroupMessageToDm(input: {
     lastGroupMessageId: input.message?.message_id,
   });
   const forwardedContent = body
-    ? `${body}\n\n[原群消息: ${input.message?.message_id ?? ''}]`
+    ? body
     : t('substitute.direct.dm_non_text', {
         messageType: input.message?.message_type ?? input.message?.msg_type ?? t('substitute.direct.non_text_fallback', undefined, loc),
-        messageId: input.message?.message_id ?? '',
       }, loc);
   const content = t('substitute.direct.dm', {
     chat: chatName ?? input.chatId,
     target: input.trigger.target.name ?? targetOpenId,
     content: forwardedContent,
   }, loc);
-  await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
+  const dmMessageId = await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
+  recordSubstituteDirectForwardedMessage({
+    larkAppId: input.larkAppId,
+    substituteOpenId: targetOpenId,
+    chatId: input.chatId,
+    dmMessageId,
+    groupMessageId: input.message?.message_id,
+  });
   logger.info(`[substitute-direct:${input.larkAppId}] group ${input.chatId.substring(0, 12)} → DM ${targetOpenId.substring(0, 12)}`);
   return true;
-}
-
-async function quotedGroupMessageIdFromDmQuote(larkAppId: string, dmMessageId: string | undefined): Promise<string | undefined> {
-  if (!dmMessageId) return undefined;
-  try {
-    const detail = await getMessageDetail(larkAppId, dmMessageId);
-    const item = detail?.items?.[0] ?? detail?.data?.items?.[0] ?? detail?.data?.message;
-    const content = typeof item?.body?.content === 'string'
-      ? item.body.content
-      : typeof item?.content === 'string'
-        ? item.content
-        : '';
-    const text = textFromMessage({ content }) ?? content;
-    return ORIGINAL_GROUP_MESSAGE_ID_RE.exec(text)?.[1];
-  } catch (err: any) {
-    logger.warn(`[substitute-direct] quoted DM lookup failed: ${err?.message ?? err}`);
-    return undefined;
-  }
 }
 
 export async function forwardSubstituteDmMessageToGroup(input: {
@@ -151,7 +139,7 @@ export async function forwardSubstituteDmMessageToGroup(input: {
     sourceMessageId: input.message?.message_id,
     substituteOpenId: input.senderOpenId,
   };
-  const quotedGroupMessageId = await quotedGroupMessageIdFromDmQuote(input.larkAppId, input.message?.parent_id ?? input.message?.root_id);
+  const quotedGroupMessageId = getSubstituteDirectQuotedGroupMessageId(input.larkAppId, input.senderOpenId, input.message?.parent_id ?? input.message?.root_id);
   if (quotedGroupMessageId) {
     try {
       await replyMessage(input.larkAppId, quotedGroupMessageId, card, 'interactive', false, undefined, hookContext);
