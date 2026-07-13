@@ -110,6 +110,10 @@ function lastReplyCard(): any {
   return raw ? JSON.parse(raw) : undefined;
 }
 
+function cardActions(card: any): any[] {
+  return (card?.elements ?? []).flatMap((el: any) => el.actions ?? []);
+}
+
 describe('tryHandleSubstituteCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -177,26 +181,23 @@ describe('tryHandleSubstituteCommand', () => {
     expect(lastReply()).toContain('oc_group');
   });
 
-  it('DM list uses one dynamic substitute toggle button per group', async () => {
+  it('DM list uses a compact manage button per group', async () => {
     await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
-    let toggleActions = lastReplyCard().elements
-      .flatMap((el: any) => el.actions ?? [])
-      .filter((a: any) => a.value?.action === 'substitute_direct_enable' || a.value?.action === 'substitute_direct_disable');
-    expect(toggleActions).toHaveLength(1);
-    expect(toggleActions[0].text.content).toBe('cmd.substitute.direct_btn_disable_substitute');
-    expect(toggleActions[0].value.action).toBe('substitute_direct_disable');
+    let manageActions = cardActions(lastReplyCard())
+      .filter((a: any) => a.value?.action === 'substitute_direct_manage');
+    expect(manageActions).toHaveLength(1);
+    expect(manageActions[0].text.content).toBe('cmd.substitute.direct_btn_manage');
+    expect(manageActions[0].value.chat_id).toBe('oc_group');
 
     mockIsSubstituteEnabledForChat.mockReturnValue(false);
     await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
-    toggleActions = lastReplyCard().elements
-      .flatMap((el: any) => el.actions ?? [])
-      .filter((a: any) => a.value?.action === 'substitute_direct_enable' || a.value?.action === 'substitute_direct_disable');
-    expect(toggleActions).toHaveLength(1);
-    expect(toggleActions[0].text.content).toBe('cmd.substitute.direct_btn_enable_substitute');
-    expect(toggleActions[0].value.action).toBe('substitute_direct_enable');
+    expect(lastReply()).toContain('cmd.substitute.direct_substitute_off');
+    manageActions = cardActions(lastReplyCard())
+      .filter((a: any) => a.value?.action === 'substitute_direct_manage');
+    expect(manageActions).toHaveLength(1);
   });
 
-  it('DM list uses dynamic direct and intervention buttons per group', async () => {
+  it('detail card uses dynamic substitute, direct and intervention buttons per group', async () => {
     const expectActionRow = (actions: any[], labels: string[], actionValues: Array<string | undefined>) => {
       expect(actions).toHaveLength(5);
       expect(actions.map((a: any) => a.text.content)).toEqual([...labels, 'cmd.substitute.direct_btn_open_chat']);
@@ -207,49 +208,84 @@ describe('tryHandleSubstituteCommand', () => {
       expect(actions[4].multi_url?.ios_url).toBe(actions[4].multi_url?.url);
     };
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
-    let actions = lastReplyCard().elements.flatMap((el: any) => el.actions ?? []);
+    let result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_manage',
+      chatId: 'oc_group',
+    });
+    let actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expectActionRow(actions, [
-      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_enter',
       'cmd.substitute.direct_btn_intervene',
+      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
     ], [
-      'substitute_direct_disable',
       'substitute_direct_enter',
       'substitute_direct_intervene',
+      'substitute_direct_disable',
       'substitute_direct_leave_group',
     ]);
 
     await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
-    actions = lastReplyCard().elements.flatMap((el: any) => el.actions ?? []);
+    result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_manage',
+      chatId: 'oc_group',
+    });
+    actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expectActionRow(actions, [
-      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_exit',
       'cmd.substitute.direct_btn_intervene',
+      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
     ], [
-      'substitute_direct_disable',
       'substitute_direct_exit',
       'substitute_direct_intervene',
+      'substitute_direct_disable',
       'substitute_direct_leave_group',
     ]);
 
     await tryHandleSubstituteCommand(APP, msg('/substitute intervene oc_group', 'p2p'), USER);
-    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
-    actions = lastReplyCard().elements.flatMap((el: any) => el.actions ?? []);
+    result = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_manage',
+      chatId: 'oc_group',
+    });
+    actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expectActionRow(actions, [
-      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_enter',
       'cmd.substitute.direct_btn_exit_intervene',
+      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
     ], [
-      'substitute_direct_disable',
       'substitute_direct_enter',
       'substitute_direct_exit',
+      'substitute_direct_disable',
       'substitute_direct_leave_group',
     ]);
+  });
+
+  it('DM list paginates groups and supports a jump-page selector', async () => {
+    mockListChats.mockResolvedValue(Array.from({ length: 12 }, (_, i) => ({
+      chatId: `oc_group_${i + 1}`,
+      name: `Group ${i + 1}`,
+      chatMode: 'group',
+    })));
+
+    await tryHandleSubstituteCommand(APP, msg('/substitute list', 'p2p'), USER);
+
+    const card = lastReplyCard();
+    expect(cardActions(card).filter((a: any) => a.value?.action === 'substitute_direct_manage')).toHaveLength(5);
+    const actions = cardActions(card);
+    expect(actions.some((a: any) => a.value?.action === 'substitute_direct_page')).toBe(true);
+    expect(actions.some((a: any) => a.tag === 'select_static')).toBe(true);
+    expect(lastReply()).toContain('cmd.substitute.direct_page_indicator');
   });
 
   it('DM list does not require the sender to already be a substitute target', async () => {
@@ -400,11 +436,18 @@ describe('tryHandleSubstituteCommand', () => {
       chatId: 'oc_group',
     });
 
-    const actions = result.card.data.elements.flatMap((el: any) => el.actions ?? []);
+    const detail = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_manage',
+      chatId: 'oc_group',
+    });
+    const actions = cardActions(detail.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expect(actions.map((a: any) => a.text.content)).toEqual([
-      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_exit',
       'cmd.substitute.direct_btn_intervene',
+      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
       'cmd.substitute.direct_btn_open_chat',
     ]);

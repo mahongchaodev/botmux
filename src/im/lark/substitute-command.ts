@@ -16,6 +16,9 @@ import { localeForBot, t } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
 
 const DIRECT_ACTIONS = new Set([
+  'substitute_direct_page',
+  'substitute_direct_manage',
+  'substitute_direct_back',
   'substitute_direct_enter',
   'substitute_direct_exit',
   'substitute_direct_intervene',
@@ -51,7 +54,24 @@ function canUseDirectControls(larkAppId: string, openId: string | undefined): bo
   return canOperate(larkAppId, undefined, openId) || !!substituteTargetForOpenId(larkAppId, openId);
 }
 
-type DirectChatRow = { chatId: string; name?: string; enabled: boolean; active: boolean; mode?: 'direct' | 'intervene'; substituteEnabled: boolean };
+const DIRECT_CHAT_PAGE_SIZE = 5;
+const DIRECT_CHAT_JUMP_PAGE_MAX_OPTIONS = 50;
+
+type DirectChatRow = {
+  chatId: string;
+  name?: string;
+  enabled: boolean;
+  active: boolean;
+  mode?: 'direct' | 'intervene';
+  substituteEnabled: boolean;
+  canOperateChat: boolean;
+  canLeaveGroup: boolean;
+};
+
+type DirectCardState = {
+  page?: number;
+  detailChatId?: string;
+};
 
 async function listSubstituteDirectChats(larkAppId: string, openId: string | undefined): Promise<DirectChatRow[]> {
   if (!canUseDirectControls(larkAppId, openId)) return [];
@@ -69,6 +89,8 @@ async function listSubstituteDirectChats(larkAppId: string, openId: string | und
       active: binding?.activeChatId === c.chatId,
       mode: binding?.chats[c.chatId]?.mode,
       substituteEnabled: isSubstituteEnabledForChat(larkAppId, c.chatId),
+      canOperateChat: canOperate(larkAppId, c.chatId, openId),
+      canLeaveGroup: canOperate(larkAppId, undefined, openId),
     });
   }
   return rows;
@@ -92,75 +114,233 @@ function renderDirectChatList(rows: DirectChatRow[], loc: any): string {
   ].join('\n');
 }
 
-function buildDirectChatCard(larkAppId: string, rows: DirectChatRow[], invokerOpenId: string, loc: any): string {
+function directChatStateText(r: DirectChatRow, loc: any): string {
+  return r.enabled
+    ? r.mode === 'intervene'
+      ? (r.active ? t('cmd.substitute.intervene_state_active', undefined, loc) : t('cmd.substitute.intervene_state_on', undefined, loc))
+      : (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
+    : t('cmd.substitute.direct_state_off', undefined, loc);
+}
+
+function directChatSubstituteStateText(r: DirectChatRow, loc: any): string {
+  return r.substituteEnabled ? t('cmd.substitute.direct_substitute_on', undefined, loc) : t('cmd.substitute.direct_substitute_off', undefined, loc);
+}
+
+function directChatCardValue(invokerOpenId: string, page: number, extra?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    invoker_open_id: invokerOpenId,
+    page: String(page),
+    ...extra,
+  };
+}
+
+function buildDirectChatListCardElements(
+  larkAppId: string,
+  rows: DirectChatRow[],
+  invokerOpenId: string,
+  loc: any,
+  state: DirectCardState,
+): any[] {
   const elements: any[] = [];
-  const brand = normalizeBrand(getBot(larkAppId).config.brand);
   if (rows.length === 0) {
     elements.push({ tag: 'div', text: { tag: 'lark_md', content: t('cmd.substitute.direct_list_empty', undefined, loc) } });
-  } else {
-    elements.push({ tag: 'div', text: { tag: 'lark_md', content: t('cmd.substitute.direct_list_header', undefined, loc) } });
-    for (const r of rows) {
-      const state = r.enabled
-        ? r.mode === 'intervene'
-          ? (r.active ? t('cmd.substitute.intervene_state_active', undefined, loc) : t('cmd.substitute.intervene_state_on', undefined, loc))
-          : (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
-        : t('cmd.substitute.direct_state_off', undefined, loc);
-      const substituteState = r.substituteEnabled ? t('cmd.substitute.direct_substitute_on', undefined, loc) : t('cmd.substitute.direct_substitute_off', undefined, loc);
-      const label = r.name || r.chatId;
-      elements.push({
-        tag: 'div',
-        text: { tag: 'lark_md', content: `**${label}**\n${r.chatId}\n${state} · ${substituteState}` },
-      });
-      elements.push({
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: t(r.substituteEnabled ? 'cmd.substitute.direct_btn_disable_substitute' : 'cmd.substitute.direct_btn_enable_substitute', undefined, loc) },
-            type: r.substituteEnabled ? 'default' : 'primary',
-            value: { action: r.substituteEnabled ? 'substitute_direct_disable' : 'substitute_direct_enable', chat_id: r.chatId, invoker_open_id: invokerOpenId },
-          },
-          {
-            tag: 'button',
-            text: {
-              tag: 'plain_text',
-              content: t(r.enabled && r.mode === 'direct' ? 'cmd.substitute.direct_btn_exit' : 'cmd.substitute.direct_btn_enter', undefined, loc),
-            },
-            type: r.enabled && r.mode === 'direct' ? 'default' : 'primary',
-            value: { action: r.enabled && r.mode === 'direct' ? 'substitute_direct_exit' : 'substitute_direct_enter', chat_id: r.chatId, invoker_open_id: invokerOpenId },
-          },
-          {
-            tag: 'button',
-            text: {
-              tag: 'plain_text',
-              content: t(r.enabled && r.mode === 'intervene' ? 'cmd.substitute.direct_btn_exit_intervene' : 'cmd.substitute.direct_btn_intervene', undefined, loc),
-            },
-            type: r.enabled && r.mode === 'intervene' ? 'default' : 'primary',
-            value: { action: r.enabled && r.mode === 'intervene' ? 'substitute_direct_exit' : 'substitute_direct_intervene', chat_id: r.chatId, invoker_open_id: invokerOpenId },
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_leave_group', undefined, loc) },
-            type: 'danger',
-            confirm: {
-              title: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_title', undefined, loc) },
-              text: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_text', { chat: label }, loc) },
-            },
-            value: { action: 'substitute_direct_leave_group', chat_id: r.chatId, invoker_open_id: invokerOpenId },
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_open_chat', undefined, loc) },
-            type: 'default',
-            multi_url: directMultiUrl(chatAppLink(r.chatId, brand)),
-          },
-        ],
+    return elements;
+  }
+
+  const requestedPage = Number.isFinite(state.page) ? Math.max(1, Math.floor(state.page!)) : 1;
+  const totalPages = Math.max(1, Math.ceil(rows.length / DIRECT_CHAT_PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+  const start = (page - 1) * DIRECT_CHAT_PAGE_SIZE;
+  const visible = rows.slice(start, start + DIRECT_CHAT_PAGE_SIZE);
+
+  elements.push({ tag: 'div', text: { tag: 'lark_md', content: t('cmd.substitute.direct_list_header', undefined, loc) } });
+  for (const r of visible) {
+    const label = r.name || r.chatId;
+    elements.push({
+      tag: 'div',
+      text: {
+        tag: 'lark_md',
+        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatStateText(r, loc)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(r, loc)}\n${r.chatId}`,
+      },
+    });
+    elements.push({
+      tag: 'action',
+      actions: [{
+        tag: 'button',
+        text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_manage', undefined, loc) },
+        type: 'default',
+        value: directChatCardValue(invokerOpenId, page, {
+          action: 'substitute_direct_manage',
+          chat_id: r.chatId,
+        }),
+      }],
+    });
+  }
+
+  if (totalPages > 1) {
+    const actions: any[] = [
+      {
+        tag: 'button',
+        text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_prev_page', undefined, loc) },
+        type: 'default',
+        disabled: page <= 1,
+        value: directChatCardValue(invokerOpenId, Math.max(1, page - 1), { action: 'substitute_direct_page' }),
+      },
+      {
+        tag: 'button',
+        text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_next_page', undefined, loc) },
+        type: 'default',
+        disabled: page >= totalPages,
+        value: directChatCardValue(invokerOpenId, Math.min(totalPages, page + 1), { action: 'substitute_direct_page' }),
+      },
+    ];
+    if (totalPages > 2 && totalPages <= DIRECT_CHAT_JUMP_PAGE_MAX_OPTIONS) {
+      actions.push({
+        tag: 'select_static',
+        placeholder: {
+          tag: 'plain_text',
+          content: t('cmd.substitute.direct_jump_page', { n: String(page), total: String(totalPages) }, loc),
+        },
+        initial_option: String(page),
+        options: Array.from({ length: totalPages }, (_, i) => {
+          const n = i + 1;
+          return {
+            text: { tag: 'plain_text', content: t('cmd.substitute.direct_jump_page', { n: String(n), total: String(totalPages) }, loc) },
+            value: String(n),
+          };
+        }),
+        value: directChatCardValue(invokerOpenId, page, { action: 'substitute_direct_page' }),
       });
     }
+    elements.push({
+      tag: 'action',
+      actions,
+    });
+    elements.push({
+      tag: 'div',
+      text: { tag: 'lark_md', content: t('cmd.substitute.direct_page_indicator', { current: String(page), total: String(totalPages) }, loc) },
+    });
   }
+  return elements;
+}
+
+function buildDirectChatDetailCardElements(
+  larkAppId: string,
+  row: DirectChatRow,
+  invokerOpenId: string,
+  loc: any,
+  page: number,
+): any[] {
+  const brand = normalizeBrand(getBot(larkAppId).config.brand);
+  const label = row.name || row.chatId;
+  const elements: any[] = [
+    {
+      tag: 'div',
+      text: {
+        tag: 'lark_md',
+        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatStateText(row, loc)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(row, loc)}\n${row.chatId}`,
+      },
+    },
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: t(row.enabled && row.mode === 'direct' ? 'cmd.substitute.direct_btn_exit' : 'cmd.substitute.direct_btn_enter', undefined, loc),
+          },
+          type: row.enabled && row.mode === 'direct' ? 'default' : 'primary',
+          value: directChatCardValue(invokerOpenId, page, {
+            action: row.enabled && row.mode === 'direct' ? 'substitute_direct_exit' : 'substitute_direct_enter',
+            chat_id: row.chatId,
+            detail_chat_id: row.chatId,
+          }),
+        },
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: t(row.enabled && row.mode === 'intervene' ? 'cmd.substitute.direct_btn_exit_intervene' : 'cmd.substitute.direct_btn_intervene', undefined, loc),
+          },
+          type: row.enabled && row.mode === 'intervene' ? 'default' : 'primary',
+          value: directChatCardValue(invokerOpenId, page, {
+            action: row.enabled && row.mode === 'intervene' ? 'substitute_direct_exit' : 'substitute_direct_intervene',
+            chat_id: row.chatId,
+            detail_chat_id: row.chatId,
+          }),
+        },
+      ],
+    },
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t(row.substituteEnabled ? 'cmd.substitute.direct_btn_disable_substitute' : 'cmd.substitute.direct_btn_enable_substitute', undefined, loc) },
+          type: row.substituteEnabled ? 'default' : 'primary',
+          disabled: !row.canOperateChat,
+          value: directChatCardValue(invokerOpenId, page, {
+            action: row.substituteEnabled ? 'substitute_direct_disable' : 'substitute_direct_enable',
+            chat_id: row.chatId,
+            detail_chat_id: row.chatId,
+          }),
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_leave_group', undefined, loc) },
+          type: 'danger',
+          disabled: !row.canLeaveGroup,
+          confirm: {
+            title: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_title', undefined, loc) },
+            text: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_text', { chat: label }, loc) },
+          },
+          value: directChatCardValue(invokerOpenId, page, {
+            action: 'substitute_direct_leave_group',
+            chat_id: row.chatId,
+          }),
+        },
+      ],
+    },
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_open_chat', undefined, loc) },
+          type: 'default',
+          multi_url: directMultiUrl(chatAppLink(row.chatId, brand)),
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_back', undefined, loc) },
+          type: 'default',
+          value: directChatCardValue(invokerOpenId, page, { action: 'substitute_direct_back' }),
+        },
+      ],
+    },
+  ];
+  if (!row.canOperateChat || !row.canLeaveGroup) {
+    elements.push({
+      tag: 'div',
+      text: { tag: 'lark_md', content: `<font color='grey'>${t('cmd.substitute.direct_permission_hint', undefined, loc)}</font>` },
+    });
+  }
+  return elements;
+}
+
+function buildDirectChatCard(larkAppId: string, rows: DirectChatRow[], invokerOpenId: string, loc: any, state: DirectCardState = {}): string {
+  const requestedPage = Number.isFinite(state.page) ? Math.max(1, Math.floor(state.page!)) : 1;
+  const detailRow = state.detailChatId ? rows.find(r => r.chatId === state.detailChatId) : undefined;
+  const elements = detailRow
+    ? buildDirectChatDetailCardElements(larkAppId, detailRow, invokerOpenId, loc, requestedPage)
+    : buildDirectChatListCardElements(larkAppId, rows, invokerOpenId, loc, state);
   return JSON.stringify({
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: t('cmd.substitute.direct_card_title', undefined, loc) }, template: 'blue' },
+    header: {
+      title: { tag: 'plain_text', content: t(detailRow ? 'cmd.substitute.direct_card_detail_title' : 'cmd.substitute.direct_card_title', undefined, loc) },
+      template: detailRow ? 'turquoise' : 'blue',
+    },
     elements,
   });
 }
@@ -233,16 +413,30 @@ export async function handleSubstituteDirectCardAction(input: {
   action: string;
   chatId: string | undefined;
   invokerOpenId: string | undefined;
+  page?: number;
+  detailChatId?: string;
 }): Promise<any> {
   const loc = localeForBot(input.larkAppId);
   if (!input.operatorOpenId || input.operatorOpenId !== input.invokerOpenId) {
     return { toast: { type: 'error', content: t('cmd.substitute.direct_not_invoker', undefined, loc) } };
   }
+  const rawPage = Number(input.page ?? 1);
+  const page = Number.isFinite(rawPage) && rawPage > 0 ? Math.floor(rawPage) : 1;
+  if (input.action === 'substitute_direct_page' || input.action === 'substitute_direct_back' || input.action === 'substitute_direct_manage') {
+    const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId);
+    const detailChatId = input.action === 'substitute_direct_manage' ? input.chatId : undefined;
+    return {
+      card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc, { page, detailChatId })) },
+    };
+  }
   const result = await applyDirectAction(input.larkAppId, input.operatorOpenId, input.chatId, input.action, loc);
   const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId);
+  const detailChatId = result.ok && input.action === 'substitute_direct_leave_group'
+    ? undefined
+    : input.detailChatId;
   return {
     toast: { type: result.ok ? 'success' : 'error', content: result.message },
-    card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc)) },
+    card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc, { page, detailChatId })) },
   };
 }
 

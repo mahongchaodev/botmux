@@ -721,12 +721,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   }
 
   if (isSubstituteDirectAction(value?.action) && larkAppId) {
+    const rawPage = value!.page ?? (data.action as { option?: string } | undefined)?.option;
+    const page = Number.parseInt(String(rawPage ?? '1'), 10);
     return handleSubstituteDirectCardAction({
       larkAppId,
       operatorOpenId,
       action: value!.action as string,
       chatId: value!.chat_id,
       invokerOpenId: value!.invoker_open_id,
+      page: Number.isFinite(page) ? page : 1,
+      detailChatId: value!.detail_chat_id,
     });
   }
 
