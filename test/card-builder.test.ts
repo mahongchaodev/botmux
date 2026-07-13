@@ -136,6 +136,10 @@ describe('getCliDisplayName', () => {
   it('should return "Pi" for pi', () => {
     expect(getCliDisplayName('pi')).toBe('Pi');
   });
+
+  it('should return "Kiro" for kiro-cli', () => {
+    expect(getCliDisplayName('kiro-cli')).toBe('Kiro');
+  });
 });
 
 describe('buildConfigCard', () => {

@@ -200,6 +200,7 @@ const cliDisplayNames: Record<CliId, string> = {
   'oh-my-pi': 'Oh My Pi',
   'kimi': 'Kimi',
   'grok': 'Grok Build',
+  'kiro-cli': 'Kiro',
 };
 
 export function getCliDisplayName(cliId: CliId): string {
