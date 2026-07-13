@@ -158,20 +158,38 @@ describe('tryHandleEchoCommand', () => {
     expect(lastReply()).toContain('oc_group');
   });
 
-  it('DM list uses a compact manage button per group', async () => {
+  it('DM list exposes manage, open chat, and leave group buttons per group', async () => {
     await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
-    let manageActions = cardActions(lastReplyCard())
-      .filter((a: any) => a.value?.action === 'substitute_direct_manage');
+    let actions = cardActions(lastReplyCard());
+    let manageActions = actions.filter((a: any) => a.value?.action === 'substitute_direct_manage');
+    let openChatActions = actions.filter((a: any) => a.multi_url?.url?.includes('openChatId=oc_group'));
+    let leaveGroupActions = actions.filter((a: any) => a.value?.action === 'substitute_direct_leave_group');
     expect(manageActions).toHaveLength(1);
     expect(manageActions[0].text.content).toBe('cmd.substitute.direct_btn_manage');
     expect(manageActions[0].value.chat_id).toBe('oc_group');
+    expect(openChatActions).toHaveLength(1);
+    expect(openChatActions[0].text.content).toBe('cmd.substitute.direct_btn_open_chat');
+    expect(leaveGroupActions).toHaveLength(1);
+    expect(leaveGroupActions[0].text.content).toBe('cmd.substitute.direct_btn_leave_group');
+    expect(leaveGroupActions[0].disabled).toBe(false);
 
     mockIsSubstituteEnabledForChat.mockReturnValue(false);
     await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
     expect(lastReply()).toContain('cmd.substitute.direct_substitute_off');
-    manageActions = cardActions(lastReplyCard())
-      .filter((a: any) => a.value?.action === 'substitute_direct_manage');
+    actions = cardActions(lastReplyCard());
+    manageActions = actions.filter((a: any) => a.value?.action === 'substitute_direct_manage');
     expect(manageActions).toHaveLength(1);
+  });
+
+  it('DM list disables leave-group for non-operators but still shows the button', async () => {
+    mockCanOperate.mockImplementation((_app, chatId) => chatId === undefined ? false : true);
+
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
+
+    const leaveGroupActions = cardActions(lastReplyCard())
+      .filter((a: any) => a.value?.action === 'substitute_direct_leave_group');
+    expect(leaveGroupActions).toHaveLength(1);
+    expect(leaveGroupActions[0].disabled).toBe(true);
   });
 
   it('detail card uses dynamic substitute and direct buttons per group', async () => {
@@ -240,6 +258,7 @@ describe('tryHandleEchoCommand', () => {
 
     const card = lastReplyCard();
     expect(cardActions(card).filter((a: any) => a.value?.action === 'substitute_direct_manage')).toHaveLength(5);
+    expect(cardActions(card).filter((a: any) => a.value?.action === 'substitute_direct_leave_group')).toHaveLength(5);
     const actions = cardActions(card);
     expect(actions.some((a: any) => a.value?.action === 'substitute_direct_page')).toBe(true);
     expect(actions.some((a: any) => a.tag === 'select_static')).toBe(true);

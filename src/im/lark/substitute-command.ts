@@ -120,6 +120,7 @@ function buildDirectChatListCardElements(
   state: DirectCardState,
 ): any[] {
   const elements: any[] = [];
+  const brand = normalizeBrand(getBot(larkAppId).config.brand);
   if (rows.length === 0) {
     elements.push({ tag: 'div', text: { tag: 'lark_md', content: t('cmd.substitute.direct_list_empty', undefined, loc) } });
     return elements;
@@ -143,15 +144,37 @@ function buildDirectChatListCardElements(
     });
     elements.push({
       tag: 'action',
-      actions: [{
-        tag: 'button',
-        text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_manage', undefined, loc) },
-        type: 'default',
-        value: directChatCardValue(invokerOpenId, page, {
-          action: 'substitute_direct_manage',
-          chat_id: r.chatId,
-        }),
-      }],
+      actions: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_manage', undefined, loc) },
+          type: 'default',
+          value: directChatCardValue(invokerOpenId, page, {
+            action: 'substitute_direct_manage',
+            chat_id: r.chatId,
+          }),
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_open_chat', undefined, loc) },
+          type: 'default',
+          multi_url: directMultiUrl(chatAppLink(r.chatId, brand)),
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_leave_group', undefined, loc) },
+          type: 'danger',
+          disabled: !r.canLeaveGroup,
+          confirm: {
+            title: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_title', undefined, loc) },
+            text: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_text', { chat: label }, loc) },
+          },
+          value: directChatCardValue(invokerOpenId, page, {
+            action: 'substitute_direct_leave_group',
+            chat_id: r.chatId,
+          }),
+        },
+      ],
     });
   }
 
