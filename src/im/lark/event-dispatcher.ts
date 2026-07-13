@@ -37,7 +37,7 @@ import { type Brand, larkHosts, normalizeBrand, sdkDomain } from './lark-hosts.j
 import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
 import { tryHandleSubstituteCommand } from './substitute-command.js';
-import { consumeSubstituteDirectInterventionNotes, forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
+import { forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
 import { getSubstituteDirectChat, getSubstituteDirectChatByTarget } from '../../services/substitute-direct-store.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled, clearPending } from './grant-pending.js';
@@ -2116,11 +2116,6 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             }
             return;
           }
-          substituteTrigger.interventionNotes = consumeSubstituteDirectInterventionNotes({
-            larkAppId,
-            substituteOpenId: direct?.substituteOpenId ?? substituteTrigger.target.openId,
-            chatId,
-          });
           routing.scope = 'chat';
           routing.anchor = chatId;
           routingSource = 'regular-group-chat';

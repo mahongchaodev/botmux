@@ -7,9 +7,8 @@ export interface SubstituteDirectChat {
   chatId: string;
   chatName?: string;
   targetName?: string;
-  mode?: 'direct' | 'intervene';
+  mode?: 'direct';
   disclosure?: 'prefix' | 'none';
-  interventionNotes?: string[];
   lastGroupMessageId?: string;
   dmToGroupMessageIds?: Record<string, string>;
   updatedAt: number;
@@ -55,13 +54,13 @@ function normalize(raw: unknown): Store {
       for (const [chatId, rawChat] of Object.entries(b.chats)) {
         if (!rawChat || typeof rawChat !== 'object' || Array.isArray(rawChat)) continue;
         const c = rawChat as Record<string, unknown>;
+        if (c.mode === 'intervene') continue;
         chats[chatId] = {
           chatId,
           chatName: typeof c.chatName === 'string' ? c.chatName : undefined,
           targetName: typeof c.targetName === 'string' ? c.targetName : undefined,
-          mode: c.mode === 'intervene' ? 'intervene' : 'direct',
+          mode: 'direct',
           disclosure: c.disclosure === 'none' ? 'none' : 'prefix',
-          interventionNotes: Array.isArray(c.interventionNotes) ? c.interventionNotes.filter((x): x is string => typeof x === 'string') : undefined,
           lastGroupMessageId: typeof c.lastGroupMessageId === 'string' ? c.lastGroupMessageId : undefined,
           dmToGroupMessageIds: c.dmToGroupMessageIds && typeof c.dmToGroupMessageIds === 'object' && !Array.isArray(c.dmToGroupMessageIds)
             ? Object.fromEntries(Object.entries(c.dmToGroupMessageIds).filter((e): e is [string, string] => typeof e[0] === 'string' && typeof e[1] === 'string'))
@@ -174,7 +173,7 @@ export function upsertSubstituteDirectChat(input: {
   chatId: string;
   chatName?: string | null;
   targetName?: string;
-  mode?: 'direct' | 'intervene';
+  mode?: 'direct';
   disclosure?: 'prefix' | 'none';
   lastGroupMessageId?: string;
 }): SubstituteDirectBinding {
@@ -195,7 +194,7 @@ export function upsertSubstituteDirectChat(input: {
     chatId: input.chatId,
     chatName: input.chatName || undefined,
     targetName: input.targetName,
-    mode: input.mode === 'intervene' ? 'intervene' : 'direct',
+    mode: 'direct',
     disclosure: input.disclosure === 'none' ? 'none' : 'prefix',
     lastGroupMessageId: input.lastGroupMessageId,
     dmToGroupMessageIds: current.chats[input.chatId]?.dmToGroupMessageIds,
@@ -206,46 +205,6 @@ export function upsertSubstituteDirectChat(input: {
   store.bindings[k] = current;
   writeStore(store);
   return current;
-}
-
-export function appendSubstituteInterventionNote(
-  larkAppId: string,
-  substituteOpenId: string | undefined,
-  note: string,
-): SubstituteDirectChat | undefined {
-  const active = getActiveSubstituteDirectChat(larkAppId, substituteOpenId);
-  if (!active || active.mode !== 'intervene') return undefined;
-  const store = readStore();
-  const k = key(larkAppId, substituteOpenId!);
-  const binding = store.bindings[k];
-  const chat = binding?.activeChatId ? binding.chats[binding.activeChatId] : undefined;
-  if (!chat) return undefined;
-  const notes = [...(chat.interventionNotes ?? []), note].slice(-20);
-  chat.interventionNotes = notes;
-  chat.updatedAt = Date.now();
-  binding.updatedAt = Date.now();
-  writeStore(store);
-  return chat;
-}
-
-export function consumeSubstituteInterventionNotes(
-  larkAppId: string,
-  substituteOpenId: string | undefined,
-  chatId: string | undefined,
-): string[] {
-  const chat = getSubstituteDirectChat(larkAppId, substituteOpenId, chatId);
-  if (!chat?.interventionNotes?.length) return [];
-  const store = readStore();
-  const binding = store.bindings[key(larkAppId, substituteOpenId!)];
-  const stored = chatId ? binding?.chats?.[chatId] : undefined;
-  const notes = [...(stored?.interventionNotes ?? [])];
-  if (stored) {
-    stored.interventionNotes = [];
-    stored.updatedAt = Date.now();
-    binding.updatedAt = Date.now();
-    writeStore(store);
-  }
-  return notes;
 }
 
 export function recordSubstituteDirectForwardedMessage(input: {

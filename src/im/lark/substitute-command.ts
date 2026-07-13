@@ -21,7 +21,6 @@ const DIRECT_ACTIONS = new Set([
   'substitute_direct_back',
   'substitute_direct_enter',
   'substitute_direct_exit',
-  'substitute_direct_intervene',
   'substitute_direct_leave_group',
   'substitute_direct_enable',
   'substitute_direct_disable',
@@ -62,7 +61,7 @@ type DirectChatRow = {
   name?: string;
   enabled: boolean;
   active: boolean;
-  mode?: 'direct' | 'intervene';
+  mode?: 'direct';
   substituteEnabled: boolean;
   canOperateChat: boolean;
   canLeaveGroup: boolean;
@@ -102,9 +101,7 @@ function renderDirectChatList(rows: DirectChatRow[], loc: any): string {
     t('cmd.substitute.direct_list_header', undefined, loc),
     ...rows.map((r, idx) => {
       const state = r.enabled
-        ? r.mode === 'intervene'
-          ? (r.active ? t('cmd.substitute.intervene_state_active', undefined, loc) : t('cmd.substitute.intervene_state_on', undefined, loc))
-          : (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
+        ? (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
         : t('cmd.substitute.direct_state_off', undefined, loc);
       const sub = r.substituteEnabled ? t('cmd.substitute.direct_substitute_on', undefined, loc) : t('cmd.substitute.direct_substitute_off', undefined, loc);
       return `${idx + 1}. ${r.name || r.chatId} (${r.chatId}) - ${state} / ${sub}`;
@@ -116,9 +113,7 @@ function renderDirectChatList(rows: DirectChatRow[], loc: any): string {
 
 function directChatStateText(r: DirectChatRow, loc: any): string {
   return r.enabled
-    ? r.mode === 'intervene'
-      ? (r.active ? t('cmd.substitute.intervene_state_active', undefined, loc) : t('cmd.substitute.intervene_state_on', undefined, loc))
-      : (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
+    ? (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
     : t('cmd.substitute.direct_state_off', undefined, loc);
 }
 
@@ -257,19 +252,6 @@ function buildDirectChatDetailCardElements(
             detail_chat_id: row.chatId,
           }),
         },
-        {
-          tag: 'button',
-          text: {
-            tag: 'plain_text',
-            content: t(row.enabled && row.mode === 'intervene' ? 'cmd.substitute.direct_btn_exit_intervene' : 'cmd.substitute.direct_btn_intervene', undefined, loc),
-          },
-          type: row.enabled && row.mode === 'intervene' ? 'default' : 'primary',
-          value: directChatCardValue(invokerOpenId, page, {
-            action: row.enabled && row.mode === 'intervene' ? 'substitute_direct_exit' : 'substitute_direct_intervene',
-            chat_id: row.chatId,
-            detail_chat_id: row.chatId,
-          }),
-        },
       ],
     },
     {
@@ -371,23 +353,6 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
     });
     return { ok: true, message: t('cmd.substitute.direct_enter_ok', { chat: row.name || row.chatId }, loc) };
   }
-  if (action === 'substitute_direct_intervene') {
-    const target = substituteTargetForDirectAction(larkAppId, openId);
-    if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
-    upsertSubstituteDirectChat({
-      larkAppId,
-      substituteOpenId: openId,
-      targetOpenId: target.openId,
-      substituteUserId: target.userId,
-      substituteUnionId: target.unionId,
-      chatId: row.chatId,
-      chatName: row.name,
-      targetName: target.name,
-      mode: 'intervene',
-      disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
-    });
-    return { ok: true, message: t('cmd.substitute.intervene_enter_ok', { chat: row.name || row.chatId }, loc) };
-  }
   if (action === 'substitute_direct_enable' || action === 'substitute_direct_disable') {
     if (!canOperate(larkAppId, row.chatId, openId)) return { ok: false, message: t('cmd.substitute.owner_only', undefined, loc) };
     const enabled = action === 'substitute_direct_enable';
@@ -482,12 +447,6 @@ export async function tryHandleSubstituteCommand(
     if (arg === 'enter' || arg === 'join' || arg === '进入') {
       const targetChatId = parts[1];
       const result = await applyDirectAction(larkAppId, senderOpenId, targetChatId, 'substitute_direct_enter', loc);
-      await reply(result.message);
-      return true;
-    }
-    if (arg === 'intervene' || arg === '干预') {
-      const targetChatId = parts[1];
-      const result = await applyDirectAction(larkAppId, senderOpenId, targetChatId, 'substitute_direct_intervene', loc);
       await reply(result.message);
       return true;
     }

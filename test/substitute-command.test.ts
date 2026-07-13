@@ -197,15 +197,15 @@ describe('tryHandleSubstituteCommand', () => {
     expect(manageActions).toHaveLength(1);
   });
 
-  it('detail card uses dynamic substitute, direct and intervention buttons per group', async () => {
+  it('detail card uses dynamic substitute and direct buttons per group', async () => {
     const expectActionRow = (actions: any[], labels: string[], actionValues: Array<string | undefined>) => {
-      expect(actions).toHaveLength(5);
+      expect(actions).toHaveLength(4);
       expect(actions.map((a: any) => a.text.content)).toEqual([...labels, 'cmd.substitute.direct_btn_open_chat']);
       expect(actions.map((a: any) => a.value?.action)).toEqual([...actionValues, undefined]);
-      expect(actions[4].multi_url?.url).toContain('openChatId=oc_group');
-      expect(actions[4].multi_url?.pc_url).toBe(actions[4].multi_url?.url);
-      expect(actions[4].multi_url?.android_url).toBe(actions[4].multi_url?.url);
-      expect(actions[4].multi_url?.ios_url).toBe(actions[4].multi_url?.url);
+      expect(actions[3].multi_url?.url).toContain('openChatId=oc_group');
+      expect(actions[3].multi_url?.pc_url).toBe(actions[3].multi_url?.url);
+      expect(actions[3].multi_url?.android_url).toBe(actions[3].multi_url?.url);
+      expect(actions[3].multi_url?.ios_url).toBe(actions[3].multi_url?.url);
     };
 
     let result = await handleSubstituteDirectCardAction({
@@ -218,12 +218,10 @@ describe('tryHandleSubstituteCommand', () => {
     let actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expectActionRow(actions, [
       'cmd.substitute.direct_btn_enter',
-      'cmd.substitute.direct_btn_intervene',
       'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
     ], [
       'substitute_direct_enter',
-      'substitute_direct_intervene',
       'substitute_direct_disable',
       'substitute_direct_leave_group',
     ]);
@@ -239,32 +237,9 @@ describe('tryHandleSubstituteCommand', () => {
     actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expectActionRow(actions, [
       'cmd.substitute.direct_btn_exit',
-      'cmd.substitute.direct_btn_intervene',
       'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
     ], [
-      'substitute_direct_exit',
-      'substitute_direct_intervene',
-      'substitute_direct_disable',
-      'substitute_direct_leave_group',
-    ]);
-
-    await tryHandleSubstituteCommand(APP, msg('/substitute intervene oc_group', 'p2p'), USER);
-    result = await handleSubstituteDirectCardAction({
-      larkAppId: APP,
-      operatorOpenId: USER,
-      invokerOpenId: USER,
-      action: 'substitute_direct_manage',
-      chatId: 'oc_group',
-    });
-    actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
-    expectActionRow(actions, [
-      'cmd.substitute.direct_btn_enter',
-      'cmd.substitute.direct_btn_exit_intervene',
-      'cmd.substitute.direct_btn_disable_substitute',
-      'cmd.substitute.direct_btn_leave_group',
-    ], [
-      'substitute_direct_enter',
       'substitute_direct_exit',
       'substitute_direct_disable',
       'substitute_direct_leave_group',
@@ -344,7 +319,7 @@ describe('tryHandleSubstituteCommand', () => {
     expect(mockDirect.get(USER)?.chats?.oc_group).toBeFalsy();
   });
 
-  it('DM enter/intervene keeps only one active substitute group', async () => {
+  it('DM enter keeps only one active substitute group', async () => {
     mockListChats.mockResolvedValue([
       { chatId: 'oc_group', name: 'Group', chatMode: 'group' },
       { chatId: 'oc_group_2', name: 'Group 2', chatMode: 'group' },
@@ -353,10 +328,10 @@ describe('tryHandleSubstituteCommand', () => {
     await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group', 'p2p'), USER);
     expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['oc_group']);
 
-    await tryHandleSubstituteCommand(APP, msg('/substitute intervene oc_group_2', 'p2p'), USER);
+    await tryHandleSubstituteCommand(APP, msg('/substitute enter oc_group_2', 'p2p'), USER);
     expect(mockDirect.get(USER)?.activeChatId).toBe('oc_group_2');
     expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['oc_group_2']);
-    expect(mockDirect.get(USER)?.chats?.oc_group_2?.mode).toBe('intervene');
+    expect(mockDirect.get(USER)?.chats?.oc_group_2?.mode).toBe('direct');
   });
 
   it('DM leave-group makes the bot leave the selected group and removes direct state', async () => {
@@ -446,12 +421,11 @@ describe('tryHandleSubstituteCommand', () => {
     const actions = cardActions(detail.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expect(actions.map((a: any) => a.text.content)).toEqual([
       'cmd.substitute.direct_btn_exit',
-      'cmd.substitute.direct_btn_intervene',
       'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
       'cmd.substitute.direct_btn_open_chat',
     ]);
-    expect(actions[4].multi_url?.url).toContain('openChatId=oc_group');
+    expect(actions[3].multi_url?.url).toContain('openChatId=oc_group');
   });
 
   it('card action can enable and disable substitute for the target group', async () => {

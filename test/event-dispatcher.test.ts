@@ -183,19 +183,6 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     if (!Object.keys(binding.chats).length) mockDirectBindings.delete(directKey(appId, openId));
     return true;
   },
-  appendSubstituteInterventionNote: (appId: string, openId: string | undefined, note: string) => {
-    const binding = mockDirectBindings.get(directKey(appId, openId));
-    const chat = binding?.activeChatId ? binding.chats?.[binding.activeChatId] : undefined;
-    if (!chat || chat.mode !== 'intervene') return undefined;
-    chat.interventionNotes = [...(chat.interventionNotes ?? []), note];
-    return chat;
-  },
-  consumeSubstituteInterventionNotes: (appId: string, openId: string | undefined, chatId: string | undefined) => {
-    const chat = chatId ? mockDirectBindings.get(directKey(appId, openId))?.chats?.[chatId] : undefined;
-    const notes = [...(chat?.interventionNotes ?? [])];
-    if (chat) chat.interventionNotes = [];
-    return notes;
-  },
   recordSubstituteDirectForwardedMessage: (input: any) => {
     const binding = mockDirectBindings.get(directKey(input.larkAppId, input.substituteOpenId));
     const chat = input.chatId ? binding?.chats?.[input.chatId] : undefined;
@@ -2747,79 +2734,6 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       chatType: 'p2p',
       messageId: 'msg-substitute-dm-command',
     }));
-  });
-
-  it('substituteMode intervention: DM notes are injected into the next automatic substitute answer', async () => {
-    setupBotState({
-      allowedUsers: [USER_OPEN_ID],
-      substituteMode: {
-        enabled: true,
-        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
-        disclosure: 'prefix',
-      },
-    });
-    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
-      larkAppId: MY_APP_ID,
-      substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-intervene',
-      chats: {
-        'chat-substitute-intervene': {
-          chatId: 'chat-substitute-intervene',
-          chatName: 'Ops Group',
-          targetName: 'Sub Person',
-          mode: 'intervene',
-          disclosure: 'prefix',
-          interventionNotes: [],
-          updatedAt: Date.now(),
-        },
-      },
-      updatedAt: Date.now(),
-    });
-
-    const dmEvent = makeUserMessageEvent({
-      senderOpenId: 'ou_sub',
-      content: JSON.stringify({ text: '背景：先查发布状态' }),
-      messageId: 'msg-substitute-intervene-note',
-      chatId: 'dm-chat',
-      chatType: 'p2p',
-    });
-    await capturedHandlers['im.message.receive_v1'](dmEvent);
-    await flushEventWork();
-
-    expect(mockReplyMessage).toHaveBeenCalledWith(
-      MY_APP_ID,
-      'msg-substitute-intervene-note',
-      expect.stringContaining('已记录为干预补充'),
-      'text',
-      false,
-    );
-    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-intervene']?.interventionNotes)
-      .toEqual(['背景：先查发布状态']);
-
-    const groupEvent = makeUserMessageEvent({
-      senderOpenId: USER_OPEN_ID,
-      content: JSON.stringify({ text: '@Sub Person 看下这个问题' }),
-      messageId: 'msg-substitute-intervene-group',
-      chatId: 'chat-substitute-intervene',
-      chatType: 'group',
-      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
-    });
-    mockGetChatMode.mockResolvedValue('group');
-
-    await capturedHandlers['im.message.receive_v1'](groupEvent);
-    await flushEventWork();
-
-    expect(handlers.handleNewTopic).toHaveBeenCalledWith(groupEvent, expect.objectContaining({
-      scope: 'chat',
-      anchor: 'chat-substitute-intervene',
-      substituteTrigger: expect.objectContaining({
-        target: expect.objectContaining({ openId: 'ou_sub' }),
-        interventionNotes: ['背景：先查发布状态'],
-      }),
-    }));
-    expect(mockSendUserMessage).not.toHaveBeenCalled();
-    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-intervene']?.interventionNotes)
-      .toEqual([]);
   });
 
   it('substituteMode: non-canTalk first turn does not create a session', async () => {

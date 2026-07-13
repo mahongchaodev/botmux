@@ -1,7 +1,5 @@
 import type { SubstituteTrigger } from '../../types.js';
 import {
-  appendSubstituteInterventionNote,
-  consumeSubstituteInterventionNotes,
   getActiveSubstituteDirectChat,
   getSubstituteDirectQuotedGroupMessageId,
   getSubstituteDirectChat,
@@ -121,12 +119,6 @@ export async function forwardSubstituteDmMessageToGroup(input: {
       .catch(err => logger.warn(`[substitute-direct] unsupported DM notice failed: ${err?.message ?? err}`));
     return true;
   }
-  if (chat.mode === 'intervene') {
-    appendSubstituteInterventionNote(input.larkAppId, input.senderOpenId, body);
-    await replyMessage(input.larkAppId, input.message.message_id, t('substitute.intervene.saved', undefined, loc), 'text', false)
-      .catch(err => logger.warn(`[substitute-direct] intervention saved notice failed: ${err?.message ?? err}`));
-    return true;
-  }
   const senderName = await resolveName(input.larkAppId, input.senderOpenId);
   const currentTarget = getBot(input.larkAppId).config.substituteMode?.targets?.find(t => t.openId === input.senderOpenId);
   const name = senderName || currentTarget?.name || chat.targetName || t('substitute.direct.group_fallback_name', undefined, loc);
@@ -155,12 +147,4 @@ export async function forwardSubstituteDmMessageToGroup(input: {
   }
   logger.info(`[substitute-direct:${input.larkAppId}] DM ${input.senderOpenId.substring(0, 12)} → group ${chat.chatId.substring(0, 12)}`);
   return true;
-}
-
-export function consumeSubstituteDirectInterventionNotes(input: {
-  larkAppId: string;
-  substituteOpenId: string | undefined;
-  chatId: string | undefined;
-}): string[] {
-  return consumeSubstituteInterventionNotes(input.larkAppId, input.substituteOpenId, input.chatId);
 }

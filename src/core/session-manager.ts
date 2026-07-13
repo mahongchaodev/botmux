@@ -346,11 +346,6 @@ function renderSubstituteTrigger(trigger?: SubstituteTrigger): string {
     `  <disclosure>${xmlEscape(disclosure)}</disclosure>`,
     `  <instruction>${xmlEscape(instruction)}</instruction>`,
   ];
-  if (trigger.interventionNotes?.length) {
-    lines.push('  <intervention_notes>');
-    for (const note of trigger.interventionNotes) lines.push(`    <note>${xmlEscape(note)}</note>`);
-    lines.push('  </intervention_notes>');
-  }
   lines.push('</substitute_trigger>');
   return lines.join('\n');
 }
