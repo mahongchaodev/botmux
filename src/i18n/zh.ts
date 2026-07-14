@@ -274,6 +274,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_forbidden': '你没有权限查看或操作替身直通。请确认你是该 bot 的 owner/allowedUsers，或已被配置为替身对象。',
   'cmd.substitute.direct_bad_chat': '未找到该群，或该群不是本 bot 所在的普通群。',
   'cmd.substitute.direct_enter_ok': '✅ 已进入替身直通：{chat}',
+  'cmd.substitute.direct_thread_started': '✅ 已为「{chat}」进入替身直通。请在这个话题里回复，我会转发回该群。',
   'cmd.substitute.direct_all': '全部群聊',
   'cmd.substitute.direct_leave_group_ok': '✅ 已让 bot 退出群聊：{chat}',
   'cmd.substitute.direct_leave_group_failed': '⚠️ 退出群聊失败：{reason}',

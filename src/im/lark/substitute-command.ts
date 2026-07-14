@@ -1,6 +1,6 @@
 import { canOperate, extractMessageTextForRouting } from './event-dispatcher.js';
 import { stripLeadingMentions } from './message-parser.js';
-import { getChatMode, replyMessage } from './client.js';
+import { getChatMode, replyMessage, sendUserMessage } from './client.js';
 import { isSubstituteEnabledForChat, setSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
 import {
   clearSubstituteDirectChat,
@@ -70,6 +70,10 @@ type DirectCardState = {
   page?: number;
   detailChatId?: string;
 };
+
+function isP2pThreadMode(larkAppId: string): boolean {
+  try { return getBot(larkAppId).config.p2pMode !== 'chat'; } catch { return true; }
+}
 
 async function listSubstituteDirectChats(larkAppId: string, openId: string | undefined): Promise<DirectChatRow[]> {
   if (!canUseDirectControls(larkAppId, openId)) return [];
@@ -345,6 +349,12 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
   if (action === 'substitute_direct_enter') {
     const target = substituteTargetForDirectAction(larkAppId, openId);
     if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
+    const threadMode = isP2pThreadMode(larkAppId);
+    const existing = getSubstituteDirectBinding(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId))?.chats?.[row.chatId];
+    let dmRootMessageId = existing?.dmRootMessageId;
+    if (threadMode && !dmRootMessageId) {
+      dmRootMessageId = await sendUserMessage(larkAppId, openId, t('cmd.substitute.direct_thread_started', { chat: row.name || row.chatId }, loc), 'text');
+    }
     upsertSubstituteDirectChat({
       larkAppId,
       substituteOpenId: openId,
@@ -356,6 +366,8 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
       targetName: target.name,
       mode: 'direct',
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
+      dmRootMessageId,
+      preserveExistingChats: threadMode,
     });
     return { ok: true, message: t('cmd.substitute.direct_enter_ok', { chat: row.name || row.chatId }, loc) };
   }

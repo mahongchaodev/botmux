@@ -271,6 +271,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_forbidden': 'You do not have permission to view or operate substitute direct mode. Make sure you are this bot owner/allowedUsers, or configured as a substitute target.',
   'cmd.substitute.direct_bad_chat': 'Chat not found, or it is not a regular group that this bot is in.',
   'cmd.substitute.direct_enter_ok': '✅ Entered substitute direct chat: {chat}',
+  'cmd.substitute.direct_thread_started': '✅ Entered substitute direct mode for "{chat}". Reply in this thread and I will forward it back to that group.',
   'cmd.substitute.direct_all': 'all chats',
   'cmd.substitute.direct_leave_group_ok': '✅ Bot left group chat: {chat}',
   'cmd.substitute.direct_leave_group_failed': '⚠️ Failed to leave group chat: {reason}',

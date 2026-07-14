@@ -1,6 +1,7 @@
 import type { SubstituteTrigger } from '../../types.js';
 import {
   getActiveSubstituteDirectChat,
+  getSubstituteDirectChatByDmAnchor,
   getSubstituteDirectQuotedGroupMessageId,
   getSubstituteDirectChat,
   recordSubstituteDirectForwardedMessage,
@@ -52,6 +53,14 @@ function renderMentionKeys(text: string, mentions: any[] | undefined): string {
   return out;
 }
 
+function isP2pThreadMode(larkAppId: string): boolean {
+  try { return getBot(larkAppId).config.p2pMode !== 'chat'; } catch { return true; }
+}
+
+function dmAnchorFromMessage(message: any): string | undefined {
+  return message?.root_id ?? message?.thread_id ?? message?.parent_id;
+}
+
 export async function forwardSubstituteGroupMessageToDm(input: {
   larkAppId: string;
   chatId: string;
@@ -63,9 +72,28 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   if (!targetOpenId) return false;
   const existing = input.direct?.chat ?? getSubstituteDirectChat(input.larkAppId, targetOpenId, input.chatId);
   if (!existing || existing.mode !== 'direct') return false;
+  const p2pThreadMode = isP2pThreadMode(input.larkAppId);
   const loc = localeForBot(input.larkAppId);
   const body = textFromMessage(input.message, { renderAt: true });
   const chatName = await getChatName(input.larkAppId, input.chatId).catch(() => null);
+  const forwardedContent = body
+    ? body
+    : t('substitute.direct.dm_non_text', {
+        messageType: input.message?.message_type ?? input.message?.msg_type ?? t('substitute.direct.non_text_fallback', undefined, loc),
+      }, loc);
+  const content = t('substitute.direct.dm', {
+    chat: chatName ?? input.chatId,
+    target: input.trigger.target.name ?? targetOpenId,
+    content: forwardedContent,
+  }, loc);
+  let dmRootMessageId = existing.dmRootMessageId;
+  let dmMessageId: string;
+  if (p2pThreadMode && dmRootMessageId) {
+    dmMessageId = await replyMessage(input.larkAppId, dmRootMessageId, content, 'text', true);
+  } else {
+    dmMessageId = await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
+    if (p2pThreadMode) dmRootMessageId = dmMessageId;
+  }
   upsertSubstituteDirectChat({
     larkAppId: input.larkAppId,
     substituteOpenId: targetOpenId,
@@ -78,18 +106,9 @@ export async function forwardSubstituteGroupMessageToDm(input: {
     mode: 'direct',
     disclosure: input.trigger.disclosure,
     lastGroupMessageId: input.message?.message_id,
+    dmRootMessageId,
+    preserveExistingChats: p2pThreadMode,
   });
-  const forwardedContent = body
-    ? body
-    : t('substitute.direct.dm_non_text', {
-        messageType: input.message?.message_type ?? input.message?.msg_type ?? t('substitute.direct.non_text_fallback', undefined, loc),
-      }, loc);
-  const content = t('substitute.direct.dm', {
-    chat: chatName ?? input.chatId,
-    target: input.trigger.target.name ?? targetOpenId,
-    content: forwardedContent,
-  }, loc);
-  const dmMessageId = await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
   recordSubstituteDirectForwardedMessage({
     larkAppId: input.larkAppId,
     substituteOpenId: targetOpenId,
@@ -107,7 +126,10 @@ export async function forwardSubstituteDmMessageToGroup(input: {
   senderOpenId: string | undefined;
 }): Promise<boolean> {
   if (input.message?.chat_type !== 'p2p' || !input.senderOpenId) return false;
-  const chat = getActiveSubstituteDirectChat(input.larkAppId, input.senderOpenId);
+  const p2pThreadMode = isP2pThreadMode(input.larkAppId);
+  const chat = p2pThreadMode
+    ? getSubstituteDirectChatByDmAnchor(input.larkAppId, input.senderOpenId, dmAnchorFromMessage(input.message))
+    : getActiveSubstituteDirectChat(input.larkAppId, input.senderOpenId);
   if (!chat) return false;
   const loc = localeForBot(input.larkAppId);
   const rawBody = textFromMessage(input.message);

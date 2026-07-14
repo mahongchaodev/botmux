@@ -18,13 +18,16 @@ vi.mock('../src/im/lark/message-parser.js', () => ({
 
 const mockGetChatMode = vi.fn(async () => 'group' as 'group' | 'topic' | 'p2p');
 const mockReplyMessage = vi.fn(async () => 'msg-id');
+const mockSendUserMessage = vi.fn(async () => 'dm-root-msg');
 vi.mock('../src/im/lark/client.js', () => ({
   getChatMode: (...a: any[]) => mockGetChatMode(...a),
   replyMessage: (...a: any[]) => mockReplyMessage(...a),
+  sendUserMessage: (...a: any[]) => mockSendUserMessage(...a),
 }));
 
 const mockGetBot = vi.fn(() => ({
   config: {
+    p2pMode: 'chat',
     substituteMode: {
       enabled: true,
       targets: [{ openId: USER, name: 'User' }],
@@ -60,7 +63,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     cur.substituteUserId = input.substituteUserId;
     cur.substituteUnionId = input.substituteUnionId;
     cur.targetName = input.targetName;
-    cur.chats = {};
+    if (!input.preserveExistingChats) cur.chats = {};
     cur.chats[input.chatId] = { ...input };
     cur.activeChatId = input.chatId;
     mockDirect.set(input.substituteOpenId, cur);
@@ -122,6 +125,7 @@ describe('tryHandleEchoCommand', () => {
     mockCanTalk.mockReturnValue(true);
     mockGetBot.mockReturnValue({
       config: {
+        p2pMode: 'chat',
         substituteMode: {
           enabled: true,
           targets: [{ openId: USER, name: 'User' }],
@@ -358,6 +362,45 @@ describe('tryHandleEchoCommand', () => {
     expect(mockDirect.get(USER)?.activeChatId).toBe('oc_group_2');
     expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['oc_group_2']);
     expect(mockDirect.get(USER)?.chats?.oc_group_2?.mode).toBe('direct');
+  });
+
+  it('thread-mode DM allows multiple active substitute groups with separate DM roots', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        substituteMode: {
+          enabled: true,
+          targets: [{ openId: USER, name: 'User' }],
+          disclosure: 'prefix',
+        },
+      },
+    });
+    mockListChats.mockResolvedValue([
+      { chatId: 'oc_group', name: 'Group', chatMode: 'group' },
+      { chatId: 'oc_group_2', name: 'Group 2', chatMode: 'group' },
+    ]);
+    mockSendUserMessage
+      .mockResolvedValueOnce('dm-root-1')
+      .mockResolvedValueOnce('dm-root-2');
+
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group_2',
+    });
+
+    expect(Object.keys(mockDirect.get(USER)?.chats ?? {}).sort()).toEqual(['oc_group', 'oc_group_2']);
+    expect(mockDirect.get(USER)?.chats?.oc_group?.dmRootMessageId).toBe('dm-root-1');
+    expect(mockDirect.get(USER)?.chats?.oc_group_2?.dmRootMessageId).toBe('dm-root-2');
+    expect(mockSendUserMessage).toHaveBeenCalledTimes(2);
   });
 
   it('DM leave-group makes the bot leave the selected group and removes direct state', async () => {

@@ -10,6 +10,7 @@ export interface SubstituteDirectChat {
   mode?: 'direct';
   disclosure?: 'prefix' | 'none';
   lastGroupMessageId?: string;
+  dmRootMessageId?: string;
   dmToGroupMessageIds?: Record<string, string>;
   updatedAt: number;
 }
@@ -62,6 +63,7 @@ function normalize(raw: unknown): Store {
           mode: 'direct',
           disclosure: c.disclosure === 'none' ? 'none' : 'prefix',
           lastGroupMessageId: typeof c.lastGroupMessageId === 'string' ? c.lastGroupMessageId : undefined,
+          dmRootMessageId: typeof c.dmRootMessageId === 'string' ? c.dmRootMessageId : undefined,
           dmToGroupMessageIds: c.dmToGroupMessageIds && typeof c.dmToGroupMessageIds === 'object' && !Array.isArray(c.dmToGroupMessageIds)
             ? Object.fromEntries(Object.entries(c.dmToGroupMessageIds).filter((e): e is [string, string] => typeof e[0] === 'string' && typeof e[1] === 'string'))
             : undefined,
@@ -77,6 +79,7 @@ function normalize(raw: unknown): Store {
         mode: 'direct',
         disclosure: b.disclosure === 'none' ? 'none' : 'prefix',
         lastGroupMessageId: typeof b.lastGroupMessageId === 'string' ? b.lastGroupMessageId : undefined,
+        dmRootMessageId: typeof b.dmRootMessageId === 'string' ? b.dmRootMessageId : undefined,
         updatedAt: typeof b.updatedAt === 'number' ? b.updatedAt : 0,
       };
     }
@@ -176,6 +179,8 @@ export function upsertSubstituteDirectChat(input: {
   mode?: 'direct';
   disclosure?: 'prefix' | 'none';
   lastGroupMessageId?: string;
+  dmRootMessageId?: string;
+  preserveExistingChats?: boolean;
 }): SubstituteDirectBinding {
   const store = readStore();
   const k = key(input.larkAppId, input.substituteOpenId);
@@ -189,7 +194,7 @@ export function upsertSubstituteDirectChat(input: {
   current.substituteUserId = input.substituteUserId;
   current.substituteUnionId = input.substituteUnionId;
   current.targetName = input.targetName;
-  current.chats = {};
+  if (!input.preserveExistingChats) current.chats = {};
   current.chats[input.chatId] = {
     chatId: input.chatId,
     chatName: input.chatName || undefined,
@@ -197,6 +202,7 @@ export function upsertSubstituteDirectChat(input: {
     mode: 'direct',
     disclosure: input.disclosure === 'none' ? 'none' : 'prefix',
     lastGroupMessageId: input.lastGroupMessageId,
+    dmRootMessageId: input.dmRootMessageId ?? current.chats[input.chatId]?.dmRootMessageId,
     dmToGroupMessageIds: current.chats[input.chatId]?.dmToGroupMessageIds,
     updatedAt: Date.now(),
   };
@@ -205,6 +211,21 @@ export function upsertSubstituteDirectChat(input: {
   store.bindings[k] = current;
   writeStore(store);
   return current;
+}
+
+export function getSubstituteDirectChatByDmAnchor(
+  larkAppId: string,
+  substituteOpenId: string | undefined,
+  dmMessageId: string | undefined,
+): SubstituteDirectChat | undefined {
+  if (!substituteOpenId || !dmMessageId) return undefined;
+  const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
+  if (!binding) return undefined;
+  for (const chat of Object.values(binding.chats)) {
+    if (chat.dmRootMessageId === dmMessageId) return chat;
+    if (chat.dmToGroupMessageIds?.[dmMessageId]) return chat;
+  }
+  return undefined;
 }
 
 export function recordSubstituteDirectForwardedMessage(input: {
