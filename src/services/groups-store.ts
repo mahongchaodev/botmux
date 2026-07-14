@@ -9,7 +9,7 @@
  * bot to do the invite. This wrapper just exposes the underlying call —
  * proxy selection happens at the route layer.
  */
-import { getBotClient } from '../bot-registry.js';
+import { getBotClient, getBotOpenId } from '../bot-registry.js';
 import { larkGet } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
 
@@ -237,23 +237,41 @@ export async function disbandChat(
  * regardless of role (owner/manager/member). Useful when the bot can't disband
  * (not owner, no operate_as_owner scope) but still wants to detach.
  */
+function isAlreadyLeftChatError(error: string): boolean {
+  return /not in chat|not.*member|chat.*not.*found|invalid.*chat|not exist|230002|230006|230011/i.test(error);
+}
+
 export async function leaveChat(
   larkAppId: string, chatId: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const client = getBotClient(larkAppId);
-  try {
-    const res: any = await (client as any).im.v1.chatMembers.delete({
-      path: { chat_id: chatId },
-      params: { member_id_type: 'app_id' },
-      data: { id_list: [larkAppId] },
-    });
-    if (res.code !== 0 && res.code !== undefined) {
-      return { ok: false, error: `${res.msg ?? 'unknown'} (code: ${res.code})` };
+  const botOpenId = getBotOpenId(larkAppId);
+  const attempts = [
+    { memberIdType: 'app_id', id: larkAppId },
+    ...(botOpenId ? [{ memberIdType: 'open_id', id: botOpenId }] : []),
+  ];
+  let lastError = '';
+  for (const attempt of attempts) {
+    try {
+      const res: any = await (client as any).im.v1.chatMembers.delete({
+        path: { chat_id: chatId },
+        params: { member_id_type: attempt.memberIdType },
+        data: { id_list: [attempt.id] },
+      });
+      if (res.code !== 0 && res.code !== undefined) {
+        lastError = `${res.msg ?? 'unknown'} (code: ${res.code})`;
+        if (isAlreadyLeftChatError(lastError)) return { ok: true };
+        continue;
+      }
+      return { ok: true };
+    } catch (e: any) {
+      lastError = e?.response?.data
+        ? `${e.response.data.msg ?? e.message ?? 'unknown'} (code: ${e.response.data.code ?? 'unknown'})`
+        : (e?.message ?? String(e));
+      if (isAlreadyLeftChatError(lastError)) return { ok: true };
     }
-    return { ok: true };
-  } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e) };
   }
+  return { ok: false, error: lastError || 'unknown' };
 }
 
 /**

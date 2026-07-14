@@ -739,7 +739,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       invokerOpenId: value!.invoker_open_id,
       page: Number.isFinite(page) ? page : 1,
       detailTargetKey: value!.detail_target_key ?? value!.target_key ?? value!.detail_chat_id,
-      activeSessions: activeSessions.values(),
+      activeSessions,
     });
   }
 

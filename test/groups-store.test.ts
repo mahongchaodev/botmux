@@ -12,12 +12,14 @@ const chatCreateStub = vi.fn();
 const chatUpdateStub = vi.fn();
 // chat.link mocks the share-link fetch.
 const chatLinkStub = vi.fn();
+const chatMembersDeleteStub = vi.fn();
 
 // Mock bot-registry's getBotClient — that's where groups-store imports from.
 // Read-only GETs (listChats / isInChat / getChatOwner) now go through
 // `client.request()` to avoid the empty-GET-body 411; mutating calls
 // (chat.create / chat.update / chatMembers.create) stay on generated methods.
 vi.mock('../src/bot-registry.js', () => ({
+  getBotOpenId: vi.fn(() => 'ou_bot_open'),
   getBotClient: vi.fn().mockImplementation(() => ({
     request: vi.fn().mockImplementation(async ({ url }: { url: string }) => {
       if (url.includes('/members/is_in_chat')) {
@@ -59,16 +61,17 @@ vi.mock('../src/bot-registry.js', () => ({
             code: 0,
             data: { invalid_id_list: ['cli_X'] },
           }),
+          delete: chatMembersDeleteStub,
         },
       },
     },
   })),
 }));
 
-import { listChats, isInChat, addBotToChat, createChat, transferChatOwner, getChatShareLink } from '../src/services/groups-store.js';
+import { listChats, isInChat, addBotToChat, createChat, transferChatOwner, getChatShareLink, leaveChat } from '../src/services/groups-store.js';
 
 describe('groups-store wrappers', () => {
-  beforeEach(() => { chatCreateStub.mockClear(); chatUpdateStub.mockClear(); chatLinkStub.mockReset(); });
+  beforeEach(() => { chatCreateStub.mockClear(); chatUpdateStub.mockClear(); chatLinkStub.mockReset(); chatMembersDeleteStub.mockReset().mockResolvedValue({ code: 0 }); });
 
   it('listChats returns ChatBrief array', async () => {
     const out = await listChats('appA');
@@ -83,6 +86,39 @@ describe('groups-store wrappers', () => {
 
   it('isInChat returns boolean', async () => {
     expect(await isInChat('appA', 'c1')).toBe(true);
+  });
+
+
+  it('leaveChat tries app_id first and succeeds', async () => {
+    const r = await leaveChat('cli_creator', 'oc_chat');
+    expect(r).toEqual({ ok: true });
+    expect(chatMembersDeleteStub).toHaveBeenCalledWith(expect.objectContaining({
+      path: { chat_id: 'oc_chat' },
+      params: { member_id_type: 'app_id' },
+      data: { id_list: ['cli_creator'] },
+    }));
+  });
+
+  it('leaveChat falls back to bot open_id when app_id removal gets a 400-like error', async () => {
+    chatMembersDeleteStub
+      .mockRejectedValueOnce({ response: { data: { code: 230001, msg: 'invalid member id' } }, message: 'Request failed with status code 400' })
+      .mockResolvedValueOnce({ code: 0 });
+
+    const r = await leaveChat('cli_creator', 'oc_chat');
+
+    expect(r).toEqual({ ok: true });
+    expect(chatMembersDeleteStub).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      params: { member_id_type: 'open_id' },
+      data: { id_list: ['ou_bot_open'] },
+    }));
+  });
+
+  it('leaveChat treats already-left or missing chats as success', async () => {
+    chatMembersDeleteStub.mockRejectedValueOnce({ response: { data: { code: 230002, msg: 'bot not in chat' } }, message: 'Request failed with status code 400' });
+
+    const r = await leaveChat('cli_creator', 'oc_missing');
+
+    expect(r).toEqual({ ok: true });
   });
 
   it('addBotToChat marks invalid_id_list as failed and rest as ok', async () => {

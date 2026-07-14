@@ -1,6 +1,6 @@
 import { canOperate, extractMessageTextForRouting } from './event-dispatcher.js';
 import { stripLeadingMentions } from './message-parser.js';
-import { getChatMode, replyMessage, sendUserMessage } from './client.js';
+import { getChatMode, getChatNameAndMode, replyMessage, sendUserMessage } from './client.js';
 import { isSubstituteEnabledForChat, setSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
 import {
   clearSubstituteDirectChat,
@@ -16,7 +16,8 @@ import { directMultiUrl } from './card-builder.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
 import type { DaemonSession } from '../../core/types.js';
-import { sessionAnchorId } from '../../core/types.js';
+import { sessionAnchorId, sessionKey } from '../../core/types.js';
+import * as sessionStore from '../../services/session-store.js';
 
 const DIRECT_ACTIONS = new Set([
   'substitute_direct_page',
@@ -85,30 +86,47 @@ function isP2pThreadMode(larkAppId: string): boolean {
   try { return getBot(larkAppId).config.p2pMode !== 'chat'; } catch { return true; }
 }
 
+function isEchoDirectSession(ds: DaemonSession): boolean {
+  if (ds.worker) return true;
+  if (ds.session.cliId) return true;
+  if (ds.session.lastCliInput) return true;
+  return false;
+}
+
 async function listSubstituteDirectChats(
   larkAppId: string,
   openId: string | undefined,
-  activeSessions?: Iterable<DaemonSession>,
+  activeSessions?: Iterable<DaemonSession> | Map<string, DaemonSession>,
 ): Promise<DirectChatRow[]> {
   if (!canUseDirectControls(larkAppId, openId)) return [];
   const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
   const binding = getSubstituteDirectBinding(larkAppId, bindingOpenId);
   if (activeSessions) {
+    const iterable = activeSessions instanceof Map ? activeSessions.values() : activeSessions;
+    const candidates = [...iterable]
+      .filter(ds => ds.larkAppId === larkAppId && ds.chatType !== 'p2p' && ds.session.status === 'active' && !ds.session.adoptedFrom && isEchoDirectSession(ds))
+      .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+    const chatInfos = new Map<string, { name: string | null }>();
+    for (const chatId of [...new Set(candidates.map(ds => ds.chatId))]) {
+      const info = await getChatNameAndMode(larkAppId, chatId).catch(() => ({ name: null }));
+      chatInfos.set(chatId, info);
+    }
     const rows: DirectChatRow[] = [];
-    for (const ds of activeSessions) {
-      if (ds.larkAppId !== larkAppId || ds.chatType === 'p2p' || ds.session.status !== 'active') continue;
+    for (const ds of candidates) {
       const scope = ds.scope === 'chat' ? 'chat' : 'thread';
       const anchor = sessionAnchorId(ds);
       const targetKey = substituteDirectTargetKey(scope, anchor, ds.chatId);
       if (!targetKey) continue;
       const stored = binding?.chats[targetKey] ?? (scope === 'chat' ? binding?.chats[ds.chatId] : undefined);
+      const chatName = chatInfos.get(ds.chatId)?.name ?? ds.session.chatDisplayName ?? ds.chatId;
+      const sessionTitle = ds.session.title || ds.currentTurnTitle || ds.session.sessionId;
       rows.push({
         targetKey,
         scope,
         anchor,
         chatId: ds.chatId,
-        name: ds.session.chatDisplayName,
-        title: ds.session.title || ds.currentTurnTitle,
+        name: chatName,
+        title: scope === 'thread' ? `${chatName}-${sessionTitle}` : sessionTitle,
         sessionId: ds.session.sessionId,
         enabled: stored?.enabled !== false && stored?.mode === 'direct',
         active: binding?.activeChatId === targetKey || (scope === 'chat' && binding?.activeChatId === ds.chatId),
@@ -213,12 +231,12 @@ function buildDirectChatListCardElements(
             chat_id: r.chatId,
           }),
         },
-        {
+        ...(r.scope === 'chat' ? [{
           tag: 'button',
           text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_open_chat', undefined, loc) },
           type: 'default',
           multi_url: directMultiUrl(chatAppLink(r.chatId, brand)),
-        },
+        }] : []),
         {
           tag: 'button',
           text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_leave_group', undefined, loc) },
@@ -357,12 +375,12 @@ function buildDirectChatDetailCardElements(
     {
       tag: 'action',
       actions: [
-        {
+        ...(row.scope === 'chat' ? [{
           tag: 'button',
           text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_open_chat', undefined, loc) },
           type: 'default',
           multi_url: directMultiUrl(chatAppLink(row.chatId, brand)),
-        },
+        }] : []),
         {
           tag: 'button',
           text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_back', undefined, loc) },
@@ -404,7 +422,7 @@ async function applyDirectAction(
   targetKey: string | undefined,
   action: string,
   loc: any,
-  activeSessions?: Iterable<DaemonSession>,
+  activeSessions?: Iterable<DaemonSession> | Map<string, DaemonSession>,
 ): Promise<{ ok: boolean; message: string }> {
   if (!canUseDirectControls(larkAppId, openId)) return { ok: false, message: t('cmd.substitute.direct_forbidden', undefined, loc) };
   if (!openId || !targetKey) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
@@ -460,6 +478,17 @@ async function applyDirectAction(
     if (row.scope !== 'chat') return { ok: false, message: t('cmd.substitute.owner_only', undefined, loc) };
     const left = await leaveChat(larkAppId, row.chatId);
     if (!left.ok) return { ok: false, message: t('cmd.substitute.direct_leave_group_failed', { reason: left.error }, loc) };
+    if (activeSessions) {
+      const iterable = activeSessions instanceof Map ? activeSessions.values() : activeSessions;
+      for (const ds of iterable) {
+        if (ds.larkAppId === larkAppId && ds.chatId === row.chatId && ds.session.status !== 'closed') {
+          try { ds.worker?.kill(); } catch { /* best-effort */ }
+          ds.session.status = 'closed';
+          sessionStore.closeSession(ds.session.sessionId);
+          if (activeSessions instanceof Map) activeSessions.delete(sessionKey(sessionAnchorId(ds), ds.larkAppId));
+        }
+      }
+    }
     clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
     return { ok: true, message: t('cmd.substitute.direct_leave_group_ok', { chat: row.name || row.chatId }, loc) };
   }
@@ -474,7 +503,7 @@ export async function handleSubstituteDirectCardAction(input: {
   invokerOpenId: string | undefined;
   page?: number;
   detailTargetKey?: string;
-  activeSessions?: Iterable<DaemonSession>;
+  activeSessions?: Iterable<DaemonSession> | Map<string, DaemonSession>;
 }): Promise<any> {
   const loc = localeForBot(input.larkAppId);
   if (!input.operatorOpenId || input.operatorOpenId !== input.invokerOpenId) {
@@ -507,7 +536,7 @@ export async function tryHandleEchoCommand(
   larkAppId: string,
   message: any,
   senderOpenId: string | undefined,
-  activeSessions?: Iterable<DaemonSession>,
+  activeSessions?: Iterable<DaemonSession> | Map<string, DaemonSession>,
 ): Promise<boolean> {
   const rawText = extractMessageTextForRouting(message);
   if (!rawText) return false;
