@@ -332,9 +332,9 @@ export function setSubstituteDirectChatBotMention(input: {
   binding.substituteUserId = input.substituteUserId ?? binding.substituteUserId;
   binding.substituteUnionId = input.substituteUnionId ?? binding.substituteUnionId;
   binding.targetName = input.targetName ?? binding.targetName;
-  const targetKey = binding.chats[input.targetKeyOrChatId]
+  const targetKey = binding.chats[input.targetKeyOrChatId] || /^(chat|thread):/.test(input.targetKeyOrChatId)
     ? input.targetKeyOrChatId
-    : substituteDirectTargetKey('chat', input.targetKeyOrChatId, input.targetKeyOrChatId) ?? input.targetKeyOrChatId;
+    : substituteDirectTargetKey(input.scope, input.anchor, input.chatId ?? input.targetKeyOrChatId) ?? input.targetKeyOrChatId;
   const scope = input.scope === 'thread' ? 'thread' : 'chat';
   const chatId = input.chatId || binding.chats[targetKey]?.chatId || (scope === 'chat' ? targetKey.replace(/^chat:/, '') : undefined);
   if (!chatId) return false;

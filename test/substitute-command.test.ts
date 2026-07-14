@@ -74,8 +74,13 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   },
   setSubstituteDirectChatBotMention: (input: any) => {
     const cur = mockDirect.get(input.substituteOpenId) ?? { chats: {} };
-    const chat = cur.chats[input.targetKeyOrChatId] ?? {
-      targetKey: input.targetKeyOrChatId,
+    const targetKey = cur.chats[input.targetKeyOrChatId] || /^(chat|thread):/.test(input.targetKeyOrChatId)
+      ? input.targetKeyOrChatId
+      : input.scope === 'thread' && input.anchor
+        ? `thread:${input.anchor}`
+        : `chat:${input.anchor || input.chatId || input.targetKeyOrChatId}`;
+    const chat = cur.chats[targetKey] ?? {
+      targetKey,
       chatId: input.chatId,
       scope: input.scope,
       anchor: input.anchor,
@@ -83,7 +88,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
       mode: 'direct',
     };
     chat.directBotMention = input.enabled;
-    cur.chats[input.targetKeyOrChatId] = chat;
+    cur.chats[targetKey] = chat;
     mockDirect.set(input.substituteOpenId, cur);
     return true;
   },
@@ -703,6 +708,52 @@ describe('tryHandleEchoCommand', () => {
       mode: 'direct',
       directBotMention: true,
     });
+  });
+
+  it('card action preserves preconfigured @bot forwarding for a thread session', async () => {
+    const activeSessions = [{
+      larkAppId: APP,
+      chatId: 'oc_group',
+      chatType: 'group',
+      scope: 'thread',
+      session: { sessionId: 'sess-thread', status: 'active', chatId: 'oc_group', rootMessageId: 'om_topic_root', title: 'Topic Session', cliId: 'claude-code', createdAt: new Date().toISOString() },
+      lastMessageAt: 1,
+      worker: null,
+    }] as any;
+
+    const on = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_bot_mention_enable',
+      chatId: 'oc_group',
+      detailTargetKey: 'thread:om_topic_root',
+      activeSessions,
+    });
+    expect(on.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_bot_mention_updated_on' });
+    expect(mockDirect.get(USER)?.chats?.['thread:om_topic_root']).toMatchObject({
+      scope: 'thread',
+      anchor: 'om_topic_root',
+      enabled: false,
+      directBotMention: true,
+    });
+    expect(mockDirect.get(USER)?.chats?.['chat:thread:om_topic_root']).toBeUndefined();
+
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+      detailTargetKey: 'thread:om_topic_root',
+      activeSessions,
+    });
+
+    expect(mockDirect.get(USER)?.chats?.['thread:om_topic_root']).toMatchObject({
+      mode: 'direct',
+      directBotMention: true,
+    });
+    expect(mockDirect.get(USER)?.activeChatId).toBe('thread:om_topic_root');
   });
 
   it('card action can enable and disable substitute for the target group', async () => {
