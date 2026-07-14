@@ -17,7 +17,6 @@ import { localeForBot, t } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
 import type { DaemonSession } from '../../core/types.js';
 import { sessionAnchorId, sessionKey } from '../../core/types.js';
-import * as sessionStore from '../../services/session-store.js';
 
 const DIRECT_ACTIONS = new Set([
   'substitute_direct_page',
@@ -423,6 +422,7 @@ async function applyDirectAction(
   action: string,
   loc: any,
   activeSessions?: Iterable<DaemonSession> | Map<string, DaemonSession>,
+  closeSession?: (sessionId: string) => Promise<unknown>,
 ): Promise<{ ok: boolean; message: string }> {
   if (!canUseDirectControls(larkAppId, openId)) return { ok: false, message: t('cmd.substitute.direct_forbidden', undefined, loc) };
   if (!openId || !targetKey) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
@@ -479,14 +479,11 @@ async function applyDirectAction(
     const left = await leaveChat(larkAppId, row.chatId);
     if (!left.ok) return { ok: false, message: t('cmd.substitute.direct_leave_group_failed', { reason: left.error }, loc) };
     if (activeSessions) {
-      const iterable = activeSessions instanceof Map ? activeSessions.values() : activeSessions;
-      for (const ds of iterable) {
-        if (ds.larkAppId === larkAppId && ds.chatId === row.chatId && ds.session.status !== 'closed') {
-          try { ds.worker?.kill(); } catch { /* best-effort */ }
-          ds.session.status = 'closed';
-          sessionStore.closeSession(ds.session.sessionId);
-          if (activeSessions instanceof Map) activeSessions.delete(sessionKey(sessionAnchorId(ds), ds.larkAppId));
-        }
+      const sessionsToClose = [...(activeSessions instanceof Map ? activeSessions.values() : activeSessions)]
+        .filter(ds => ds.larkAppId === larkAppId && ds.chatId === row.chatId && ds.session.status !== 'closed')
+        .map(ds => ds.session.sessionId);
+      for (const sessionId of sessionsToClose) {
+        if (closeSession) await closeSession(sessionId);
       }
     }
     clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
@@ -504,6 +501,7 @@ export async function handleSubstituteDirectCardAction(input: {
   page?: number;
   detailTargetKey?: string;
   activeSessions?: Iterable<DaemonSession> | Map<string, DaemonSession>;
+  closeSession?: (sessionId: string) => Promise<unknown>;
 }): Promise<any> {
   const loc = localeForBot(input.larkAppId);
   if (!input.operatorOpenId || input.operatorOpenId !== input.invokerOpenId) {
@@ -521,7 +519,7 @@ export async function handleSubstituteDirectCardAction(input: {
     };
   }
   const targetKey = input.detailTargetKey || (input.chatId ? substituteDirectTargetKey('chat', input.chatId, input.chatId) : undefined);
-  const result = await applyDirectAction(input.larkAppId, input.operatorOpenId, targetKey, input.action, loc, input.activeSessions);
+  const result = await applyDirectAction(input.larkAppId, input.operatorOpenId, targetKey, input.action, loc, input.activeSessions, input.closeSession);
   const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId, input.activeSessions);
   const detailTargetKey = result.ok && input.action === 'substitute_direct_leave_group'
     ? undefined

@@ -238,7 +238,7 @@ export async function disbandChat(
  * (not owner, no operate_as_owner scope) but still wants to detach.
  */
 function isAlreadyLeftChatError(error: string): boolean {
-  return /not in chat|not.*member|chat.*not.*found|invalid.*chat|not exist|230002|230006|230011/i.test(error);
+  return /not in chat|not.*member|no valid members|chat.*not.*found|invalid.*chat|not exist|230002|230006|230011/i.test(error);
 }
 
 export async function leaveChat(

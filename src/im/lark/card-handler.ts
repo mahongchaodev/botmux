@@ -75,6 +75,7 @@ export interface CardHandlerDeps {
   activeSessions: Map<string, DaemonSession>;
   sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string) => Promise<string>;
   lastRepoScan: Map<string, ProjectInfo[]>;
+  closeSession?: (sessionId: string) => Promise<unknown>;
   workflowApprovalDeps?: WorkflowApprovalHandlerDeps;
   workflowApprovalResolved?: (runId: string) => void | Promise<void>;
   /** v3 humanGate 审批卡点击处理（driveRun 由 daemon 接的 v3 gate runner 提供）. */
@@ -740,6 +741,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       page: Number.isFinite(page) ? page : 1,
       detailTargetKey: value!.detail_target_key ?? value!.target_key ?? value!.detail_chat_id,
       activeSessions,
+      closeSession: deps.closeSession,
     });
   }
 

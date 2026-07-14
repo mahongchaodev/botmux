@@ -2407,6 +2407,7 @@ const cardDeps: CardHandlerDeps = {
   activeSessions,
   sessionReply,
   lastRepoScan,
+  closeSession: (sessionId) => closeSessionHelper(sessionId),
   workflowApprovalResolved: (runId) => {
     driveWorkflowRun(runId).catch((err) => {
       logger.warn(`[workflow:${runId}] re-entry after approval failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -185,8 +185,10 @@ export function getSubstituteDirectChatByTarget(
   targetKey?: string,
 ): { chat: SubstituteDirectChat; substituteOpenId: string } | undefined {
   if (!target || !chatId) return undefined;
+  const strictTarget = !!targetKey && targetKey.startsWith('thread:');
   if (target.openId) {
-    const chat = getSubstituteDirectChat(larkAppId, target.openId, targetKey) ?? getSubstituteDirectChat(larkAppId, target.openId, chatId);
+    const chat = getSubstituteDirectChat(larkAppId, target.openId, targetKey)
+      ?? (strictTarget ? undefined : getSubstituteDirectChat(larkAppId, target.openId, chatId));
     if (chat) return { chat, substituteOpenId: target.openId };
   }
   const store = readStore();
@@ -197,10 +199,11 @@ export function getSubstituteDirectChatByTarget(
       || (target.openId && bindingTargetOpenId === target.openId)
       || (target.userId && binding.substituteUserId === target.userId)
       || (target.unionId && binding.substituteUnionId === target.unionId)
-      || (!!target.name && (binding.targetName === target.name || (targetKey && binding.chats[targetKey]?.targetName === target.name) || binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId]?.targetName === target.name));
+      || (!!target.name && (binding.targetName === target.name || (targetKey && binding.chats[targetKey]?.targetName === target.name) || (!strictTarget && binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId]?.targetName === target.name)));
     if (!matched) continue;
-    const chat = (targetKey ? binding.chats[targetKey] : undefined) ?? binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId];
-    if (chat?.enabled !== false) return { chat, substituteOpenId: binding.substituteOpenId };
+    const chat = (targetKey ? binding.chats[targetKey] : undefined)
+      ?? (strictTarget ? undefined : binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId]);
+    if (chat && chat.enabled !== false) return { chat, substituteOpenId: binding.substituteOpenId };
   }
   return undefined;
 }
