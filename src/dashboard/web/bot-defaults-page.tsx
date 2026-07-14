@@ -516,14 +516,12 @@ function BotDefaultsCard(props: { bot: BotDefaultsRow; cliState: CliOptionsState
 
 function RuntimeEnvironmentSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   const tr = useT();
-  const isRiff = props.bot.backendType === 'riff' || props.bot.cliId === 'riff';
   return (
     <section className="bd-section bd-runtime-env">
       <h3 className="bd-section-title">{tr('botDefaults.sectionRuntimeEnv')}</h3>
       <StartupCommandsSection bot={props.bot} patchBot={props.patchBot} />
       <LaunchShellSection bot={props.bot} patchBot={props.patchBot} />
       <EnvSection bot={props.bot} patchBot={props.patchBot} />
-      {isRiff && <RiffSection bot={props.bot} patchBot={props.patchBot} />}
     </section>
   );
 }
@@ -874,6 +872,8 @@ export function BotAgentSection(props: {
     { value: 'off', label: tr('botDefaults.skillInjectionOff') },
   ];
 
+  const isRiff = cliKey === 'riff';
+
   return (
     <section className="bd-section">
       <h3 className="bd-section-title">{tr('botDefaults.sectionAgent')}</h3>
@@ -890,24 +890,27 @@ export function BotAgentSection(props: {
           />
         </div>
       </div>
-      <div className="bd-row">
-        <label>
-          <FieldTitle help={tr('botDefaults.agentHelp')}>{tr('botDefaults.agentModel')}</FieldTitle>
-          <input
-            type="text"
-            data-input="agentModel"
-            list={`agent-model-suggestions-${bot.larkAppId}`}
-            placeholder={modelPlaceholder}
-            value={model}
-            disabled={agentBusy || modelDisabledByCli}
-            onChange={event => setModel(event.currentTarget.value)}
-          />
-          <datalist id={`agent-model-suggestions-${bot.larkAppId}`}>
-            {suggestions.map(item => <option value={item} key={item} />)}
-          </datalist>
-        </label>
-      </div>
-      {siSupport === 'dynamic' ? (
+      {!isRiff && (
+        <div className="bd-row">
+          <label>
+            <FieldTitle help={tr('botDefaults.agentHelp')}>{tr('botDefaults.agentModel')}</FieldTitle>
+            <input
+              type="text"
+              data-input="agentModel"
+              list={`agent-model-suggestions-${bot.larkAppId}`}
+              placeholder={modelPlaceholder}
+              value={model}
+              disabled={agentBusy || modelDisabledByCli}
+              onChange={event => setModel(event.currentTarget.value)}
+            />
+            <datalist id={`agent-model-suggestions-${bot.larkAppId}`}>
+              {suggestions.map(item => <option value={item} key={item} />)}
+            </datalist>
+          </label>
+        </div>
+      )}
+      {isRiff && <RiffSection bot={bot} patchBot={patchBot} />}
+      {!isRiff && siSupport === 'dynamic' ? (
         <div className="bd-row">
           <div className="bd-field">
             <FieldTitle help={tr('botDefaults.skillInjectionHelpDynamic')}>{tr('botDefaults.skillInjection')}</FieldTitle>
@@ -921,7 +924,7 @@ export function BotAgentSection(props: {
             />
           </div>
         </div>
-      ) : siSupport === 'global' ? (
+      ) : !isRiff && siSupport === 'global' ? (
         <div className="bd-row">
           <div className="bd-field">
             <FieldTitle help={tr('botDefaults.skillInjectionHelp')}>{tr('botDefaults.skillInjection')}</FieldTitle>
@@ -939,10 +942,12 @@ export function BotAgentSection(props: {
           </div>
         </div>
       ) : null}
-      <div className="actions bd-section-actions">
-        <button type="button" className="primary" data-action="save-agent" disabled={agentBusy} onClick={() => void saveAgent()}>{tr('botDefaults.agentSave')}</button>
-        <StatusSpan status={agentStatus} attr={{ 'data-agent-status': '' }} />
-      </div>
+      {!isRiff && (
+        <div className="actions bd-section-actions">
+          <button type="button" className="primary" data-action="save-agent" disabled={agentBusy} onClick={() => void saveAgent()}>{tr('botDefaults.agentSave')}</button>
+          <StatusSpan status={agentStatus} attr={{ 'data-agent-status': '' }} />
+        </div>
+      )}
     </section>
   );
 }
@@ -2259,6 +2264,10 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   const [defaultRepo, setDefaultRepo] = useState(typeof riff.defaultRepo === 'string' ? riff.defaultRepo : '');
   const [defaultBranch, setDefaultBranch] = useState(typeof riff.defaultBranch === 'string' ? riff.defaultBranch : '');
   const [injectStatusLines, setInjectStatusLines] = useState(riff.injectStatusLines === true);
+  const [systemPrompt, setSystemPrompt] = useState(typeof riff.systemPrompt === 'string' ? riff.systemPrompt : '');
+  const [setupCommands, setSetupCommands] = useState(
+    Array.isArray(riff.setupCommands) ? riff.setupCommands.join('\n') : '',
+  );
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
 
@@ -2272,6 +2281,8 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
     setDefaultRepo(typeof r.defaultRepo === 'string' ? r.defaultRepo : '');
     setDefaultBranch(typeof r.defaultBranch === 'string' ? r.defaultBranch : '');
     setInjectStatusLines(r.injectStatusLines === true);
+    setSystemPrompt(typeof r.systemPrompt === 'string' ? r.systemPrompt : '');
+    setSetupCommands(Array.isArray(r.setupCommands) ? r.setupCommands.join('\n') : '');
   }, [props.bot.riff]);
 
   async function save(): Promise<void> {
@@ -2287,6 +2298,10 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
       if (defaultRepo.trim()) config.defaultRepo = defaultRepo.trim();
       if (defaultBranch.trim()) config.defaultBranch = defaultBranch.trim();
       if (injectStatusLines) config.injectStatusLines = true;
+      if (systemPrompt.trim()) config.systemPrompt = systemPrompt.trim();
+      if (setupCommands.trim()) {
+        config.setupCommands = setupCommands.split('\n').map(s => s.trim()).filter(Boolean);
+      }
       const json = Object.keys(config).length ? JSON.stringify(config) : '';
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/riff`, { riff: json });
       if (res.ok && res.body.ok) {
@@ -2326,7 +2341,7 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
       </div>
       <div className="bd-row">
         <label>
-          <span>{tr('botDefaults.riffJwtEnv')}</span>
+          <span><FieldTitle help={tr('botDefaults.riffJwtEnvHelp')}>{tr('botDefaults.riffJwtEnv')}</FieldTitle></span>
           <input type="text" data-input="riff-jwt-env" placeholder={tr('botDefaults.riffJwtEnvPlaceholder')} value={jwtEnv} disabled={busy} onChange={e => setJwtEnv(e.currentTarget.value)} />
         </label>
       </div>
@@ -2348,10 +2363,21 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
           <input type="text" data-input="riff-default-branch" placeholder={tr('botDefaults.riffDefaultBranchPlaceholder')} value={defaultBranch} disabled={busy} onChange={e => setDefaultBranch(e.currentTarget.value)} />
         </label>
       </div>
+      <label className="toggle-row">
+        <input type="checkbox" data-input="riff-inject-status-lines" checked={injectStatusLines} disabled={busy} onChange={e => setInjectStatusLines(e.currentTarget.checked)} />
+        <span className="switch" aria-hidden="true" />
+        <span className="toggle-tx"><strong><FieldTitle help={tr('botDefaults.riffInjectStatusLinesHelp')}>{tr('botDefaults.riffInjectStatusLines')}</FieldTitle></strong></span>
+      </label>
       <div className="bd-row">
         <label>
-          <span>{tr('botDefaults.riffInjectStatusLines')}</span>
-          <input type="checkbox" data-input="riff-inject-status-lines" checked={injectStatusLines} disabled={busy} onChange={e => setInjectStatusLines(e.currentTarget.checked)} />
+          <span>{tr('botDefaults.riffSystemPrompt')}</span>
+          <textarea data-input="riff-system-prompt" placeholder={tr('botDefaults.riffSystemPromptPlaceholder')} value={systemPrompt} disabled={busy} onChange={e => setSystemPrompt(e.currentTarget.value)} rows={4} />
+        </label>
+      </div>
+      <div className="bd-row">
+        <label>
+          <span>{tr('botDefaults.riffSetupCommands')}</span>
+          <textarea data-input="riff-setup-commands" placeholder={tr('botDefaults.riffSetupCommandsPlaceholder')} value={setupCommands} disabled={busy} onChange={e => setSetupCommands(e.currentTarget.value)} rows={3} />
         </label>
       </div>
       <div className="actions">
