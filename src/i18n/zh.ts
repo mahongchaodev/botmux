@@ -155,7 +155,7 @@ export const messages: Record<string, string> = {
   'card.adopt.title': '📡 选择要接入的 CLI 会话',
   'card.adopt.placeholder_select': '选择 CLI 会话',
   'card.adopt.uptime_unknown': '未知',
-  'card.adopt.section_live': '**接管运行中的会话**（观察 tmux / zellij 里的活进程）',
+  'card.adopt.section_live': '**接管运行中的会话**（观察 tmux / herdr / zellij 里的活进程）',
   'card.adopt.section_resume': '**恢复历史会话**（从磁盘 resume 导入，无需进程在跑）',
   'card.adopt.placeholder_resume': '选择要 resume 的历史会话',
   'card.codex_app_thread.title': '📱 选择要继续的 Codex App 对话',

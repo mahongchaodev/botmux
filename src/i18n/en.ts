@@ -152,7 +152,7 @@ export const messages: Record<string, string> = {
   'card.adopt.title': '📡 Choose a CLI session to adopt',
   'card.adopt.placeholder_select': 'Pick a CLI session',
   'card.adopt.uptime_unknown': 'unknown',
-  'card.adopt.section_live': '**Take over a running session** (observe a live tmux / zellij process)',
+  'card.adopt.section_live': '**Take over a running session** (observe a live tmux / herdr / zellij process)',
   'card.adopt.section_resume': '**Resume a past session** (import from disk via --resume; no live process needed)',
   'card.adopt.placeholder_resume': 'Pick a past session to resume',
   'card.codex_app_thread.title': '📱 Choose a Codex App conversation',
