@@ -4,7 +4,9 @@ import { getChatMode, replyMessage, sendUserMessage } from './client.js';
 import { isSubstituteEnabledForChat, setSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
 import {
   clearSubstituteDirectChat,
+  deactivateSubstituteDirectChat,
   getSubstituteDirectBinding,
+  substituteDirectTargetKey,
   upsertSubstituteDirectChat,
 } from '../../services/substitute-direct-store.js';
 import { getBot } from '../../bot-registry.js';
@@ -13,6 +15,8 @@ import { chatAppLink, normalizeBrand } from './lark-hosts.js';
 import { directMultiUrl } from './card-builder.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { logger } from '../../utils/logger.js';
+import type { DaemonSession } from '../../core/types.js';
+import { sessionAnchorId } from '../../core/types.js';
 
 const DIRECT_ACTIONS = new Set([
   'substitute_direct_page',
@@ -56,8 +60,13 @@ const DIRECT_CHAT_PAGE_SIZE = 5;
 const DIRECT_CHAT_JUMP_PAGE_MAX_OPTIONS = 50;
 
 type DirectChatRow = {
+  targetKey: string;
+  scope: 'chat' | 'thread';
+  anchor: string;
   chatId: string;
   name?: string;
+  title?: string;
+  sessionId?: string;
   enabled: boolean;
   active: boolean;
   mode?: 'direct';
@@ -68,7 +77,7 @@ type DirectChatRow = {
 
 type DirectCardState = {
   page?: number;
-  detailChatId?: string;
+  detailTargetKey?: string;
   p2pThreadMode?: boolean;
 };
 
@@ -76,21 +85,58 @@ function isP2pThreadMode(larkAppId: string): boolean {
   try { return getBot(larkAppId).config.p2pMode !== 'chat'; } catch { return true; }
 }
 
-async function listSubstituteDirectChats(larkAppId: string, openId: string | undefined): Promise<DirectChatRow[]> {
+async function listSubstituteDirectChats(
+  larkAppId: string,
+  openId: string | undefined,
+  activeSessions?: Iterable<DaemonSession>,
+): Promise<DirectChatRow[]> {
   if (!canUseDirectControls(larkAppId, openId)) return [];
   const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
   const binding = getSubstituteDirectBinding(larkAppId, bindingOpenId);
+  if (activeSessions) {
+    const rows: DirectChatRow[] = [];
+    for (const ds of activeSessions) {
+      if (ds.larkAppId !== larkAppId || ds.chatType === 'p2p' || ds.session.status !== 'active') continue;
+      const scope = ds.scope === 'chat' ? 'chat' : 'thread';
+      const anchor = sessionAnchorId(ds);
+      const targetKey = substituteDirectTargetKey(scope, anchor, ds.chatId);
+      if (!targetKey) continue;
+      const stored = binding?.chats[targetKey] ?? (scope === 'chat' ? binding?.chats[ds.chatId] : undefined);
+      rows.push({
+        targetKey,
+        scope,
+        anchor,
+        chatId: ds.chatId,
+        name: ds.session.chatDisplayName,
+        title: ds.session.title || ds.currentTurnTitle,
+        sessionId: ds.session.sessionId,
+        enabled: stored?.enabled !== false && stored?.mode === 'direct',
+        active: binding?.activeChatId === targetKey || (scope === 'chat' && binding?.activeChatId === ds.chatId),
+        mode: stored?.mode,
+        substituteEnabled: isSubstituteEnabledForChat(larkAppId, ds.chatId),
+        canOperateChat: canOperate(larkAppId, ds.chatId, openId),
+        canLeaveGroup: scope === 'chat' && canOperate(larkAppId, undefined, openId),
+      });
+    }
+    rows.sort((a, b) => String(a.title ?? a.name ?? a.chatId).localeCompare(String(b.title ?? b.name ?? b.chatId)));
+    return rows;
+  }
   const chats = await listChats(larkAppId);
   const rows: DirectChatRow[] = [];
   for (const c of chats) {
     if (!c.chatId) continue;
     if (await getChatMode(larkAppId, c.chatId) !== 'group') continue;
+    const targetKey = substituteDirectTargetKey('chat', c.chatId, c.chatId) ?? c.chatId;
+    const stored = binding?.chats[targetKey] ?? binding?.chats[c.chatId];
     rows.push({
+      targetKey,
+      scope: 'chat',
+      anchor: c.chatId,
       chatId: c.chatId,
       name: c.name,
-      enabled: !!binding?.chats[c.chatId],
-      active: binding?.activeChatId === c.chatId,
-      mode: binding?.chats[c.chatId]?.mode,
+      enabled: stored?.enabled !== false && stored?.mode === 'direct',
+      active: binding?.activeChatId === targetKey || binding?.activeChatId === c.chatId,
+      mode: stored?.mode,
       substituteEnabled: isSubstituteEnabledForChat(larkAppId, c.chatId),
       canOperateChat: canOperate(larkAppId, c.chatId, openId),
       canLeaveGroup: canOperate(larkAppId, undefined, openId),
@@ -145,12 +191,13 @@ function buildDirectChatListCardElements(
 
   elements.push({ tag: 'div', text: { tag: 'lark_md', content: t('cmd.substitute.direct_list_header', undefined, loc) } });
   for (const r of visible) {
-    const label = r.name || r.chatId;
+    const label = r.title || r.name || r.chatId;
+    const targetLabel = r.scope === 'thread' ? `thread:${r.anchor}` : r.chatId;
     elements.push({
       tag: 'div',
       text: {
         tag: 'lark_md',
-        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatListStateText(r, loc, state.p2pThreadMode === true)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(r, loc)}\n${r.chatId}`,
+        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatListStateText(r, loc, state.p2pThreadMode === true)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(r, loc)}\n${targetLabel}`,
       },
     });
     elements.push({
@@ -162,6 +209,7 @@ function buildDirectChatListCardElements(
           type: 'default',
           value: directChatCardValue(invokerOpenId, page, {
             action: 'substitute_direct_manage',
+            target_key: r.targetKey,
             chat_id: r.chatId,
           }),
         },
@@ -175,13 +223,14 @@ function buildDirectChatListCardElements(
           tag: 'button',
           text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_leave_group', undefined, loc) },
           type: 'danger',
-          disabled: !r.canLeaveGroup,
+          disabled: !r.canLeaveGroup || r.scope !== 'chat',
           confirm: {
             title: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_title', undefined, loc) },
             text: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_text', { chat: label }, loc) },
           },
           value: directChatCardValue(invokerOpenId, page, {
             action: 'substitute_direct_leave_group',
+            target_key: r.targetKey,
             chat_id: r.chatId,
           }),
         },
@@ -244,13 +293,14 @@ function buildDirectChatDetailCardElements(
   page: number,
 ): any[] {
   const brand = normalizeBrand(getBot(larkAppId).config.brand);
-  const label = row.name || row.chatId;
+  const label = row.title || row.name || row.chatId;
+  const targetLabel = row.scope === 'thread' ? `thread:${row.anchor}` : row.chatId;
   const elements: any[] = [
     {
       tag: 'div',
       text: {
         tag: 'lark_md',
-        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatStateText(row, loc)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(row, loc)}\n${row.chatId}`,
+        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatStateText(row, loc)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(row, loc)}\n${targetLabel}`,
       },
     },
     {
@@ -265,8 +315,9 @@ function buildDirectChatDetailCardElements(
           type: row.enabled && row.mode === 'direct' ? 'default' : 'primary',
           value: directChatCardValue(invokerOpenId, page, {
             action: row.enabled && row.mode === 'direct' ? 'substitute_direct_exit' : 'substitute_direct_enter',
+            target_key: row.targetKey,
             chat_id: row.chatId,
-            detail_chat_id: row.chatId,
+            detail_target_key: row.targetKey,
           }),
         },
       ],
@@ -281,21 +332,23 @@ function buildDirectChatDetailCardElements(
           disabled: !row.canOperateChat,
           value: directChatCardValue(invokerOpenId, page, {
             action: row.substituteEnabled ? 'substitute_direct_disable' : 'substitute_direct_enable',
+            target_key: row.targetKey,
             chat_id: row.chatId,
-            detail_chat_id: row.chatId,
+            detail_target_key: row.targetKey,
           }),
         },
         {
           tag: 'button',
           text: { tag: 'plain_text', content: t('cmd.substitute.direct_btn_leave_group', undefined, loc) },
           type: 'danger',
-          disabled: !row.canLeaveGroup,
+          disabled: !row.canLeaveGroup || row.scope !== 'chat',
           confirm: {
             title: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_title', undefined, loc) },
             text: { tag: 'plain_text', content: t('cmd.substitute.direct_leave_group_confirm_text', { chat: label }, loc) },
           },
           value: directChatCardValue(invokerOpenId, page, {
             action: 'substitute_direct_leave_group',
+            target_key: row.targetKey,
             chat_id: row.chatId,
           }),
         },
@@ -330,7 +383,7 @@ function buildDirectChatDetailCardElements(
 
 function buildDirectChatCard(larkAppId: string, rows: DirectChatRow[], invokerOpenId: string, loc: any, state: DirectCardState = {}): string {
   const requestedPage = Number.isFinite(state.page) ? Math.max(1, Math.floor(state.page!)) : 1;
-  const detailRow = state.detailChatId ? rows.find(r => r.chatId === state.detailChatId) : undefined;
+  const detailRow = state.detailTargetKey ? rows.find(r => r.targetKey === state.detailTargetKey) : undefined;
   const p2pThreadMode = state.p2pThreadMode ?? isP2pThreadMode(larkAppId);
   const elements = detailRow
     ? buildDirectChatDetailCardElements(larkAppId, detailRow, invokerOpenId, loc, requestedPage)
@@ -345,20 +398,27 @@ function buildDirectChatCard(larkAppId: string, rows: DirectChatRow[], invokerOp
   });
 }
 
-async function applyDirectAction(larkAppId: string, openId: string | undefined, chatId: string | undefined, action: string, loc: any): Promise<{ ok: boolean; message: string }> {
+async function applyDirectAction(
+  larkAppId: string,
+  openId: string | undefined,
+  targetKey: string | undefined,
+  action: string,
+  loc: any,
+  activeSessions?: Iterable<DaemonSession>,
+): Promise<{ ok: boolean; message: string }> {
   if (!canUseDirectControls(larkAppId, openId)) return { ok: false, message: t('cmd.substitute.direct_forbidden', undefined, loc) };
-  if (!openId || !chatId) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
+  if (!openId || !targetKey) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
   if (action === 'substitute_direct_leave_group' && !canOperate(larkAppId, undefined, openId)) {
     return { ok: false, message: t('cmd.substitute.owner_only', undefined, loc) };
   }
-  const rows = await listSubstituteDirectChats(larkAppId, openId);
-  const row = rows.find(r => r.chatId === chatId);
+  const rows = await listSubstituteDirectChats(larkAppId, openId, activeSessions);
+  const row = rows.find(r => r.targetKey === targetKey) ?? rows.find(r => r.chatId === targetKey);
   if (!row) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
   if (action === 'substitute_direct_enter') {
     const target = substituteTargetForDirectAction(larkAppId, openId);
     if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
     const threadMode = isP2pThreadMode(larkAppId);
-    const existing = getSubstituteDirectBinding(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId))?.chats?.[row.chatId];
+    const existing = getSubstituteDirectBinding(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId))?.chats?.[row.targetKey];
     let dmRootMessageId = existing?.dmRootMessageId;
     if (threadMode && !dmRootMessageId) {
       dmRootMessageId = await sendUserMessage(larkAppId, openId, t('cmd.substitute.direct_thread_started', { chat: row.name || row.chatId }, loc), 'text');
@@ -370,6 +430,12 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
       substituteUserId: target.userId,
       substituteUnionId: target.unionId,
       chatId: row.chatId,
+      targetKey: row.targetKey,
+      scope: row.scope,
+      anchor: row.anchor,
+      title: row.title,
+      sessionId: row.sessionId,
+      chatType: 'group',
       chatName: row.name,
       targetName: target.name,
       mode: 'direct',
@@ -386,13 +452,15 @@ async function applyDirectAction(larkAppId: string, openId: string | undefined, 
     return { ok: true, message: t(enabled ? 'cmd.substitute.updated_on' : 'cmd.substitute.updated_off', undefined, loc) };
   }
   if (action === 'substitute_direct_exit') {
-    const existed = clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.chatId);
+    const { deactivateSubstituteDirectChat } = await import('../../services/substitute-direct-store.js');
+    const existed = deactivateSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
     return { ok: existed, message: existed ? t('cmd.substitute.direct_exit_ok', { chat: row.name || row.chatId }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc) };
   }
   if (action === 'substitute_direct_leave_group') {
+    if (row.scope !== 'chat') return { ok: false, message: t('cmd.substitute.owner_only', undefined, loc) };
     const left = await leaveChat(larkAppId, row.chatId);
     if (!left.ok) return { ok: false, message: t('cmd.substitute.direct_leave_group_failed', { reason: left.error }, loc) };
-    clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.chatId);
+    clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
     return { ok: true, message: t('cmd.substitute.direct_leave_group_ok', { chat: row.name || row.chatId }, loc) };
   }
   return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
@@ -405,7 +473,8 @@ export async function handleSubstituteDirectCardAction(input: {
   chatId: string | undefined;
   invokerOpenId: string | undefined;
   page?: number;
-  detailChatId?: string;
+  detailTargetKey?: string;
+  activeSessions?: Iterable<DaemonSession>;
 }): Promise<any> {
   const loc = localeForBot(input.larkAppId);
   if (!input.operatorOpenId || input.operatorOpenId !== input.invokerOpenId) {
@@ -414,20 +483,23 @@ export async function handleSubstituteDirectCardAction(input: {
   const rawPage = Number(input.page ?? 1);
   const page = Number.isFinite(rawPage) && rawPage > 0 ? Math.floor(rawPage) : 1;
   if (input.action === 'substitute_direct_page' || input.action === 'substitute_direct_back' || input.action === 'substitute_direct_manage') {
-    const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId);
-    const detailChatId = input.action === 'substitute_direct_manage' ? input.chatId : undefined;
+    const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId, input.activeSessions);
+    const detailTargetKey = input.action === 'substitute_direct_manage'
+      ? (input.detailTargetKey ?? (input.chatId ? substituteDirectTargetKey('chat', input.chatId, input.chatId) : undefined))
+      : undefined;
     return {
-      card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc, { page, detailChatId })) },
+      card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc, { page, detailTargetKey })) },
     };
   }
-  const result = await applyDirectAction(input.larkAppId, input.operatorOpenId, input.chatId, input.action, loc);
-  const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId);
-  const detailChatId = result.ok && input.action === 'substitute_direct_leave_group'
+  const targetKey = input.detailTargetKey || (input.chatId ? substituteDirectTargetKey('chat', input.chatId, input.chatId) : undefined);
+  const result = await applyDirectAction(input.larkAppId, input.operatorOpenId, targetKey, input.action, loc, input.activeSessions);
+  const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId, input.activeSessions);
+  const detailTargetKey = result.ok && input.action === 'substitute_direct_leave_group'
     ? undefined
-    : input.detailChatId;
+    : input.detailTargetKey;
   return {
     toast: { type: result.ok ? 'success' : 'error', content: result.message },
-    card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc, { page, detailChatId })) },
+    card: { type: 'raw', data: JSON.parse(buildDirectChatCard(input.larkAppId, rows, input.operatorOpenId, loc, { page, detailTargetKey })) },
   };
 }
 
@@ -435,6 +507,7 @@ export async function tryHandleEchoCommand(
   larkAppId: string,
   message: any,
   senderOpenId: string | undefined,
+  activeSessions?: Iterable<DaemonSession>,
 ): Promise<boolean> {
   const rawText = extractMessageTextForRouting(message);
   if (!rawText) return false;
@@ -460,7 +533,7 @@ export async function tryHandleEchoCommand(
     return true;
   }
   await (messageId
-    ? replyMessage(larkAppId, messageId, buildDirectChatCard(larkAppId, await listSubstituteDirectChats(larkAppId, senderOpenId), senderOpenId, loc), 'interactive', false)
+    ? replyMessage(larkAppId, messageId, buildDirectChatCard(larkAppId, await listSubstituteDirectChats(larkAppId, senderOpenId, activeSessions), senderOpenId, loc), 'interactive', false)
         .catch(err => logger.warn(`[echo] reply failed: ${err?.message ?? err}`))
     : Promise.resolve());
   return true;

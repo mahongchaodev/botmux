@@ -55,6 +55,7 @@ vi.mock('../src/services/substitute-chat-toggle-store.js', () => ({
 
 const mockDirect = new Map<string, any>();
 vi.mock('../src/services/substitute-direct-store.js', () => ({
+  substituteDirectTargetKey: (scope: string | undefined, anchor: string | undefined, chatId?: string) => scope === 'thread' && anchor ? `thread:${anchor}` : `chat:${anchor || chatId}`,
   getSubstituteDirectBinding: (_app: string, openId: string) => mockDirect.get(openId),
   getSubstituteDirectChat: (_app: string, openId: string, chatId: string) => mockDirect.get(openId)?.chats?.[chatId],
   upsertSubstituteDirectChat: (input: any) => {
@@ -64,8 +65,8 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     cur.substituteUnionId = input.substituteUnionId;
     cur.targetName = input.targetName;
     if (!input.preserveExistingChats) cur.chats = {};
-    cur.chats[input.chatId] = { ...input };
-    cur.activeChatId = input.chatId;
+    cur.chats[input.targetKey ?? input.chatId] = { ...input };
+    cur.activeChatId = input.targetKey ?? input.chatId;
     mockDirect.set(input.substituteOpenId, cur);
     return cur;
   },
@@ -291,7 +292,7 @@ describe('tryHandleEchoCommand', () => {
     mockCanOperate.mockReturnValue(false);
     mockGetBot.mockReturnValue({ config: { substituteMode: { enabled: true, targets: [], disclosure: 'prefix' } } });
     mockDirect.set(USER, {
-      activeChatId: 'oc_group',
+      activeChatId: 'chat:oc_group',
       chats: {
         oc_group: { chatId: 'oc_group', mode: 'direct' },
       },
@@ -350,7 +351,7 @@ describe('tryHandleEchoCommand', () => {
       action: 'substitute_direct_enter',
       chatId: 'oc_group',
     });
-    expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['oc_group']);
+    expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['chat:oc_group']);
 
     await handleSubstituteDirectCardAction({
       larkAppId: APP,
@@ -359,9 +360,9 @@ describe('tryHandleEchoCommand', () => {
       action: 'substitute_direct_enter',
       chatId: 'oc_group_2',
     });
-    expect(mockDirect.get(USER)?.activeChatId).toBe('oc_group_2');
-    expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['oc_group_2']);
-    expect(mockDirect.get(USER)?.chats?.oc_group_2?.mode).toBe('direct');
+    expect(mockDirect.get(USER)?.activeChatId).toBe('chat:oc_group_2');
+    expect(Object.keys(mockDirect.get(USER)?.chats ?? {})).toEqual(['chat:oc_group_2']);
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group_2']?.mode).toBe('direct');
   });
 
   it('thread-mode DM allows multiple active substitute groups with separate DM roots', async () => {
@@ -397,9 +398,9 @@ describe('tryHandleEchoCommand', () => {
       chatId: 'oc_group_2',
     });
 
-    expect(Object.keys(mockDirect.get(USER)?.chats ?? {}).sort()).toEqual(['oc_group', 'oc_group_2']);
-    expect(mockDirect.get(USER)?.chats?.oc_group?.dmRootMessageId).toBe('dm-root-1');
-    expect(mockDirect.get(USER)?.chats?.oc_group_2?.dmRootMessageId).toBe('dm-root-2');
+    expect(Object.keys(mockDirect.get(USER)?.chats ?? {}).sort()).toEqual(['chat:oc_group', 'chat:oc_group_2']);
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.dmRootMessageId).toBe('dm-root-1');
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group_2']?.dmRootMessageId).toBe('dm-root-2');
     expect(mockSendUserMessage).toHaveBeenCalledTimes(2);
 
     await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
@@ -490,9 +491,9 @@ describe('tryHandleEchoCommand', () => {
       substituteUserId: 'u_sub',
       substituteUnionId: 'on_sub',
       targetName: 'Sub',
-      activeChatId: 'oc_group',
+      activeChatId: 'chat:oc_group',
       chats: {
-        oc_group: expect.objectContaining({ mode: 'direct', targetName: 'Sub' }),
+        'chat:oc_group': expect.objectContaining({ mode: 'direct', targetName: 'Sub' }),
       },
     });
   });

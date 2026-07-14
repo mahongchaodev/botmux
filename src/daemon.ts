@@ -8190,6 +8190,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       handleCardAction: (data, appId) => handleCardAction(data, cardDeps, appId),
       handleNewTopic: (data, ctx) => handleNewTopic(data, ctx),
       handleThreadReply: (data, ctx) => handleThreadReply(data, ctx),
+      activeSessions: () => activeSessions.values(),
       handleBotAdded: (chatId, operatorOpenId, appId) => handleBotAdded(chatId, operatorOpenId, appId),
       handleDocComment: (ctx) => handleDocComment(ctx),
       handleVcMeetingPush: (ctx) => handleVcMeetingPush(ctx),

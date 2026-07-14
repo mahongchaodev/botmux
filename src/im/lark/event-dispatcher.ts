@@ -38,7 +38,7 @@ import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
 import { tryHandleEchoCommand } from './substitute-command.js';
 import { forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
-import { getSubstituteDirectChat, getSubstituteDirectChatByTarget } from '../../services/substitute-direct-store.js';
+import { getSubstituteDirectChat, getSubstituteDirectChatByTarget, substituteDirectTargetKey } from '../../services/substitute-direct-store.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled, clearPending } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
@@ -1296,6 +1296,7 @@ export interface EventHandlers {
   handleCardAction: (data: any, larkAppId: string) => Promise<any>;
   handleNewTopic: (data: any, ctx: RoutingContext) => Promise<void>;
   handleThreadReply: (data: any, ctx: RoutingContext) => Promise<void>;
+  activeSessions?: () => Iterable<import('../../core/types.js').DaemonSession>;
   /** 主动开工 — 场景①: fired when this bot is added to a chat
    *  (`im.chat.member.bot.added_v1`). The daemon decides whether to auto-start
    *  based on the bot's `autoStartOnGroupJoin` toggle + allowedUser membership.
@@ -2038,7 +2039,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           return;
         }
 
-        if (await tryHandleEchoCommand(larkAppId, message, senderOpenId)) {
+        if (await tryHandleEchoCommand(larkAppId, message, senderOpenId, handlers.activeSessions?.())) {
           return;
         }
 
@@ -2094,7 +2095,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           if (stripped.startsWith('/')) substituteTrigger = undefined;
         }
         if (substituteTrigger) {
-          const direct = getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId);
+          const directTargetKey = substituteDirectTargetKey(routing.scope, routing.anchor, chatId);
+          const direct = getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId, directTargetKey);
           logger.info(
             `[substitute-direct:${larkAppId}] lookup chat=${chatId.substring(0, 12)} ` +
             `target=${substituteTrigger.target.openId ?? substituteTrigger.target.userId ?? substituteTrigger.target.unionId ?? substituteTrigger.target.name ?? 'unknown'} ` +
@@ -2105,6 +2107,9 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
               const forwarded = await forwardSubstituteGroupMessageToDm({
                 larkAppId,
                 chatId,
+                targetKey: directTargetKey,
+                scope: routing.scope,
+                anchor: routing.anchor,
                 message,
                 trigger: substituteTrigger,
                 direct,

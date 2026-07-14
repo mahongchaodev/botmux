@@ -5,6 +5,7 @@ import {
   getSubstituteDirectQuotedGroupMessageId,
   getSubstituteDirectChat,
   recordSubstituteDirectForwardedMessage,
+  substituteDirectTargetKey,
   upsertSubstituteDirectChat,
   type SubstituteDirectChat,
 } from '../../services/substitute-direct-store.js';
@@ -70,6 +71,9 @@ function isDmRootUnavailableError(err: unknown): boolean {
 export async function forwardSubstituteGroupMessageToDm(input: {
   larkAppId: string;
   chatId: string;
+  targetKey?: string;
+  scope?: 'chat' | 'thread';
+  anchor?: string;
   message: any;
   trigger: SubstituteTrigger;
   direct?: { substituteOpenId: string; chat: SubstituteDirectChat };
@@ -114,6 +118,12 @@ export async function forwardSubstituteGroupMessageToDm(input: {
     substituteUserId: input.trigger.target.userId,
     substituteUnionId: input.trigger.target.unionId,
     chatId: input.chatId,
+    targetKey: input.targetKey ?? existing.targetKey,
+    scope: input.scope ?? existing.scope,
+    anchor: input.anchor ?? existing.anchor,
+    title: existing.title,
+    sessionId: existing.sessionId,
+    chatType: existing.chatType,
     chatName,
     targetName: input.trigger.target.name,
     mode: 'direct',
@@ -125,7 +135,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   recordSubstituteDirectForwardedMessage({
     larkAppId: input.larkAppId,
     substituteOpenId: targetOpenId,
-    chatId: input.chatId,
+    chatId: input.targetKey ?? existing.targetKey ?? substituteDirectTargetKey(input.scope ?? existing.scope, input.anchor ?? existing.anchor, input.chatId) ?? input.chatId,
     dmMessageId,
     groupMessageId: input.message?.message_id,
   });
@@ -172,13 +182,21 @@ export async function forwardSubstituteDmMessageToGroup(input: {
       await replyMessage(input.larkAppId, quotedGroupMessageId, card, 'interactive', false, undefined, hookContext);
     } catch (err) {
       if (err instanceof MessageWithdrawnError) {
-        await sendMessage(input.larkAppId, chat.chatId, card, 'interactive', undefined, hookContext);
+        if (chat.scope === 'thread' && chat.anchor) {
+          await replyMessage(input.larkAppId, chat.anchor, card, 'interactive', true, undefined, hookContext);
+        } else {
+          await sendMessage(input.larkAppId, chat.chatId, card, 'interactive', undefined, hookContext);
+        }
       } else {
         throw err;
       }
     }
   } else {
-    await sendMessage(input.larkAppId, chat.chatId, card, 'interactive', undefined, hookContext);
+    if (chat.scope === 'thread' && chat.anchor) {
+      await replyMessage(input.larkAppId, chat.anchor, card, 'interactive', true, undefined, hookContext);
+    } else {
+      await sendMessage(input.larkAppId, chat.chatId, card, 'interactive', undefined, hookContext);
+    }
   }
   logger.info(`[substitute-direct:${input.larkAppId}] DM ${input.senderOpenId.substring(0, 12)} → group ${chat.chatId.substring(0, 12)}`);
   return true;

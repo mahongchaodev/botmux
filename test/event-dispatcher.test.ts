@@ -132,6 +132,7 @@ vi.mock('../src/services/substitute-chat-toggle-store.js', () => ({
 const mockDirectBindings = new Map<string, any>();
 const directKey = (appId: string, openId: string | undefined) => `${appId}::${openId ?? ''}`;
 vi.mock('../src/services/substitute-direct-store.js', () => ({
+  substituteDirectTargetKey: (scope: string | undefined, anchor: string | undefined, chatId?: string) => scope === 'thread' && anchor ? `thread:${anchor}` : `chat:${anchor || chatId}`,
   getSubstituteDirectBinding: (appId: string, openId: string | undefined) => mockDirectBindings.get(directKey(appId, openId)),
   getActiveSubstituteDirectChat: (appId: string, openId: string | undefined) => {
     const binding = mockDirectBindings.get(directKey(appId, openId));
@@ -177,7 +178,8 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     binding.targetName = input.targetName;
     const prior = binding.chats?.[input.chatId];
     if (!input.preserveExistingChats) binding.chats = {};
-    binding.chats[input.chatId] = { ...input, dmToGroupMessageIds: prior?.dmToGroupMessageIds, updatedAt: Date.now() };
+    binding.chats[input.targetKey ?? input.chatId] = { ...input, dmToGroupMessageIds: prior?.dmToGroupMessageIds, updatedAt: Date.now() };
+    if (input.targetKey) binding.chats[input.chatId] = binding.chats[input.targetKey];
     binding.activeChatId = input.chatId;
     binding.updatedAt = Date.now();
     mockDirectBindings.set(k, binding);
@@ -194,7 +196,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   },
   recordSubstituteDirectForwardedMessage: (input: any) => {
     const binding = mockDirectBindings.get(directKey(input.larkAppId, input.substituteOpenId));
-    const chat = input.chatId ? binding?.chats?.[input.chatId] : undefined;
+    const chat = input.chatId ? (binding?.chats?.[input.chatId] ?? binding?.chats?.[`chat:${input.chatId}`] ?? binding?.chats?.[`thread:${input.chatId}`]) : undefined;
     if (!chat || !input.dmMessageId || !input.groupMessageId) return;
     chat.dmToGroupMessageIds = { ...(chat.dmToGroupMessageIds ?? {}), [input.dmMessageId]: input.groupMessageId };
   },

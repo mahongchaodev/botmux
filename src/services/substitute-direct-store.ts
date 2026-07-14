@@ -4,10 +4,17 @@ import { config } from '../config.js';
 import { atomicWriteFileSync } from '../utils/atomic-write.js';
 
 export interface SubstituteDirectChat {
+  targetKey?: string;
+  scope?: 'chat' | 'thread';
+  anchor?: string;
   chatId: string;
   chatName?: string;
+  title?: string;
+  sessionId?: string;
+  chatType?: 'group' | 'p2p';
   targetName?: string;
   mode?: 'direct';
+  enabled?: boolean;
   disclosure?: 'prefix' | 'none';
   lastGroupMessageId?: string;
   dmRootMessageId?: string;
@@ -39,6 +46,12 @@ function key(larkAppId: string, substituteOpenId: string): string {
   return `${larkAppId}::${substituteOpenId}`;
 }
 
+export function substituteDirectTargetKey(scope: 'chat' | 'thread' | undefined, anchor: string | undefined, chatId?: string): string | undefined {
+  if (scope === 'thread' && anchor) return `thread:${anchor}`;
+  const id = anchor || chatId;
+  return id ? `chat:${id}` : undefined;
+}
+
 function normalize(raw: unknown): Store {
   const bindings: Record<string, SubstituteDirectBinding> = {};
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { bindings };
@@ -52,15 +65,26 @@ function normalize(raw: unknown): Store {
     if (typeof b.substituteOpenId !== 'string' || !b.substituteOpenId) continue;
     const chats: Record<string, SubstituteDirectChat> = {};
     if (b.chats && typeof b.chats === 'object' && !Array.isArray(b.chats)) {
-      for (const [chatId, rawChat] of Object.entries(b.chats)) {
+      for (const [chatKey, rawChat] of Object.entries(b.chats)) {
         if (!rawChat || typeof rawChat !== 'object' || Array.isArray(rawChat)) continue;
         const c = rawChat as Record<string, unknown>;
         if (c.mode === 'intervene') continue;
-        chats[chatId] = {
+        const scope = c.scope === 'thread' ? 'thread' : 'chat';
+        const chatId = typeof c.chatId === 'string' && c.chatId ? c.chatId : chatKey.replace(/^chat:/, '');
+        const anchor = typeof c.anchor === 'string' && c.anchor ? c.anchor : (scope === 'thread' ? chatKey.replace(/^thread:/, '') : chatId);
+        const targetKey = typeof c.targetKey === 'string' && c.targetKey ? c.targetKey : substituteDirectTargetKey(scope, anchor, chatId) ?? chatKey;
+        chats[targetKey] = {
+          targetKey,
+          scope,
+          anchor,
           chatId,
           chatName: typeof c.chatName === 'string' ? c.chatName : undefined,
+          title: typeof c.title === 'string' ? c.title : undefined,
+          sessionId: typeof c.sessionId === 'string' ? c.sessionId : undefined,
+          chatType: c.chatType === 'p2p' ? 'p2p' : 'group',
           targetName: typeof c.targetName === 'string' ? c.targetName : undefined,
           mode: 'direct',
+          enabled: c.enabled !== false,
           disclosure: c.disclosure === 'none' ? 'none' : 'prefix',
           lastGroupMessageId: typeof c.lastGroupMessageId === 'string' ? c.lastGroupMessageId : undefined,
           dmRootMessageId: typeof c.dmRootMessageId === 'string' ? c.dmRootMessageId : undefined,
@@ -72,11 +96,16 @@ function normalize(raw: unknown): Store {
       }
     } else if (typeof b.chatId === 'string' && b.chatId) {
       // Backward-compatible read of the short-lived single-binding shape.
-      chats[b.chatId] = {
+      const targetKey = substituteDirectTargetKey('chat', b.chatId, b.chatId) ?? b.chatId;
+      chats[targetKey] = {
+        targetKey,
+        scope: 'chat',
+        anchor: b.chatId,
         chatId: b.chatId,
         chatName: typeof b.chatName === 'string' ? b.chatName : undefined,
         targetName: typeof b.targetName === 'string' ? b.targetName : undefined,
         mode: 'direct',
+        enabled: true,
         disclosure: b.disclosure === 'none' ? 'none' : 'prefix',
         lastGroupMessageId: typeof b.lastGroupMessageId === 'string' ? b.lastGroupMessageId : undefined,
         dmRootMessageId: typeof b.dmRootMessageId === 'string' ? b.dmRootMessageId : undefined,
@@ -84,8 +113,12 @@ function normalize(raw: unknown): Store {
       };
     }
     if (Object.keys(chats).length === 0) continue;
-    const activeChatId = typeof b.activeChatId === 'string' && chats[b.activeChatId]
-      ? b.activeChatId
+    const rawActiveChatId = typeof b.activeChatId === 'string' ? b.activeChatId : undefined;
+    const activeKey = rawActiveChatId
+      ? (chats[rawActiveChatId] ? rawActiveChatId : substituteDirectTargetKey('chat', rawActiveChatId, rawActiveChatId))
+      : undefined;
+    const activeChatId = activeKey && chats[activeKey]
+      ? rawActiveChatId
       : Object.values(chats).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.chatId;
     bindings[k] = {
       larkAppId: b.larkAppId,
@@ -94,7 +127,7 @@ function normalize(raw: unknown): Store {
       substituteUserId: typeof b.substituteUserId === 'string' ? b.substituteUserId : undefined,
       substituteUnionId: typeof b.substituteUnionId === 'string' ? b.substituteUnionId : undefined,
       targetName: typeof b.targetName === 'string' ? b.targetName : undefined,
-      activeChatId,
+      activeChatId: activeKey && chats[activeKey] ? activeKey : activeChatId,
       chats,
       updatedAt: typeof b.updatedAt === 'number' ? b.updatedAt : 0,
     };
@@ -129,26 +162,31 @@ export function getActiveSubstituteDirectChat(
 ): SubstituteDirectChat | undefined {
   const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
   if (!binding?.activeChatId) return undefined;
-  return binding.chats[binding.activeChatId];
+  const chat = binding.chats[binding.activeChatId] ?? binding.chats[substituteDirectTargetKey('chat', binding.activeChatId, binding.activeChatId) ?? ''];
+  return chat?.enabled === false ? undefined : chat;
 }
 
 export function getSubstituteDirectChat(
   larkAppId: string,
   substituteOpenId: string | undefined,
-  chatId: string | undefined,
+  chatIdOrTargetKey: string | undefined,
 ): SubstituteDirectChat | undefined {
-  if (!chatId) return undefined;
-  return getSubstituteDirectBinding(larkAppId, substituteOpenId)?.chats[chatId];
+  if (!chatIdOrTargetKey) return undefined;
+  const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
+  const chat = binding?.chats[chatIdOrTargetKey]
+    ?? binding?.chats[substituteDirectTargetKey('chat', chatIdOrTargetKey, chatIdOrTargetKey) ?? ''];
+  return chat?.enabled === false ? undefined : chat;
 }
 
 export function getSubstituteDirectChatByTarget(
   larkAppId: string,
   target: { openId?: string; userId?: string; unionId?: string; name?: string } | undefined,
   chatId: string | undefined,
+  targetKey?: string,
 ): { chat: SubstituteDirectChat; substituteOpenId: string } | undefined {
   if (!target || !chatId) return undefined;
   if (target.openId) {
-    const chat = getSubstituteDirectChat(larkAppId, target.openId, chatId);
+    const chat = getSubstituteDirectChat(larkAppId, target.openId, targetKey) ?? getSubstituteDirectChat(larkAppId, target.openId, chatId);
     if (chat) return { chat, substituteOpenId: target.openId };
   }
   const store = readStore();
@@ -159,10 +197,10 @@ export function getSubstituteDirectChatByTarget(
       || (target.openId && bindingTargetOpenId === target.openId)
       || (target.userId && binding.substituteUserId === target.userId)
       || (target.unionId && binding.substituteUnionId === target.unionId)
-      || (!!target.name && (binding.targetName === target.name || binding.chats[chatId]?.targetName === target.name));
+      || (!!target.name && (binding.targetName === target.name || (targetKey && binding.chats[targetKey]?.targetName === target.name) || binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId]?.targetName === target.name));
     if (!matched) continue;
-    const chat = binding.chats[chatId];
-    if (chat) return { chat, substituteOpenId: binding.substituteOpenId };
+    const chat = (targetKey ? binding.chats[targetKey] : undefined) ?? binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId];
+    if (chat?.enabled !== false) return { chat, substituteOpenId: binding.substituteOpenId };
   }
   return undefined;
 }
@@ -174,6 +212,12 @@ export function upsertSubstituteDirectChat(input: {
   substituteUserId?: string;
   substituteUnionId?: string;
   chatId: string;
+  targetKey?: string;
+  scope?: 'chat' | 'thread';
+  anchor?: string;
+  title?: string;
+  sessionId?: string;
+  chatType?: 'group' | 'p2p';
   chatName?: string | null;
   targetName?: string;
   mode?: 'direct';
@@ -195,18 +239,28 @@ export function upsertSubstituteDirectChat(input: {
   current.substituteUnionId = input.substituteUnionId;
   current.targetName = input.targetName;
   if (!input.preserveExistingChats) current.chats = {};
-  current.chats[input.chatId] = {
+  const scope = input.scope === 'thread' ? 'thread' : 'chat';
+  const anchor = input.anchor || (scope === 'thread' ? input.targetKey?.replace(/^thread:/, '') : input.chatId);
+  const targetKey = input.targetKey ?? substituteDirectTargetKey(scope, anchor, input.chatId) ?? input.chatId;
+  current.chats[targetKey] = {
+    targetKey,
+    scope,
+    anchor,
     chatId: input.chatId,
     chatName: input.chatName || undefined,
+    title: input.title,
+    sessionId: input.sessionId,
+    chatType: input.chatType ?? 'group',
     targetName: input.targetName,
     mode: 'direct',
+    enabled: true,
     disclosure: input.disclosure === 'none' ? 'none' : 'prefix',
     lastGroupMessageId: input.lastGroupMessageId,
-    dmRootMessageId: input.dmRootMessageId ?? current.chats[input.chatId]?.dmRootMessageId,
-    dmToGroupMessageIds: current.chats[input.chatId]?.dmToGroupMessageIds,
+    dmRootMessageId: input.dmRootMessageId ?? current.chats[targetKey]?.dmRootMessageId,
+    dmToGroupMessageIds: current.chats[targetKey]?.dmToGroupMessageIds,
     updatedAt: Date.now(),
   };
-  current.activeChatId = input.chatId;
+  current.activeChatId = targetKey;
   current.updatedAt = Date.now();
   store.bindings[k] = current;
   writeStore(store);
@@ -222,6 +276,7 @@ export function getSubstituteDirectChatByDmAnchor(
   const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
   if (!binding) return undefined;
   for (const chat of Object.values(binding.chats)) {
+    if (chat.enabled === false) continue;
     if (chat.dmRootMessageId === dmMessageId) return chat;
     if (chat.dmToGroupMessageIds?.[dmMessageId]) return chat;
   }
@@ -238,7 +293,7 @@ export function recordSubstituteDirectForwardedMessage(input: {
   if (!input.substituteOpenId || !input.chatId || !input.dmMessageId || !input.groupMessageId) return;
   const store = readStore();
   const binding = store.bindings[key(input.larkAppId, input.substituteOpenId)];
-  const chat = binding?.chats?.[input.chatId];
+  const chat = binding?.chats?.[input.chatId] ?? binding?.chats?.[substituteDirectTargetKey('chat', input.chatId, input.chatId) ?? ''];
   if (!binding || !chat) return;
   const pairs = Object.entries(chat.dmToGroupMessageIds ?? {});
   pairs.push([input.dmMessageId, input.groupMessageId]);
@@ -257,6 +312,7 @@ export function getSubstituteDirectQuotedGroupMessageId(
   const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
   if (!binding) return undefined;
   for (const chat of Object.values(binding.chats)) {
+    if (chat.enabled === false) continue;
     const hit = chat.dmToGroupMessageIds?.[dmMessageId];
     if (hit) return hit;
   }
@@ -275,14 +331,35 @@ export function clearSubstituteDirectChat(larkAppId: string, substituteOpenId: s
     if (existed) writeStore(store);
     return existed;
   }
-  const existed = !!binding.chats[chatId];
-  delete binding.chats[chatId];
-  if (binding.activeChatId === chatId) {
-    binding.activeChatId = Object.values(binding.chats).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.chatId;
+  const targetKey = binding.chats[chatId] ? chatId : substituteDirectTargetKey('chat', chatId, chatId) ?? chatId;
+  const existed = !!binding.chats[targetKey];
+  delete binding.chats[targetKey];
+  if (binding.activeChatId === targetKey || binding.activeChatId === chatId) {
+    binding.activeChatId = Object.values(binding.chats).filter(c => c.enabled !== false).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.targetKey;
   }
   binding.updatedAt = Date.now();
   if (Object.keys(binding.chats).length === 0) delete store.bindings[k];
   else store.bindings[k] = binding;
   if (existed) writeStore(store);
   return existed;
+}
+
+export function deactivateSubstituteDirectChat(larkAppId: string, substituteOpenId: string | undefined, targetKeyOrChatId?: string): boolean {
+  if (!substituteOpenId || !targetKeyOrChatId) return false;
+  const store = readStore();
+  const k = key(larkAppId, substituteOpenId);
+  const binding = store.bindings[k];
+  if (!binding) return false;
+  const targetKey = binding.chats[targetKeyOrChatId] ? targetKeyOrChatId : substituteDirectTargetKey('chat', targetKeyOrChatId, targetKeyOrChatId) ?? targetKeyOrChatId;
+  const chat = binding.chats[targetKey];
+  if (!chat || chat.enabled === false) return false;
+  chat.enabled = false;
+  chat.updatedAt = Date.now();
+  if (binding.activeChatId === targetKey || binding.activeChatId === targetKeyOrChatId) {
+    binding.activeChatId = Object.values(binding.chats).filter(c => c.enabled !== false).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.targetKey;
+  }
+  binding.updatedAt = Date.now();
+  store.bindings[k] = binding;
+  writeStore(store);
+  return true;
 }
