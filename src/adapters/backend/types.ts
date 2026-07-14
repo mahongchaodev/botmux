@@ -63,6 +63,15 @@ export interface SessionBackend {
    * never implement it.
    */
   onAccessUrl?(cb: (url: string) => void): void;
+  /**
+   * Remote-task turn boundary — backends that execute discrete remote tasks
+   * (riff) invoke this when the current task finishes or fails. The worker
+   * uses it to re-arm prompt-ready and flush queued follow-up messages: remote
+   * backends have no PTY output, so the idle detector never fires for them and
+   * nothing else would ever mark the session ready again after a write.
+   * Optional — local backends never implement it.
+   */
+  onTaskDone?(cb: () => void): void;
 }
 
 /**

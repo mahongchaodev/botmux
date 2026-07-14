@@ -102,6 +102,27 @@ describe('RiffBackend', () => {
     });
   });
 
+  describe('onTaskDone turn boundary', () => {
+    it('fires when the done SSE event arrives', () => {
+      const be = makeBackend({ injectStatusLines: false });
+      const done = vi.fn();
+      be.onTaskDone(done);
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed","exitCode":0}', 'task-1');
+      expect(done).toHaveBeenCalledTimes(1);
+      expect((be as any).taskDone).toBe(true);
+    });
+
+    it('fires when task creation fails, so queued follow-ups are not stuck', async () => {
+      const be = makeBackend();
+      const done = vi.fn();
+      be.onTaskDone(done);
+      fetchMock.mockImplementation(async () => { throw new Error('network down'); });
+      be.write('hello');
+      await flush();
+      expect(done).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('access URL handling', () => {
     it('rewrites accessUrl origin onto the configured baseUrl', async () => {
       const be = makeBackend();

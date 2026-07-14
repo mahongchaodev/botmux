@@ -127,6 +127,7 @@ export class RiffBackend implements SessionBackend {
   private dataCb: ((data: string) => void) | null = null;
   private exitCb: ((code: number | null, signal: string | null) => void) | null = null;
   private accessUrlCb: ((url: string) => void) | null = null;
+  private taskDoneCb: (() => void) | null = null;
   private outputBuffer = '';
   private currentTaskId: string | null = null;
   private currentAccessUrl: string | null = null;
@@ -151,6 +152,11 @@ export class RiffBackend implements SessionBackend {
   onAccessUrl(cb: (url: string) => void): void {
     this.accessUrlCb = cb;
     if (this.currentAccessUrl) cb(this.currentAccessUrl);
+  }
+
+  /** Called when the current riff task completes or fails (turn boundary). */
+  onTaskDone(cb: () => void): void {
+    this.taskDoneCb = cb;
   }
 
   /** Resolve JWT dynamically — re-reads env/keychain each call so auto-refresh works. */
@@ -578,6 +584,9 @@ export class RiffBackend implements SessionBackend {
           if (status === 'completed' || status === 'failed') {
             this.fetchAndEmitOutput(taskId);
           }
+          // Turn boundary: let the worker re-arm prompt-ready and flush queued
+          // follow-ups — riff has no PTY/idle detector to do it otherwise.
+          this.taskDoneCb?.();
           // NOTE: task done does NOT trigger onExit — session stays alive
           // for follow-up messages. Only /close or unrecoverable errors exit.
           break;
@@ -665,6 +674,11 @@ export class RiffBackend implements SessionBackend {
     this.outputBuffer += line;
     this.dataCb?.(line);
     logger.error(`[riff] ${message}`);
+    // A failed task is also a turn boundary — without this, a task-execute /
+    // follow-up / SSE failure would leave the worker "busy" forever and queued
+    // messages would never flush.
+    this.taskDone = true;
+    this.taskDoneCb?.();
   }
 
   private async fetchAndEmitOutput(taskId: string): Promise<void> {

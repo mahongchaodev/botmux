@@ -5466,6 +5466,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   backend.onAccessUrl?.((url) => {
     send({ type: 'riff_access_url', accessUrl: url });
   });
+  // Remote-task turn boundary (riff): flushPending() marks the session busy on
+  // every write and riff has no PTY output, so the idle detector never re-arms
+  // prompt-ready — without this hook a follow-up arriving mid-task would sit
+  // in pendingMessages forever once the task finishes.
+  backend.onTaskDone?.(() => {
+    log(`${cliName()} task finished — re-arming prompt-ready for queued follow-ups`);
+    markPromptReady();
+  });
   backend.onExit((code, signal) => {
     log(`${cliName()} exited (code: ${code}, signal: ${signal})`);
     const logTail = recentTerminalLogTail();
