@@ -17,10 +17,12 @@ vi.mock('../src/im/lark/message-parser.js', () => ({
 }));
 
 const mockGetChatMode = vi.fn(async () => 'group' as 'group' | 'topic' | 'p2p');
+const mockGetChatNameAndMode = vi.fn(async (_app: string, chatId: string) => ({ name: chatId === 'oc_group' ? 'Group' : chatId, mode: 'group' as const }));
 const mockReplyMessage = vi.fn(async () => 'msg-id');
 const mockSendUserMessage = vi.fn(async () => 'dm-root-msg');
 vi.mock('../src/im/lark/client.js', () => ({
   getChatMode: (...a: any[]) => mockGetChatMode(...a),
+  getChatNameAndMode: (...a: any[]) => mockGetChatNameAndMode(...a),
   replyMessage: (...a: any[]) => mockReplyMessage(...a),
   sendUserMessage: (...a: any[]) => mockSendUserMessage(...a),
 }));
@@ -135,6 +137,7 @@ describe('tryHandleEchoCommand', () => {
       },
     });
     mockGetChatMode.mockResolvedValue('group');
+    mockGetChatNameAndMode.mockImplementation(async (_app: string, chatId: string) => ({ name: chatId === 'oc_group' ? 'Group' : chatId, mode: 'group' as const }));
     mockIsSubstituteEnabledForChat.mockReturnValue(true);
     mockListChats.mockResolvedValue([{ chatId: 'oc_group', name: 'Group', chatMode: 'group' }]);
     mockLeaveChat.mockResolvedValue({ ok: true });
@@ -161,6 +164,45 @@ describe('tryHandleEchoCommand', () => {
     await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
     expect(lastReply()).toContain('cmd.substitute.direct_list_header');
     expect(lastReply()).toContain('oc_group');
+  });
+
+  it('DM list merges active sessions with groups that have no session', async () => {
+    mockListChats.mockResolvedValue([
+      { chatId: 'oc_group', name: 'Group', chatMode: 'group' },
+      { chatId: 'oc_group_2', name: 'Group 2', chatMode: 'group' },
+    ]);
+    const sessions = [
+      {
+        larkAppId: APP,
+        chatId: 'oc_group',
+        chatType: 'group',
+        scope: 'chat',
+        session: { sessionId: 'sess-chat', status: 'active', chatId: 'oc_group', rootMessageId: 'om_chat_seed', title: 'Chat Session', cliId: 'claude-code', createdAt: new Date().toISOString() },
+        lastMessageAt: 2,
+        worker: null,
+      },
+      {
+        larkAppId: APP,
+        chatId: 'oc_group',
+        chatType: 'group',
+        scope: 'thread',
+        session: { sessionId: 'sess-thread', status: 'active', chatId: 'oc_group', rootMessageId: 'om_topic_root', title: 'Topic Session', cliId: 'claude-code', createdAt: new Date().toISOString() },
+        lastMessageAt: 1,
+        worker: null,
+      },
+    ];
+
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER, sessions as any);
+
+    const raw = lastReply();
+    expect(raw).toContain('Chat Session');
+    expect(raw).toContain('Group-Topic Session');
+    expect(raw).toContain('Group 2 cmd.substitute.direct_no_session');
+    const actions = cardActions(lastReplyCard());
+    expect(actions.filter((a: any) => a.value?.action === 'substitute_direct_manage')).toHaveLength(3);
+    expect(actions.filter((a: any) => a.value?.target_key === 'chat:oc_group')).toHaveLength(2);
+    expect(actions.filter((a: any) => a.value?.target_key === 'thread:om_topic_root')).toHaveLength(1);
+    expect(actions.filter((a: any) => a.value?.target_key === 'chat:oc_group_2')).toHaveLength(2);
   });
 
   it('DM list exposes manage, open chat, and leave group buttons per group', async () => {

@@ -135,6 +135,30 @@ async function listSubstituteDirectChats(
         canLeaveGroup: scope === 'chat' && canOperate(larkAppId, undefined, openId),
       });
     }
+    const chatScopeKeys = new Set(rows.filter(r => r.scope === 'chat').map(r => r.targetKey));
+    const chats = await listChats(larkAppId);
+    for (const c of chats) {
+      if (!c.chatId) continue;
+      if (await getChatMode(larkAppId, c.chatId) !== 'group') continue;
+      const targetKey = substituteDirectTargetKey('chat', c.chatId, c.chatId) ?? c.chatId;
+      if (chatScopeKeys.has(targetKey)) continue;
+      const stored = binding?.chats[targetKey] ?? binding?.chats[c.chatId];
+      const name = c.name || c.chatId;
+      rows.push({
+        targetKey,
+        scope: 'chat',
+        anchor: c.chatId,
+        chatId: c.chatId,
+        name,
+        title: `${name} ${t('cmd.substitute.direct_no_session', undefined, localeForBot(larkAppId))}`,
+        enabled: stored?.enabled !== false && stored?.mode === 'direct',
+        active: binding?.activeChatId === targetKey || binding?.activeChatId === c.chatId,
+        mode: stored?.mode,
+        substituteEnabled: isSubstituteEnabledForChat(larkAppId, c.chatId),
+        canOperateChat: canOperate(larkAppId, c.chatId, openId),
+        canLeaveGroup: canOperate(larkAppId, undefined, openId),
+      });
+    }
     rows.sort((a, b) => String(a.title ?? a.name ?? a.chatId).localeCompare(String(b.title ?? b.name ?? b.chatId)));
     return rows;
   }

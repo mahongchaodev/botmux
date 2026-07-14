@@ -248,6 +248,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_state_active': 'direct (current reply target)',
   'cmd.substitute.direct_state_on': 'direct',
   'cmd.substitute.direct_state_off': 'auto-answer',
+  'cmd.substitute.direct_no_session': '(no session yet)',
   'cmd.substitute.direct_substitute_on': 'substitute on',
   'cmd.substitute.direct_substitute_off': 'substitute off',
   'cmd.substitute.direct_field_mode': 'Mode',

@@ -251,6 +251,7 @@ export const messages: Record<string, string> = {
   'cmd.substitute.direct_state_active': '直通中（当前回复目标）',
   'cmd.substitute.direct_state_on': '直通中',
   'cmd.substitute.direct_state_off': '自动代答',
+  'cmd.substitute.direct_no_session': '（未发起会话）',
   'cmd.substitute.direct_substitute_on': '替身开启',
   'cmd.substitute.direct_substitute_off': '替身关闭',
   'cmd.substitute.direct_field_mode': '模式',
