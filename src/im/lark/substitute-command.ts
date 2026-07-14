@@ -92,6 +92,13 @@ function isEchoDirectSession(ds: DaemonSession): boolean {
   return false;
 }
 
+function directChatDisplayTitle(chatName: string | undefined, chatId: string, sessionTitle: string | undefined): string {
+  const title = sessionTitle || chatName || chatId;
+  if (!chatName || chatName === chatId) return title;
+  if (title === chatName || title.startsWith(`${chatName}-`)) return title;
+  return `${chatName}-${title}`;
+}
+
 async function listSubstituteDirectChats(
   larkAppId: string,
   openId: string | undefined,
@@ -125,7 +132,7 @@ async function listSubstituteDirectChats(
         anchor,
         chatId: ds.chatId,
         name: chatName,
-        title: scope === 'thread' ? `${chatName}-${sessionTitle}` : sessionTitle,
+        title: directChatDisplayTitle(chatName, ds.chatId, sessionTitle),
         sessionId: ds.session.sessionId,
         enabled: stored?.enabled !== false && stored?.mode === 'direct',
         active: binding?.activeChatId === targetKey || (scope === 'chat' && binding?.activeChatId === ds.chatId),

@@ -195,7 +195,7 @@ describe('tryHandleEchoCommand', () => {
     await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER, sessions as any);
 
     const raw = lastReply();
-    expect(raw).toContain('Chat Session');
+    expect(raw).toContain('Group-Chat Session');
     expect(raw).toContain('Group-Topic Session');
     expect(raw).toContain('Group 2 cmd.substitute.direct_no_session');
     const actions = cardActions(lastReplyCard());
