@@ -54,6 +54,7 @@ describe('substitute-mode store', () => {
     const r = await store.updateBotSubstituteMode('app_default', {
       enabled: true,
       disclosure: 'none',
+      directBotMention: true,
       targets: [
         { userId: 'u_alice', name: 'Alice' },
         { openId: 'ou_bob', email: 'bob@example.com' },
@@ -65,6 +66,7 @@ describe('substitute-mode store', () => {
       expect(r.substituteMode).toEqual({
         enabled: true,
         disclosure: 'none',
+        directBotMention: true,
         targets: [
           { userId: 'u_alice', name: 'Alice' },
           { openId: 'ou_bob', email: 'bob@example.com' },
@@ -85,7 +87,7 @@ describe('substitute-mode store', () => {
     });
     expect(r).toEqual({
       ok: true,
-      substituteMode: { enabled: false, disclosure: 'prefix', targets: [{ openId: 'ou_bob', name: 'Bob' }] },
+      substituteMode: { enabled: false, disclosure: 'prefix', directBotMention: false, targets: [{ openId: 'ou_bob', name: 'Bob' }] },
     });
     expect(readConfig().substituteMode.enabled).toBe(false);
 
@@ -96,6 +98,7 @@ describe('substitute-mode store', () => {
     expect(reloaded.registry.getBot('app_default').config.substituteMode).toEqual({
       enabled: false,
       disclosure: 'prefix',
+      directBotMention: false,
       targets: [{ openId: 'ou_bob', name: 'Bob' }],
     });
   });

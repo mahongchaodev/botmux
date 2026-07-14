@@ -38,7 +38,7 @@ import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
 import { tryHandleEchoCommand } from './substitute-command.js';
 import { forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
-import { getSubstituteDirectChat, getSubstituteDirectChatByTarget, substituteDirectTargetKey } from '../../services/substitute-direct-store.js';
+import { getSubstituteDirectChat, getSubstituteDirectChatByTarget, getSubstituteDirectChatByTargetKey, substituteDirectTargetKey } from '../../services/substitute-direct-store.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled, clearPending } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
@@ -2083,19 +2083,50 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // Cheap in-memory gate FIRST: skip the getChatMode roundtrip and the
         // per-chat toggle disk read entirely for bots that never configured a
         // substitute target (the overwhelming majority on the hot path).
-        let substituteTrigger = getBot(larkAppId).config.substituteMode?.enabled === true
+        const substituteModeConfig = getBot(larkAppId).config.substituteMode;
+        const substituteDirectEligible = substituteModeConfig?.enabled === true
           && chatType === 'group'
           && await getChatMode(larkAppId, chatId) === 'group'
-          && isSubstituteEnabledForChat(larkAppId, chatId)
-          ? resolveSubstituteTrigger(larkAppId, message)
-          : undefined;
+          && isSubstituteEnabledForChat(larkAppId, chatId);
+        let substituteTrigger = substituteDirectEligible ? resolveSubstituteTrigger(larkAppId, message) : undefined;
         if (substituteTrigger && !explicitlyMentionedThisBot) {
           const rawText = extractMessageTextForRouting(message);
           const stripped = rawText ? stripLeadingMentions(rawText.trim(), message?.mentions ?? []).trim() : '';
           if (stripped.startsWith('/')) substituteTrigger = undefined;
         }
+        const directTargetKey = substituteDirectTargetKey(routing.scope, routing.anchor, chatId);
+        if (substituteDirectEligible && substituteModeConfig?.directBotMention === true && !substituteTrigger && explicitlyMentionedThisBot) {
+          const direct = getSubstituteDirectChatByTargetKey(larkAppId, chatId, directTargetKey);
+          if (direct?.chat.mode === 'direct') {
+            const directTrigger: import('../../types.js').SubstituteTrigger = {
+              target: {
+                name: direct.targetName ?? direct.chat.targetName,
+                openId: direct.targetOpenId ?? direct.substituteOpenId,
+                userId: direct.substituteUserId,
+                unionId: direct.substituteUnionId,
+              },
+              disclosure: direct.chat.disclosure ?? substituteModeConfig.disclosure ?? 'prefix',
+            };
+            if (isAllowed) {
+              const forwarded = await forwardSubstituteGroupMessageToDm({
+                larkAppId,
+                chatId,
+                targetKey: directTargetKey,
+                scope: routing.scope,
+                anchor: routing.anchor,
+                message,
+                trigger: directTrigger,
+                direct,
+              });
+              if (!forwarded) {
+                await replyMessage(larkAppId, messageId, t('substitute.direct.no_open_id', undefined, localeForBot(larkAppId)), 'text', false)
+                  .catch(err => logger.warn(`[substitute-direct] no-open-id notice failed: ${err?.message ?? err}`));
+              }
+            }
+            return;
+          }
+        }
         if (substituteTrigger) {
-          const directTargetKey = substituteDirectTargetKey(routing.scope, routing.anchor, chatId);
           const direct = getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId, directTargetKey);
           logger.info(
             `[substitute-direct:${larkAppId}] lookup chat=${chatId.substring(0, 12)} ` +

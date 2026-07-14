@@ -377,6 +377,8 @@ export interface SubstituteModeConfig {
   targets: SubstituteTarget[];
   /** prefix = disclose "I will answer on behalf of X"; none = no extra disclosure instruction. */
   disclosure?: 'prefix' | 'none';
+  /** When true, @this-bot messages in a direct-mode target are forwarded to the substitute instead of the model. */
+  directBotMention?: boolean;
 }
 
 export interface VcMeetingAgentConfig {

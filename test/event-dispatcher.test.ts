@@ -169,6 +169,24 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     }
     return undefined;
   },
+  getSubstituteDirectChatByTargetKey: (appId: string, chatId: string | undefined, targetKey?: string) => {
+    if (!chatId) return undefined;
+    for (const binding of mockDirectBindings.values()) {
+      if (binding.larkAppId !== appId) continue;
+      const chat = (targetKey ? binding.chats?.[targetKey] : undefined) ?? binding.chats?.[chatId];
+      if (chat?.enabled !== false && chat?.mode === 'direct') {
+        return {
+          chat,
+          substituteOpenId: binding.substituteOpenId,
+          targetOpenId: binding.targetOpenId ?? binding.substituteOpenId,
+          substituteUserId: binding.substituteUserId,
+          substituteUnionId: binding.substituteUnionId,
+          targetName: binding.targetName ?? chat.targetName,
+        };
+      }
+    }
+    return undefined;
+  },
   upsertSubstituteDirectChat: (input: any) => {
     const k = directKey(input.larkAppId, input.substituteOpenId);
     const binding = mockDirectBindings.get(k) ?? { larkAppId: input.larkAppId, substituteOpenId: input.substituteOpenId, chats: {} };
@@ -2119,6 +2137,105 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
         }),
       },
     });
+  });
+
+  it('substituteMode direct: @bot forwards group text when directBotMention is enabled', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        directBotMention: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      targetOpenId: 'ou_sub',
+      targetName: 'Sub Person',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatName.mockResolvedValue('Ops Group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Bot help with this' }),
+      messageId: 'msg-substitute-direct-bot-mention',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_bot', name: 'Bot', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendUserMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'ou_sub',
+      expect.stringContaining('Ops Group'),
+      'text',
+    );
+    expect(mockSendUserMessage.mock.calls[0][2]).toContain('@Bot help with this');
+    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct']?.dmToGroupMessageIds)
+      .toEqual({ 'sent-dm-msg': 'msg-substitute-direct-bot-mention' });
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: @bot stays on the model path when directBotMention is disabled', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      targetOpenId: 'ou_sub',
+      targetName: 'Sub Person',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Bot help with this' }),
+      messageId: 'msg-substitute-direct-bot-mention-disabled',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_bot', name: 'Bot', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendUserMessage).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).toHaveBeenCalled();
   });
 
   it('substituteMode direct: thread-mode recreates DM topic when the saved DM root is gone', async () => {

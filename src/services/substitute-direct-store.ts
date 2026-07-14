@@ -208,6 +208,32 @@ export function getSubstituteDirectChatByTarget(
   return undefined;
 }
 
+export function getSubstituteDirectChatByTargetKey(
+  larkAppId: string,
+  chatId: string | undefined,
+  targetKey?: string,
+): { chat: SubstituteDirectChat; substituteOpenId: string; targetOpenId?: string; substituteUserId?: string; substituteUnionId?: string; targetName?: string } | undefined {
+  if (!chatId) return undefined;
+  const strictTarget = !!targetKey && targetKey.startsWith('thread:');
+  const chatKey = substituteDirectTargetKey('chat', chatId, chatId) ?? chatId;
+  const store = readStore();
+  for (const binding of Object.values(store.bindings)) {
+    if (binding.larkAppId !== larkAppId) continue;
+    const chat = (targetKey ? binding.chats[targetKey] : undefined)
+      ?? (strictTarget ? undefined : binding.chats[chatKey]);
+    if (!chat || chat.enabled === false || chat.mode !== 'direct') continue;
+    return {
+      chat,
+      substituteOpenId: binding.substituteOpenId,
+      targetOpenId: binding.targetOpenId ?? binding.substituteOpenId,
+      substituteUserId: binding.substituteUserId,
+      substituteUnionId: binding.substituteUnionId,
+      targetName: binding.targetName ?? chat.targetName,
+    };
+  }
+  return undefined;
+}
+
 export function upsertSubstituteDirectChat(input: {
   larkAppId: string;
   substituteOpenId: string;
