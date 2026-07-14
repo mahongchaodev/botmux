@@ -72,6 +72,21 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     mockDirect.set(input.substituteOpenId, cur);
     return cur;
   },
+  setSubstituteDirectChatBotMention: (input: any) => {
+    const cur = mockDirect.get(input.substituteOpenId) ?? { chats: {} };
+    const chat = cur.chats[input.targetKeyOrChatId] ?? {
+      targetKey: input.targetKeyOrChatId,
+      chatId: input.chatId,
+      scope: input.scope,
+      anchor: input.anchor,
+      enabled: false,
+      mode: 'direct',
+    };
+    chat.directBotMention = input.enabled;
+    cur.chats[input.targetKeyOrChatId] = chat;
+    mockDirect.set(input.substituteOpenId, cur);
+    return true;
+  },
   clearSubstituteDirectChat: (_app: string, openId: string, chatId?: string) => {
     if (!chatId) return mockDirect.delete(openId);
     const cur = mockDirect.get(openId);
@@ -241,13 +256,13 @@ describe('tryHandleEchoCommand', () => {
 
   it('detail card uses dynamic substitute and direct buttons per group', async () => {
     const expectActionRow = (actions: any[], labels: string[], actionValues: Array<string | undefined>) => {
-      expect(actions).toHaveLength(4);
+      expect(actions).toHaveLength(5);
       expect(actions.map((a: any) => a.text.content)).toEqual([...labels, 'cmd.substitute.direct_btn_open_chat']);
       expect(actions.map((a: any) => a.value?.action)).toEqual([...actionValues, undefined]);
-      expect(actions[3].multi_url?.url).toContain('openChatId=oc_group');
-      expect(actions[3].multi_url?.pc_url).toBe(actions[3].multi_url?.url);
-      expect(actions[3].multi_url?.android_url).toBe(actions[3].multi_url?.url);
-      expect(actions[3].multi_url?.ios_url).toBe(actions[3].multi_url?.url);
+      expect(actions[4].multi_url?.url).toContain('openChatId=oc_group');
+      expect(actions[4].multi_url?.pc_url).toBe(actions[4].multi_url?.url);
+      expect(actions[4].multi_url?.android_url).toBe(actions[4].multi_url?.url);
+      expect(actions[4].multi_url?.ios_url).toBe(actions[4].multi_url?.url);
     };
 
     let result = await handleSubstituteDirectCardAction({
@@ -260,10 +275,12 @@ describe('tryHandleEchoCommand', () => {
     let actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expectActionRow(actions, [
       'cmd.substitute.direct_btn_enter',
+      'cmd.substitute.direct_btn_enable_bot_mention',
       'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
     ], [
       'substitute_direct_enter',
+      'substitute_direct_bot_mention_enable',
       'substitute_direct_disable',
       'substitute_direct_leave_group',
     ]);
@@ -285,10 +302,12 @@ describe('tryHandleEchoCommand', () => {
     actions = cardActions(result.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expectActionRow(actions, [
       'cmd.substitute.direct_btn_exit',
+      'cmd.substitute.direct_btn_enable_bot_mention',
       'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
     ], [
       'substitute_direct_exit',
+      'substitute_direct_bot_mention_enable',
       'substitute_direct_disable',
       'substitute_direct_leave_group',
     ]);
@@ -615,10 +634,75 @@ describe('tryHandleEchoCommand', () => {
     expect(actions.map((a: any) => a.text.content)).toEqual([
       'cmd.substitute.direct_btn_exit',
       'cmd.substitute.direct_btn_disable_substitute',
+      'cmd.substitute.direct_btn_enable_bot_mention',
       'cmd.substitute.direct_btn_leave_group',
       'cmd.substitute.direct_btn_open_chat',
     ]);
-    expect(actions[3].multi_url?.url).toContain('openChatId=oc_group');
+    expect(actions[4].multi_url?.url).toContain('openChatId=oc_group');
+  });
+
+  it('card action toggles @bot forwarding for the selected direct session', async () => {
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+
+    const on = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_bot_mention_enable',
+      chatId: 'oc_group',
+      detailTargetKey: 'chat:oc_group',
+    });
+    expect(on.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_bot_mention_updated_on' });
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.directBotMention).toBe(true);
+    expect(JSON.stringify(on.card.data)).toContain('cmd.substitute.direct_btn_disable_bot_mention');
+
+    const off = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_bot_mention_disable',
+      chatId: 'oc_group',
+      detailTargetKey: 'chat:oc_group',
+    });
+    expect(off.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_bot_mention_updated_off' });
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.directBotMention).toBe(false);
+    expect(JSON.stringify(off.card.data)).toContain('cmd.substitute.direct_btn_enable_bot_mention');
+  });
+
+  it('card action can preconfigure @bot forwarding before entering direct mode', async () => {
+    const on = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_bot_mention_enable',
+      chatId: 'oc_group',
+      detailTargetKey: 'chat:oc_group',
+    });
+    expect(on.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_bot_mention_updated_on' });
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']).toMatchObject({
+      enabled: false,
+      directBotMention: true,
+    });
+
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+      detailTargetKey: 'chat:oc_group',
+    });
+
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']).toMatchObject({
+      mode: 'direct',
+      directBotMention: true,
+    });
   });
 
   it('card action can enable and disable substitute for the target group', async () => {

@@ -6,6 +6,7 @@ import {
   clearSubstituteDirectChat,
   deactivateSubstituteDirectChat,
   getSubstituteDirectBinding,
+  setSubstituteDirectChatBotMention,
   substituteDirectTargetKey,
   upsertSubstituteDirectChat,
 } from '../../services/substitute-direct-store.js';
@@ -24,6 +25,8 @@ const DIRECT_ACTIONS = new Set([
   'substitute_direct_back',
   'substitute_direct_enter',
   'substitute_direct_exit',
+  'substitute_direct_bot_mention_enable',
+  'substitute_direct_bot_mention_disable',
   'substitute_direct_leave_group',
   'substitute_direct_enable',
   'substitute_direct_disable',
@@ -71,6 +74,8 @@ type DirectChatRow = {
   active: boolean;
   mode?: 'direct';
   substituteEnabled: boolean;
+  directBotMention: boolean;
+  directBotMentionConfigured: boolean;
   canOperateChat: boolean;
   canLeaveGroup: boolean;
 };
@@ -107,6 +112,7 @@ async function listSubstituteDirectChats(
   if (!canUseDirectControls(larkAppId, openId)) return [];
   const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
   const binding = getSubstituteDirectBinding(larkAppId, bindingOpenId);
+  const defaultDirectBotMention = getBot(larkAppId).config.substituteMode?.directBotMention === true;
   if (activeSessions) {
     const iterable = activeSessions instanceof Map ? activeSessions.values() : activeSessions;
     const candidates = [...iterable]
@@ -138,6 +144,8 @@ async function listSubstituteDirectChats(
         active: binding?.activeChatId === targetKey || (scope === 'chat' && binding?.activeChatId === ds.chatId),
         mode: stored?.mode,
         substituteEnabled: isSubstituteEnabledForChat(larkAppId, ds.chatId),
+        directBotMention: stored?.directBotMention ?? defaultDirectBotMention,
+        directBotMentionConfigured: stored?.directBotMention !== undefined,
         canOperateChat: canOperate(larkAppId, ds.chatId, openId),
         canLeaveGroup: scope === 'chat' && canOperate(larkAppId, undefined, openId),
       });
@@ -162,6 +170,8 @@ async function listSubstituteDirectChats(
         active: binding?.activeChatId === targetKey || binding?.activeChatId === c.chatId,
         mode: stored?.mode,
         substituteEnabled: isSubstituteEnabledForChat(larkAppId, c.chatId),
+        directBotMention: stored?.directBotMention ?? defaultDirectBotMention,
+        directBotMentionConfigured: stored?.directBotMention !== undefined,
         canOperateChat: canOperate(larkAppId, c.chatId, openId),
         canLeaveGroup: canOperate(larkAppId, undefined, openId),
       });
@@ -186,6 +196,8 @@ async function listSubstituteDirectChats(
       active: binding?.activeChatId === targetKey || binding?.activeChatId === c.chatId,
       mode: stored?.mode,
       substituteEnabled: isSubstituteEnabledForChat(larkAppId, c.chatId),
+      directBotMention: stored?.directBotMention ?? defaultDirectBotMention,
+      directBotMentionConfigured: stored?.directBotMention !== undefined,
       canOperateChat: canOperate(larkAppId, c.chatId, openId),
       canLeaveGroup: canOperate(larkAppId, undefined, openId),
     });
@@ -207,6 +219,12 @@ function directChatListStateText(r: DirectChatRow, loc: any, p2pThreadMode: bool
 
 function directChatSubstituteStateText(r: DirectChatRow, loc: any): string {
   return r.substituteEnabled ? t('cmd.substitute.direct_substitute_on', undefined, loc) : t('cmd.substitute.direct_substitute_off', undefined, loc);
+}
+
+function directChatBotMentionStateText(r: DirectChatRow, loc: any): string {
+  return r.directBotMention
+    ? t(r.directBotMentionConfigured ? 'cmd.substitute.direct_bot_mention_on' : 'cmd.substitute.direct_bot_mention_on_default', undefined, loc)
+    : t(r.directBotMentionConfigured ? 'cmd.substitute.direct_bot_mention_off' : 'cmd.substitute.direct_bot_mention_off_default', undefined, loc);
 }
 
 function directChatCardValue(invokerOpenId: string, page: number, extra?: Record<string, unknown>): Record<string, unknown> {
@@ -245,7 +263,7 @@ function buildDirectChatListCardElements(
       tag: 'div',
       text: {
         tag: 'lark_md',
-        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatListStateText(r, loc, state.p2pThreadMode === true)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(r, loc)}\n${targetLabel}`,
+        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatListStateText(r, loc, state.p2pThreadMode === true)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(r, loc)}\n${t('cmd.substitute.direct_field_bot_mention', undefined, loc)}：${directChatBotMentionStateText(r, loc)}\n${targetLabel}`,
       },
     });
     elements.push({
@@ -348,7 +366,7 @@ function buildDirectChatDetailCardElements(
       tag: 'div',
       text: {
         tag: 'lark_md',
-        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatStateText(row, loc)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(row, loc)}\n${targetLabel}`,
+        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatStateText(row, loc)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(row, loc)}\n${t('cmd.substitute.direct_field_bot_mention', undefined, loc)}：${directChatBotMentionStateText(row, loc)}\n${targetLabel}`,
       },
     },
     {
@@ -363,6 +381,23 @@ function buildDirectChatDetailCardElements(
           type: row.enabled && row.mode === 'direct' ? 'default' : 'primary',
           value: directChatCardValue(invokerOpenId, page, {
             action: row.enabled && row.mode === 'direct' ? 'substitute_direct_exit' : 'substitute_direct_enter',
+            target_key: row.targetKey,
+            chat_id: row.chatId,
+            detail_target_key: row.targetKey,
+          }),
+        },
+      ],
+    },
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: t(row.directBotMention ? 'cmd.substitute.direct_btn_disable_bot_mention' : 'cmd.substitute.direct_btn_enable_bot_mention', undefined, loc) },
+          type: row.directBotMention ? 'default' : 'primary',
+          disabled: !row.canOperateChat,
+          value: directChatCardValue(invokerOpenId, page, {
+            action: row.directBotMention ? 'substitute_direct_bot_mention_disable' : 'substitute_direct_bot_mention_enable',
             target_key: row.targetKey,
             chat_id: row.chatId,
             detail_target_key: row.targetKey,
@@ -489,6 +524,7 @@ async function applyDirectAction(
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
       dmRootMessageId,
       resetDmHistory: threadMode,
+      directBotMention: getBot(larkAppId).config.substituteMode?.directBotMention === true,
       preserveExistingChats: threadMode,
     });
     return { ok: true, message: t('cmd.substitute.direct_enter_ok', { chat: row.name || row.chatId }, loc) };
@@ -498,6 +534,34 @@ async function applyDirectAction(
     const enabled = action === 'substitute_direct_enable';
     setSubstituteEnabledForChat(larkAppId, row.chatId, enabled);
     return { ok: true, message: t(enabled ? 'cmd.substitute.updated_on' : 'cmd.substitute.updated_off', undefined, loc) };
+  }
+  if (action === 'substitute_direct_bot_mention_enable' || action === 'substitute_direct_bot_mention_disable') {
+    if (!canOperate(larkAppId, row.chatId, openId)) return { ok: false, message: t('cmd.substitute.owner_only', undefined, loc) };
+    const enabled = action === 'substitute_direct_bot_mention_enable';
+    const target = substituteTargetForDirectAction(larkAppId, openId);
+    const ok = setSubstituteDirectChatBotMention({
+      larkAppId,
+      substituteOpenId: substituteBindingOpenIdForControls(larkAppId, openId),
+      targetKeyOrChatId: row.targetKey,
+      enabled,
+      targetOpenId: target?.openId,
+      substituteUserId: target?.userId,
+      substituteUnionId: target?.unionId,
+      chatId: row.chatId,
+      scope: row.scope,
+      anchor: row.anchor,
+      title: row.title,
+      sessionId: row.sessionId,
+      chatName: row.name,
+      targetName: target?.name,
+      disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
+    });
+    return {
+      ok,
+      message: ok
+        ? t(enabled ? 'cmd.substitute.direct_bot_mention_updated_on' : 'cmd.substitute.direct_bot_mention_updated_off', undefined, loc)
+        : t('cmd.substitute.direct_bad_chat', undefined, loc),
+    };
   }
   if (action === 'substitute_direct_exit') {
     const { deactivateSubstituteDirectChat } = await import('../../services/substitute-direct-store.js');

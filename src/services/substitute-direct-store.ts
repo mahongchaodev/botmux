@@ -19,6 +19,7 @@ export interface SubstituteDirectChat {
   lastGroupMessageId?: string;
   dmRootMessageId?: string;
   dmToGroupMessageIds?: Record<string, string>;
+  directBotMention?: boolean;
   updatedAt: number;
 }
 
@@ -88,6 +89,7 @@ function normalize(raw: unknown): Store {
           disclosure: c.disclosure === 'none' ? 'none' : 'prefix',
           lastGroupMessageId: typeof c.lastGroupMessageId === 'string' ? c.lastGroupMessageId : undefined,
           dmRootMessageId: typeof c.dmRootMessageId === 'string' ? c.dmRootMessageId : undefined,
+          directBotMention: c.directBotMention === true ? true : c.directBotMention === false ? false : undefined,
           dmToGroupMessageIds: c.dmToGroupMessageIds && typeof c.dmToGroupMessageIds === 'object' && !Array.isArray(c.dmToGroupMessageIds)
             ? Object.fromEntries(Object.entries(c.dmToGroupMessageIds).filter((e): e is [string, string] => typeof e[0] === 'string' && typeof e[1] === 'string'))
             : undefined,
@@ -109,6 +111,7 @@ function normalize(raw: unknown): Store {
         disclosure: b.disclosure === 'none' ? 'none' : 'prefix',
         lastGroupMessageId: typeof b.lastGroupMessageId === 'string' ? b.lastGroupMessageId : undefined,
         dmRootMessageId: typeof b.dmRootMessageId === 'string' ? b.dmRootMessageId : undefined,
+        directBotMention: b.directBotMention === true ? true : b.directBotMention === false ? false : undefined,
         updatedAt: typeof b.updatedAt === 'number' ? b.updatedAt : 0,
       };
     }
@@ -254,6 +257,7 @@ export function upsertSubstituteDirectChat(input: {
   lastGroupMessageId?: string;
   dmRootMessageId?: string;
   resetDmHistory?: boolean;
+  directBotMention?: boolean;
   preserveExistingChats?: boolean;
 }): SubstituteDirectBinding {
   const store = readStore();
@@ -287,6 +291,7 @@ export function upsertSubstituteDirectChat(input: {
     disclosure: input.disclosure === 'none' ? 'none' : 'prefix',
     lastGroupMessageId: input.lastGroupMessageId,
     dmRootMessageId: input.dmRootMessageId ?? current.chats[targetKey]?.dmRootMessageId,
+    directBotMention: input.directBotMention ?? current.chats[targetKey]?.directBotMention,
     dmToGroupMessageIds: input.resetDmHistory ? undefined : current.chats[targetKey]?.dmToGroupMessageIds,
     updatedAt: Date.now(),
   };
@@ -295,6 +300,71 @@ export function upsertSubstituteDirectChat(input: {
   store.bindings[k] = current;
   writeStore(store);
   return current;
+}
+
+export function setSubstituteDirectChatBotMention(input: {
+  larkAppId: string;
+  substituteOpenId: string | undefined;
+  targetKeyOrChatId: string | undefined;
+  enabled: boolean;
+  targetOpenId?: string;
+  substituteUserId?: string;
+  substituteUnionId?: string;
+  chatId?: string;
+  scope?: 'chat' | 'thread';
+  anchor?: string;
+  title?: string;
+  sessionId?: string;
+  chatName?: string | null;
+  targetName?: string;
+  disclosure?: 'prefix' | 'none';
+}): boolean {
+  if (!input.substituteOpenId || !input.targetKeyOrChatId) return false;
+  const store = readStore();
+  const k = key(input.larkAppId, input.substituteOpenId);
+  const binding = store.bindings[k] ?? {
+    larkAppId: input.larkAppId,
+    substituteOpenId: input.substituteOpenId,
+    chats: {},
+    updatedAt: 0,
+  };
+  binding.targetOpenId = input.targetOpenId ?? binding.targetOpenId;
+  binding.substituteUserId = input.substituteUserId ?? binding.substituteUserId;
+  binding.substituteUnionId = input.substituteUnionId ?? binding.substituteUnionId;
+  binding.targetName = input.targetName ?? binding.targetName;
+  const targetKey = binding.chats[input.targetKeyOrChatId]
+    ? input.targetKeyOrChatId
+    : substituteDirectTargetKey('chat', input.targetKeyOrChatId, input.targetKeyOrChatId) ?? input.targetKeyOrChatId;
+  const scope = input.scope === 'thread' ? 'thread' : 'chat';
+  const chatId = input.chatId || binding.chats[targetKey]?.chatId || (scope === 'chat' ? targetKey.replace(/^chat:/, '') : undefined);
+  if (!chatId) return false;
+  const anchor = input.anchor || binding.chats[targetKey]?.anchor || (scope === 'thread' ? targetKey.replace(/^thread:/, '') : chatId);
+  const chat = binding.chats[targetKey] ?? {
+    targetKey,
+    scope,
+    anchor,
+    chatId,
+    chatType: 'group' as const,
+    enabled: false,
+    mode: 'direct' as const,
+    disclosure: input.disclosure === 'none' ? 'none' as const : 'prefix' as const,
+    updatedAt: 0,
+  };
+  chat.scope = chat.scope ?? scope;
+  chat.anchor = chat.anchor ?? anchor;
+  chat.chatId = chat.chatId || chatId;
+  chat.chatName = input.chatName || chat.chatName;
+  chat.title = input.title ?? chat.title;
+  chat.sessionId = input.sessionId ?? chat.sessionId;
+  chat.targetName = input.targetName ?? chat.targetName;
+  chat.disclosure = input.disclosure === 'none' ? 'none' : chat.disclosure ?? 'prefix';
+  chat.directBotMention = input.enabled;
+  chat.updatedAt = Date.now();
+  binding.chats[targetKey] = chat;
+  binding.updatedAt = Date.now();
+  store.bindings[k] = binding;
+  writeStore(store);
+  return true;
 }
 
 export function getSubstituteDirectChatByDmAnchor(
