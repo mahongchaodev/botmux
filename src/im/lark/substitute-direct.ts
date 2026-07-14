@@ -61,6 +61,12 @@ function dmAnchorFromMessage(message: any): string | undefined {
   return message?.root_id ?? message?.thread_id ?? message?.parent_id;
 }
 
+function isDmRootUnavailableError(err: unknown): boolean {
+  if (err instanceof MessageWithdrawnError) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /withdrawn|not found|invalid.*message|message.*invalid|thread.*invalid/i.test(message);
+}
+
 export async function forwardSubstituteGroupMessageToDm(input: {
   larkAppId: string;
   chatId: string;
@@ -89,7 +95,14 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   let dmRootMessageId = existing.dmRootMessageId;
   let dmMessageId: string;
   if (p2pThreadMode && dmRootMessageId) {
-    dmMessageId = await replyMessage(input.larkAppId, dmRootMessageId, content, 'text', true);
+    try {
+      dmMessageId = await replyMessage(input.larkAppId, dmRootMessageId, content, 'text', true);
+    } catch (err) {
+      if (!isDmRootUnavailableError(err)) throw err;
+      logger.warn(`[substitute-direct:${input.larkAppId}] DM root ${dmRootMessageId.substring(0, 12)} unavailable, creating a new direct thread: ${err instanceof Error ? err.message : err}`);
+      dmMessageId = await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
+      dmRootMessageId = dmMessageId;
+    }
   } else {
     dmMessageId = await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
     if (p2pThreadMode) dmRootMessageId = dmMessageId;

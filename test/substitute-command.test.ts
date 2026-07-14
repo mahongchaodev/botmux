@@ -401,6 +401,12 @@ describe('tryHandleEchoCommand', () => {
     expect(mockDirect.get(USER)?.chats?.oc_group?.dmRootMessageId).toBe('dm-root-1');
     expect(mockDirect.get(USER)?.chats?.oc_group_2?.dmRootMessageId).toBe('dm-root-2');
     expect(mockSendUserMessage).toHaveBeenCalledTimes(2);
+
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
+
+    const raw = lastReply();
+    expect(raw).toContain('cmd.substitute.direct_state_on');
+    expect(raw).not.toContain('cmd.substitute.direct_state_active');
   });
 
   it('DM leave-group makes the bot leave the selected group and removes direct state', async () => {

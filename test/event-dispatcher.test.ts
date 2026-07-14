@@ -2119,6 +2119,55 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
   });
 
+  it('substituteMode direct: thread-mode recreates DM topic when the saved DM root is gone', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          dmRootMessageId: 'stale-dm-root',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatName.mockResolvedValue('Ops Group');
+    mockReplyMessage.mockRejectedValueOnce(new MockMessageWithdrawnError('stale-dm-root'));
+    mockSendUserMessage.mockResolvedValueOnce('new-dm-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-direct-recreate-dm-root',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockReplyMessage).toHaveBeenCalledWith(MY_APP_ID, 'stale-dm-root', expect.any(String), 'text', true);
+    expect(mockSendUserMessage).toHaveBeenCalledWith(MY_APP_ID, 'ou_sub', expect.stringContaining('Ops Group'), 'text');
+    const chat = mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct'];
+    expect(chat?.dmRootMessageId).toBe('new-dm-root');
+    expect(chat?.dmToGroupMessageIds).toEqual({ 'new-dm-root': 'msg-substitute-direct-recreate-dm-root' });
+  });
+
   it('substituteMode direct: @substitute with a non-text group message notifies the substitute DM', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],

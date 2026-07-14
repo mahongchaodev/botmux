@@ -69,6 +69,7 @@ type DirectChatRow = {
 type DirectCardState = {
   page?: number;
   detailChatId?: string;
+  p2pThreadMode?: boolean;
 };
 
 function isP2pThreadMode(larkAppId: string): boolean {
@@ -102,6 +103,12 @@ function directChatStateText(r: DirectChatRow, loc: any): string {
   return r.enabled
     ? (r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc))
     : t('cmd.substitute.direct_state_off', undefined, loc);
+}
+
+function directChatListStateText(r: DirectChatRow, loc: any, p2pThreadMode: boolean): string {
+  if (!r.enabled) return t('cmd.substitute.direct_state_off', undefined, loc);
+  if (p2pThreadMode) return t('cmd.substitute.direct_state_on', undefined, loc);
+  return r.active ? t('cmd.substitute.direct_state_active', undefined, loc) : t('cmd.substitute.direct_state_on', undefined, loc);
 }
 
 function directChatSubstituteStateText(r: DirectChatRow, loc: any): string {
@@ -143,7 +150,7 @@ function buildDirectChatListCardElements(
       tag: 'div',
       text: {
         tag: 'lark_md',
-        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatStateText(r, loc)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(r, loc)}\n${r.chatId}`,
+        content: `**${label}**\n${t('cmd.substitute.direct_field_mode', undefined, loc)}：${directChatListStateText(r, loc, state.p2pThreadMode === true)}\n${t('cmd.substitute.direct_field_substitute', undefined, loc)}：${directChatSubstituteStateText(r, loc)}\n${r.chatId}`,
       },
     });
     elements.push({
@@ -324,9 +331,10 @@ function buildDirectChatDetailCardElements(
 function buildDirectChatCard(larkAppId: string, rows: DirectChatRow[], invokerOpenId: string, loc: any, state: DirectCardState = {}): string {
   const requestedPage = Number.isFinite(state.page) ? Math.max(1, Math.floor(state.page!)) : 1;
   const detailRow = state.detailChatId ? rows.find(r => r.chatId === state.detailChatId) : undefined;
+  const p2pThreadMode = state.p2pThreadMode ?? isP2pThreadMode(larkAppId);
   const elements = detailRow
     ? buildDirectChatDetailCardElements(larkAppId, detailRow, invokerOpenId, loc, requestedPage)
-    : buildDirectChatListCardElements(larkAppId, rows, invokerOpenId, loc, state);
+    : buildDirectChatListCardElements(larkAppId, rows, invokerOpenId, loc, { ...state, p2pThreadMode });
   return JSON.stringify({
     config: { wide_screen_mode: true },
     header: {
