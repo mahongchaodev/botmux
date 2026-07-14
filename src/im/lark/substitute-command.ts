@@ -460,11 +460,9 @@ async function applyDirectAction(
     const target = substituteTargetForDirectAction(larkAppId, openId);
     if (!target?.openId) return { ok: false, message: t('substitute.direct.no_open_id', undefined, loc) };
     const threadMode = isP2pThreadMode(larkAppId);
-    const existing = getSubstituteDirectBinding(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId))?.chats?.[row.targetKey];
-    let dmRootMessageId = existing?.dmRootMessageId;
-    if (threadMode && !dmRootMessageId) {
-      dmRootMessageId = await sendUserMessage(larkAppId, openId, t('cmd.substitute.direct_thread_started', { chat: row.name || row.chatId }, loc), 'text');
-    }
+    const dmRootMessageId = threadMode
+      ? await sendUserMessage(larkAppId, openId, t('cmd.substitute.direct_thread_started', { chat: row.name || row.chatId }, loc), 'text')
+      : undefined;
     upsertSubstituteDirectChat({
       larkAppId,
       substituteOpenId: openId,
@@ -483,6 +481,7 @@ async function applyDirectAction(
       mode: 'direct',
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
       dmRootMessageId,
+      resetDmHistory: threadMode,
       preserveExistingChats: threadMode,
     });
     return { ok: true, message: t('cmd.substitute.direct_enter_ok', { chat: row.name || row.chatId }, loc) };

@@ -508,6 +508,51 @@ describe('tryHandleEchoCommand', () => {
     expect(mockDirect.get(USER)?.chats?.oc_group).toBeTruthy();
   });
 
+  it('entering direct mode in DM thread mode always creates a fresh topic root', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        p2pMode: 'thread',
+        substituteMode: {
+          enabled: true,
+          targets: [{ openId: USER, name: 'User' }],
+          disclosure: 'prefix',
+        },
+      },
+    });
+    mockSendUserMessage
+      .mockResolvedValueOnce('dm-root-old')
+      .mockResolvedValueOnce('dm-root-new');
+
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.dmRootMessageId).toBe('dm-root-old');
+    mockDirect.get(USER).chats['chat:oc_group'].dmToGroupMessageIds = { 'old-dm-reply': 'old-group-message' };
+
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_exit',
+      chatId: 'oc_group',
+    });
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.dmRootMessageId).toBe('dm-root-new');
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.dmToGroupMessageIds).toBeUndefined();
+    expect(mockSendUserMessage).toHaveBeenCalledTimes(2);
+  });
+
   it('operator entering direct mode stores state under the configured substitute target', async () => {
     mockGetBot.mockReturnValue({
       config: {

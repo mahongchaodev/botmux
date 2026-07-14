@@ -227,6 +227,7 @@ export function upsertSubstituteDirectChat(input: {
   disclosure?: 'prefix' | 'none';
   lastGroupMessageId?: string;
   dmRootMessageId?: string;
+  resetDmHistory?: boolean;
   preserveExistingChats?: boolean;
 }): SubstituteDirectBinding {
   const store = readStore();
@@ -260,7 +261,7 @@ export function upsertSubstituteDirectChat(input: {
     disclosure: input.disclosure === 'none' ? 'none' : 'prefix',
     lastGroupMessageId: input.lastGroupMessageId,
     dmRootMessageId: input.dmRootMessageId ?? current.chats[targetKey]?.dmRootMessageId,
-    dmToGroupMessageIds: current.chats[targetKey]?.dmToGroupMessageIds,
+    dmToGroupMessageIds: input.resetDmHistory ? undefined : current.chats[targetKey]?.dmToGroupMessageIds,
     updatedAt: Date.now(),
   };
   current.activeChatId = targetKey;
