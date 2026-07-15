@@ -6743,23 +6743,11 @@ async function cmdBots(sub: string, rest: string[]): Promise<void> {
   }
 
   const sessionIdArg = argValue(rest, '--session-id');
-  const sid = sessionIdArg ?? findAncestorSessionId();
-  if (!sid) {
-    console.error('无法推断 session-id。请在 Lark 话题内的 CLI 会话中运行，或传 --session-id <id>。');
-    process.exit(1);
-  }
+  // 与 history/quoted 同一前奏：本地会话解析 + riff sandbox env 合成会话兜底
+  //（远端沙箱无 sessions.json/bots.json 时 `botmux bots list` 照常可用）。
+  const { sid, larkAppId: resolvedAppId, session: s } = await resolveSessionAppId(sessionIdArg);
 
-  const sessions = loadSessions();
-  const s = sessions.get(sid);
-  if (!s) { console.error(`未找到 session ${sid}`); process.exit(1); }
-  if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
-
-  // Register bots
-  const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
-  try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
-  if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
-
-  const appId = s.larkAppId!;
+  const appId = resolvedAppId;
   const dataDir = resolveDataDir();
   const botInfoPath = join(dataDir, 'bots-info.json');
 
