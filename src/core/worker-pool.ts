@@ -22,6 +22,7 @@ import { fallbackTurnId } from './reply-target.js';
 import { updateMessage, deleteMessage, sendEphemeralCard, sendUserMessage, addReaction, removeReaction, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
+import { hashUrlForLog, cancelRiffTaskById } from '../adapters/backend/riff-backend.js';
 import { logger } from '../utils/logger.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { botLocale, localeForBot, t as tr } from '../i18n/index.js';
@@ -32,7 +33,7 @@ import { replyToDocComment, chunkCommentText, unsubscribeDocFile, removeCommentR
 import { listDocSubscriptionsForSession, removeDocSubscription } from '../services/doc-subs-store.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
-import { isSuspendableBackendType, getSessionPersistentBackendType, resolveSpawnBackendType, persistentSessionName, killPersistentSession } from './persistent-backend.js';
+import { isSuspendableBackendType, getSessionPersistentBackendType, resolveSpawnBackendType, persistentSessionName, killPersistentSession, reconcileRiffBackendType } from './persistent-backend.js';
 import { getBot, getAllBots, loadBotConfigs, resolveBrandLabel } from '../bot-registry.js';
 
 /** A random id minted once per daemon process (this lifetime). Stamped onto
@@ -262,7 +263,7 @@ export function scheduleRiffAccessUrlPatch(ds: DaemonSession): void {
     ds.pendingRiffUrlCardRefresh = true;
     return;
   }
-  if (!ds.streamCardId || !ds.riffAccessUrl) return;
+  if (!ds.streamCardId || !ds.riffAccessUrl || !ds.workerPort) return;
   ds.pendingRiffUrlCardRefresh = undefined;
   const botCfg = getBot(ds.larkAppId).config;
   const effectiveCliId = sessionCliId(ds, botCfg);
@@ -413,7 +414,7 @@ export function cardUsageLimit(ds: DaemonSession): CliUsageLimitState | undefine
 function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
   if (ds.lastScreenStatus !== 'limited') return;
   const port = ds.workerPort ?? ds.session.webPort;
-  if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || (!port && !ds.riffAccessUrl)) return;
+  if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !port) return;
 
   const bot = getBot(ds.larkAppId);
   const effectiveCliId = sessionCliId(ds, bot.config);
@@ -589,7 +590,7 @@ export async function postFreshStreamingCard(
 ): Promise<boolean> {
   if (isDocNativeSession(ds)) return false;
   const port = ds.workerPort ?? ds.session.webPort;
-  if (!port && !ds.riffAccessUrl) return false;
+  if (!port) return false;
   const botCfg = getBot(ds.larkAppId).config;
   const effectiveCliId = sessionCliId(ds, botCfg);
   const readUrl = buildTerminalUrl(ds);
@@ -678,7 +679,7 @@ export async function postPrivateSnapshotCard(
   audience: string[],
 ): Promise<{ sent: number; total: number; notReady: boolean }> {
   const port = ds.workerPort ?? ds.session.webPort;
-  if (!port && !ds.riffAccessUrl) return { sent: 0, total: audience.length, notReady: true };
+  if (!port) return { sent: 0, total: audience.length, notReady: true };
 
   const botCfg = getBot(ds.larkAppId).config;
   const effectiveCliId = sessionCliId(ds, botCfg);
@@ -1150,6 +1151,25 @@ export function killWorker(ds: DaemonSession): void {
 function destroyOrphanedBackingSession(ds: DaemonSession): void {
   if (ds.initConfig?.adoptMode || ds.adoptedFrom) return;
   reclaimParkedCrashDiagnostic(ds);
+  // riff：worker 已死时 /close 仍要取消持久化血缘指向的远端任务——否则已关闭
+  // 话题的远端 agent 继续拿着注入凭证发消息。fire-and-forget（内部有界+重试）。
+  const frozenType = ds.initConfig?.backendType ?? ds.session.backendType;
+  if (frozenType === 'riff') {
+    const taskId = ds.session.riffParentTaskId;
+    if (taskId) {
+      try {
+        const riffCfg = getBot(ds.larkAppId).config.riff;
+        if (riffCfg?.baseUrl) {
+          void cancelRiffTaskById(riffCfg, taskId).then((ok) => {
+            if (ok) logger.info(`[${tag(ds)}] killWorker: orphan riff task ${taskId} cancelled`);
+          });
+        }
+      } catch { /* bot deregistered — nothing to cancel with */ }
+      ds.session.riffParentTaskId = undefined;
+      sessionStore.updateSession(ds.session);
+    }
+    return;
+  }
   const backendType = getSessionPersistentBackendType(ds);
   if (!backendType) return;
   try {
@@ -1817,9 +1837,10 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     // the real persistent pane (the stamp is written below; restore reads it via
     // getSessionPersistentBackendType). A brand-new session (no stamp) resolves
     // from live config, so a dashboard backend switch only affects NEW sessions.
-    backendType: resolveSpawnBackendType(ds.session.backendType, botCfg.backendType, config.daemon.backendType),
+    backendType: reconcileRiffBackendType(agentCfg.cliId, resolveSpawnBackendType(ds.session.backendType, botCfg.backendType, config.daemon.backendType), config.daemon.backendType),
     backendConfig: botCfg.riff,
     riffParentTaskId: ds.session.riffParentTaskId,
+    riffRepoDirs: ds.session.riffRepoDirs,
     prompt,
     resume,
     cliSessionId: ds.session.cliSessionId,
@@ -2358,7 +2379,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         });
         persistStreamCardState(ds);
         if ((ds.displayMode ?? 'hidden') !== 'screenshot') break;
-        if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || (!ds.workerPort && !ds.riffAccessUrl)) break;
+        if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !ds.workerPort) break;
         const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
@@ -2570,7 +2591,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         }
         if (ds.riffAccessUrl === msg.accessUrl) break;
         ds.riffAccessUrl = msg.accessUrl;
-        logger.info(`[${t}] Riff sandbox access URL updated: ${msg.accessUrl}`);
+        logger.info(`[${t}] Riff sandbox access URL updated (urlhash: ${hashUrlForLog(msg.accessUrl)})`);
         // Dashboard: refresh the session row's Web 终端 link immediately.
         dashboardEventBus.publish({
           type: 'session.update',
@@ -2584,6 +2605,14 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
 
       case 'riff_task_id': {
         if (ds.worker !== worker) break;
+        if (msg.taskId === null) {
+          // follow-up 血缘断裂：清掉持久化锚点，否则 daemon 重启会复活已判坏的 parent。
+          if (ds.session.riffParentTaskId) {
+            ds.session.riffParentTaskId = undefined;
+            sessionStore.updateSession(ds.session);
+          }
+          break;
+        }
         if (ds.session.riffParentTaskId === msg.taskId) break;
         // Persist the follow-up lineage anchor: after a daemon restart the
         // rebuilt RiffBackend resumes from this id (resumeParentTaskId) so the

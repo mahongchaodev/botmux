@@ -14,6 +14,7 @@ import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
 import * as backendTypeStore from '../services/backend-type-store.js';
+import { isValidRiffBaseUrl } from '../adapters/backend/riff-backend.js';
 import { ensureBackendAvailable } from '../services/backend-availability.js';
 import type { BackendType } from '../adapters/backend/types.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
@@ -1586,7 +1587,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     startupCommands,
     launchShell: getBot(cachedLarkAppId).config.launchShell ?? '',
     env,
-    riff: getBot(cachedLarkAppId).config.riff ?? null,
+    riff: redactRiffForClient(getBot(cachedLarkAppId).config.riff),
     summaryRange: summaryRangeFromBotConfig(getBot(cachedLarkAppId).config),
     skills: getBot(cachedLarkAppId).config.skills ?? null,
   });
@@ -1977,6 +1978,16 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
 // `{"baseUrl":"https://...","agent":"aiden","model":"...","injectStatusLines":true}`）：
 // 空白 → 清除；否则按 json kind 解析后落盘。走 applyConfigField（与 /botconfig
 // 同一写盘 + 内存热更新路径），next-session 生效。仅 backendType=riff 时使用。
+/** riff 配置里 dashboard 可编辑的字段——PUT /bot-riff 只覆盖这些，其余保留。 */
+const RIFF_UI_EDITABLE_KEYS = new Set(['baseUrl', 'agent', 'model', 'jwtEnv', 'sandboxCluster', 'injectStatusLines', 'systemPrompt', 'setupCommands']);
+
+/** 发给浏览器前脱敏：明文 jwt / env（可能含各类密钥）绝不进 dashboard 响应。 */
+function redactRiffForClient(riff: unknown): Record<string, unknown> | null {
+  if (!riff || typeof riff !== 'object') return null;
+  const { jwt: _jwt, env: _env, ...safe } = riff as Record<string, unknown>;
+  return safe;
+}
+
 ipcRoute('PUT', '/api/bot-riff', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   let body: { riff?: unknown };
@@ -1988,15 +1999,24 @@ ipcRoute('PUT', '/api/bot-riff', async (req, res) => {
   const raw = typeof body.riff === 'string' ? body.riff : '';
   let value: Record<string, unknown> | null;
   if (!raw.trim()) {
-    value = null;  // 清除
+    value = null;  // 清除（显式清空整份 riff 配置，含隐藏字段）
   } else {
     const coerced = coerceConfigValue(spec, raw);
     if (!coerced.ok) return jsonRes(res, 400, { ok: false, error: coerced.reason });
     value = coerced.value as Record<string, unknown>;
+    // 合并保存：dashboard 只回写 UI 展示的字段；接口支持但 UI 未展示的字段
+    // （templateId / jwt / env / logLevel / repos…）必须原样保留，否则用户只改
+    // 一个 model 就会静默删掉认证等隐藏配置。
+    const prev = (getBot(cachedLarkAppId).config.riff ?? {}) as Record<string, unknown>;
+    const preserved = Object.fromEntries(Object.entries(prev).filter(([k]) => !RIFF_UI_EDITABLE_KEYS.has(k)));
+    value = { ...preserved, ...value };
+    if (!isValidRiffBaseUrl(value.baseUrl)) {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_base_url' });
+    }
   }
   const r = await applyConfigField(cachedLarkAppId, spec, value);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, riff: value ? JSON.stringify(value, null, 2) : '' });
+  jsonRes(res, 200, { ok: true, riff: value ? JSON.stringify(redactRiffForClient(value), null, 2) : '' });
 });
 
 // Per-bot 最大同时活跃会话数 maxLiveWorkers。Body `{ maxLiveWorkers: number | null }`:

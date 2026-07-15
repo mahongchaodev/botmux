@@ -121,6 +121,21 @@ function formatFieldValue(spec: ConfigFieldSpec, value: unknown): string {
     const keys = obj ? Object.keys(obj) : [];
     return keys.length ? keys.map(k => `${k}=••••`).join(', ') : '∅';
   }
+  // riff 配置可含 secret（jwt / env 值）。聊天可见渲染（/config get、配置卡）
+  // 与 applyConfigField 的变更日志都走本函数——结构可见、值打码。
+  if (spec.configKey === 'riff') {
+    const obj = value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>) : null;
+    if (!obj || Object.keys(obj).length === 0) return '∅';
+    return Object.entries(obj).map(([k, v]) => {
+      if (k === 'jwt') return 'jwt=••••';
+      if (k === 'env') {
+        const keys = v && typeof v === 'object' && !Array.isArray(v) ? Object.keys(v as object) : [];
+        return `env={${keys.map(x => `${x}=••••`).join(', ')}}`;
+      }
+      return `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`;
+    }).join(', ');
+  }
   if (spec.kind === 'json') {
     return value === undefined || value === null ? '∅' : JSON.stringify(value);
   }

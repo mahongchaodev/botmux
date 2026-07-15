@@ -11,7 +11,7 @@ vi.mock('../src/utils/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import { RiffBackend, parseRiffRepoName, deriveRiffRepoFromWorkingDir, deriveRiffReposFromWorkingDir } from '../src/adapters/backend/riff-backend.js';
+import { RiffBackend, parseRiffRepoName, deriveRiffRepoFromWorkingDir, deriveRiffReposFromDirs } from '../src/adapters/backend/riff-backend.js';
 
 const BASE = 'https://riff-infra-boe.bytedance.net';
 
@@ -185,6 +185,50 @@ describe('RiffBackend', () => {
       expect(done).toHaveBeenCalledTimes(1);
     });
 
+    it('CRLF-framed done event is parsed (proxy-normalized SSE)', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      (be as any).maxReconnectAttempts = 0;
+      const done = vi.fn();
+      be.onTaskDone(done);
+      fetchMock.mockImplementation(async (url: string | URL) => {
+        const u = String(url);
+        calls.push({ url: u });
+        if (u.includes('/api2/task-stream')) {
+          const body = 'event:done\r\ndata:{"status":"completed"}\r\n\r\n';
+          return new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); } }), { status: 200 });
+        }
+        if (u.includes('/api/task-detail')) return Response.json({ success: true, data: { task: {} } });
+        return taskResponse('task-1');
+      });
+      be.spawn('', [], {} as any);
+      be.write('hi');
+      await flush();
+      await flush();
+      expect(done).toHaveBeenCalledTimes(1); // CRLF 分帧被归一化，done 正常触发（无 EOF 误判）
+    });
+
+    it('EOF-tail done (no trailing blank line) is still processed', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      (be as any).maxReconnectAttempts = 0;
+      const done = vi.fn();
+      be.onTaskDone(done);
+      fetchMock.mockImplementation(async (url: string | URL) => {
+        const u = String(url);
+        calls.push({ url: u });
+        if (u.includes('/api2/task-stream')) {
+          const body = 'event:done\ndata:{"status":"completed"}';  // 无结尾空行
+          return new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); } }), { status: 200 });
+        }
+        if (u.includes('/api/task-detail')) return Response.json({ success: true, data: { task: {} } });
+        return taskResponse('task-1');
+      });
+      be.spawn('', [], {} as any);
+      be.write('hi');
+      await flush();
+      await flush();
+      expect(done).toHaveBeenCalledTimes(1);
+    });
+
     it('clean EOF AFTER done is normal shutdown — no error, no second boundary', async () => {
       const be = makeBackend({ injectStatusLines: false });
       (be as any).maxReconnectAttempts = 0;
@@ -224,6 +268,36 @@ describe('RiffBackend', () => {
       resolvers.shift()!(taskResponse('task-new'));
       await flush();
       expect(ids).toEqual(['task-old', 'task-new']); // new id announced for persistence
+    });
+  });
+
+  describe('task isolation (finding F)', () => {
+    it('stale stream events are inert once a newer task is current', () => {
+      const be = makeBackend({ injectStatusLines: false });
+      const lines: string[] = [];
+      be.onData(d => lines.push(d));
+      (be as any).currentTaskId = 'task-B';
+      (be as any).handleSseEvent('event:output\ndata:{"chunk":"OLD-A-OUTPUT"}', 'task-A');
+      expect(lines.join('')).not.toContain('OLD-A-OUTPUT');
+    });
+
+    it("A's late task-detail must not overwrite B's sandbox URL", async () => {
+      const be = makeBackend();
+      const urls: string[] = [];
+      be.onAccessUrl(u => urls.push(u));
+      let resolveDetail!: (r: Response) => void;
+      fetchMock.mockImplementation(async (url: string | URL) => {
+        const u = String(url);
+        calls.push({ url: u });
+        if (u.includes('/api/task-detail')) return new Promise<Response>((r) => { resolveDetail = r; });
+        return pendingSseResponse();
+      });
+      (be as any).currentTaskId = 'task-A';
+      const p = (be as any).fetchDirectAccessUrl('task-A');
+      (be as any).currentTaskId = 'task-B';
+      resolveDetail(Response.json({ success: true, data: { task: { directAccessUrl: 'https://old-a.example/' } } }));
+      await p;
+      expect(urls).not.toContain('https://old-a.example/');
     });
   });
 
@@ -304,31 +378,24 @@ describe('RiffBackend', () => {
       expect(derived!.warnings.some(w => w.includes('未提交改动'))).toBe(true);
     });
 
-    it('multi-repo: derives every child worktree under a non-git parent dir', () => {
+    it('multi-repo: derives the EXPLICIT stamped dirs in user-selection order (B,A stays B,A)', () => {
       const perDir: Record<string, { repo: any; warnings: string[] } | null> = {
-        '/parent': null,
-        '/parent/a': { repo: { repoName: 'g/a', repoBranch: 'wt/x' }, warnings: [] },
-        '/parent/b': { repo: { repoName: 'g/b' }, warnings: ['本地分支 wt/y 未推送到远端，沙箱将使用默认分支'] },
-        '/parent/junk': null,
+        '/wt/b': { repo: { repoName: 'g/b', repoBranch: 'wt/x' }, warnings: [] },
+        '/wt/a': { repo: { repoName: 'g/a' }, warnings: ['本地分支 wt/y 未推送到远端，沙箱将使用默认分支'] },
       };
-      const derived = deriveRiffReposFromWorkingDir('/parent', {
-        deriveOne: (dir: string) => perDir[dir] ?? null,
-        listChildDirs: () => ['/parent/a', '/parent/b', '/parent/junk'],
-      });
-      expect(derived!.repos).toEqual([{ repoName: 'g/a', repoBranch: 'wt/x' }, { repoName: 'g/b' }]);
-      expect(derived!.warnings).toEqual(['[g/b] 本地分支 wt/y 未推送到远端，沙箱将使用默认分支']);
+      const derived = deriveRiffReposFromDirs(['/wt/b', '/wt/a'], (dir: string) => perDir[dir] ?? null);
+      // 用户选 B,A → primary 必须是 B（顺序即语义，不随文件系统枚举漂移）
+      expect(derived!.repos).toEqual([{ repoName: 'g/b', repoBranch: 'wt/x' }, { repoName: 'g/a' }]);
+      expect(derived!.warnings).toEqual(['[g/a] 本地分支 wt/y 未推送到远端，沙箱将使用默认分支']);
     });
 
-    it('multi-repo: direct git workingDir still yields a single repo without child scan', () => {
-      const derived = deriveRiffReposFromWorkingDir('/repo', {
-        deriveOne: (dir: string) => dir === '/repo' ? { repo: { repoName: 'g/r', repoBranch: 'main' }, warnings: [] } : null,
-        listChildDirs: () => { throw new Error('must not scan children'); },
-      });
-      expect(derived!.repos).toEqual([{ repoName: 'g/r', repoBranch: 'main' }]);
+    it('multi-repo: returns null when no stamped dir derives (never scans children)', () => {
+      expect(deriveRiffReposFromDirs(['/x/a', '/x/b'], () => null)).toBeNull();
     });
 
-    it('multi-repo: returns null when neither the dir nor its children derive', () => {
-      expect(deriveRiffReposFromWorkingDir('/x', { deriveOne: () => null, listChildDirs: () => ['/x/a'] })).toBeNull();
+    it('plain non-git workingDir derives nothing (no repo attached)', () => {
+      const git = () => null;
+      expect(deriveRiffRepoFromWorkingDir('/home/user', git)).toBeNull();
     });
 
     it('returns null for non-internal origins and non-git dirs', () => {
@@ -363,6 +430,22 @@ describe('RiffBackend', () => {
       await flush();
       const exec = calls.find(c => c.url.includes('/api/task-execute'))!;
       expect(JSON.parse(String(exec.init?.body)).config.repos).toBeUndefined();
+    });
+  });
+
+  describe('status line redaction (finding S)', () => {
+    it('sandbox status line shows host only, never the full capability URL', async () => {
+      const be = makeBackend();
+      const lines: string[] = [];
+      be.onData(d => lines.push(d));
+      (be as any).currentTaskId = 'task-9';
+      (be as any).handleSseEvent('event:init\ndata:{"directAccessUrl":"https://port-8080-v1-SECRETSANDBOXID.cn-north.ai-sandbox-boe.byted.org/?folder=x"}', 'task-9');
+      const out = lines.join('');
+      expect(out).toContain('Sandbox 已就绪');
+      // 可写能力编码在唯一子域——hostname 的任何部分都不得出现在群可见输出里
+      expect(out).not.toContain('SECRETSANDBOXID');
+      expect(out).not.toContain('port-8080');
+      expect(out).not.toContain('byted.org');
     });
   });
 

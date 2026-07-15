@@ -335,9 +335,12 @@ export async function commitRepoSelection(
   // The worktree flow already posted a precise "worktree 已创建：path 分支 …"
   // line before funnelling in here — suppress the redundant "已选择/已切换"
   // confirmation so the user sees a single message, not two.
-  opts?: { suppressConfirmReply?: boolean },
+  opts?: { suppressConfirmReply?: boolean; riffRepoDirs?: string[] },
 ): Promise<void> {
   const { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply } = ctx;
+  // riff 多仓 stamp：只有多仓 worktree 流显式传入（保留用户选择顺序，首仓=primary）；
+  // 其它选仓路径一律清除旧 stamp——workingDir 变了，旧的多仓组合不再成立。
+  ds.session.riffRepoDirs = opts?.riffRepoDirs;
   const locTarget = localeForBot(ds.larkAppId);
   // `/close` deletes the active-map entry without touching sessionId or
   // pendingRepo — identity against the map is the only tell that the session
@@ -1554,7 +1557,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       persistStreamCardState(ds);
 
       let cardJson: string | undefined;
-      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && (ds.workerPort || ds.riffAccessUrl)) {
+      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const readUrl = buildTerminalUrl(ds);
         cardJson = buildStreamingCard(
           ds.session.sessionId,
@@ -1773,7 +1776,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           if (ds.worker) {
             ds.worker.send({ type: 'set_display_mode', mode: next } as DaemonToWorker);
           }
-          if (cardMessageId && (ds.workerPort || ds.riffAccessUrl)) {
+          if (cardMessageId && ds.workerPort) {
             const readUrl = buildTerminalUrl(ds);
             const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
             const cardJson = buildStreamingCard(
@@ -1817,7 +1820,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           ds.worker.send({ type: 'set_display_mode', mode: next } as DaemonToWorker);
         }
         const effectiveCliId = sessionCliId(ds);
-        const readUrl = ds.workerPort || ds.riffAccessUrl ? buildTerminalUrl(ds) : '';
+        const readUrl = ds.workerPort ? buildTerminalUrl(ds) : '';
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
           ds.session.sessionId,
@@ -1857,7 +1860,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       if (ds.worker) {
         ds.worker.send({ type: 'set_display_mode', mode: next } as DaemonToWorker);
       }
-      if (ds.streamCardId && (ds.workerPort || ds.riffAccessUrl)) {
+      if (ds.streamCardId && ds.workerPort) {
         const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
         const cardJson = buildStreamingCard(
@@ -1921,7 +1924,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       // Return the current card JSON so Feishu doesn't revert the displayed
       // image to the originally-POSTed initial frame while waiting for the
       // fresh screenshot PATCH (~1s).
-      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && (ds.workerPort || ds.riffAccessUrl)) {
+      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const botCfg = getBot(ds.larkAppId).config;
         const effectiveCliId = sessionCliId(ds);
         const readUrl = buildTerminalUrl(ds);
@@ -1962,7 +1965,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         ds.worker.send({ type: 'term_action', key } as DaemonToWorker);
         logger.info(`[${tag(ds)}] term_action: ${key}`);
       }
-      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && (ds.workerPort || ds.riffAccessUrl)) {
+      if (ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL && ds.workerPort) {
         const botCfg = getBot(ds.larkAppId).config;
         const effectiveCliId = sessionCliId(ds);
         const readUrl = buildTerminalUrl(ds);
@@ -2453,7 +2456,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         try {
           // The "worktree 已创建：…" notice above already confirms the switch —
           // suppress commitRepoSelection's own "已选择/已切换" to avoid a dup.
-          await commitRepoSelection(commitCtx, creation.path, `${pathBasename(creation.path)} (${creation.branch})`, { suppressConfirmReply: true });
+          await commitRepoSelection(commitCtx, creation.path, `${pathBasename(creation.path)} (${creation.branch})`, {
+            suppressConfirmReply: true,
+            // 多仓：把按用户选择顺序创建的 worktree 目录 stamp 到 session，
+            // riff 按此显式列表（而非目录扫描）推导 repos，首仓为 primary。
+            riffRepoDirs: created.length > 1 ? created.map(c => c.result.path) : undefined,
+          });
         } catch (e) {
           // The worktree DOES exist at this point — only the switch failed.
           // Don't report it as a creation failure, or the user retries and

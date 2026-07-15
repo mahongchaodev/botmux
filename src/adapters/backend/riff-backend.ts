@@ -1,6 +1,7 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { SessionBackend, SpawnOpts } from './types.js';
 import { logger } from '../../utils/logger.js';
 
@@ -28,7 +29,7 @@ const DEFAULT_RIFF_SYSTEM_PROMPT = [
   '',
   'Helpers: `botmux history` (read this session\'s history), `botmux quoted <message_id>` (fetch a quoted message), `botmux bots list` (list other bots in the group).',
   '',
-  '@ decision (mandatory): every `botmux send` MUST explicitly pick one or it errors — `--mention <open_id>` (use the open_id from the <sender> tag of the message you are answering, or another explicit target) / `--mention-back` (@ the sender recorded in the session, may be unavailable here) / `--no-mention` (none). Prefer `--mention <sender open_id>` for substantive conclusions; `--no-mention` for low-priority notes.',
+  '@ decision (mandatory): every `botmux send` MUST explicitly pick one or it errors — `--mention <open_id>` (use the open_id from the <sender> tag of the CURRENT message you are answering) / `--no-mention` (low-priority notes). NEVER use `--mention-back` in this sandbox: the session-recorded sender is frozen at task creation, so on follow-up turns it would @ the wrong person (it is disabled here and will error).',
   '',
   'When to send: key conclusions, plans (wait for user approval before acting), final results, progress updates. A bare `print`/`echo` does NOT count as a reply.',
   'COMPLETION CONTRACT: a turn is complete ONLY after `botmux send` actually ran and printed ✓ success. Writing the answer solely in your final report/output does NOT reach the user — always run `botmux send` first, then summarize in the report.',
@@ -109,6 +110,19 @@ export interface RiffBackendConfig {
   setupCommands?: string[];
 }
 
+/** Valid riff service base URL: non-empty http(s). Shared by the worker's
+ *  spawn fail-fast and the dashboard PUT endpoint so every config entry point
+ *  (dashboard / /config / setup / hand-edited bots.json) hits the same gate. */
+export function isValidRiffBaseUrl(v: unknown): v is string {
+  if (typeof v !== 'string' || !v.trim()) return false;
+  try {
+    const u = new URL(v);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export interface RiffRepoRef {
   /** Internal repo name, e.g. 'webinfra/agent-monorepo' (code.byted.org). */
   repoName: string;
@@ -178,49 +192,61 @@ export function deriveRiffRepoFromWorkingDir(
 }
 
 /**
- * Multi-repo aware derivation. The repo-select card's 多仓库 mode puts the
- * session in a PARENT dir containing one worktree per selected repo — the
- * parent itself is not a git repo, so probe its immediate child dirs and
- * derive each. A direct git workingDir still yields a single repo. The first
- * repo becomes riff's `primary`, the rest `workspace` (server-assigned).
- * Returns null when nothing derivable is found.
+ * Multi-repo derivation over an EXPLICIT, ordered dir list — the repo-select
+ * card's 多仓库 flow stamps the user's chosen worktree dirs (in selection
+ * order) onto the session, and ONLY that stamp triggers multi-repo here. The
+ * first dir becomes riff's `primary` (sandbox cwd). Never scans children of an
+ * arbitrary non-git workingDir: a home dir / repo-collection dir would attach
+ * random unrelated repos to the task.
  */
-export function deriveRiffReposFromWorkingDir(
-  workingDir: string,
-  deps: {
-    deriveOne?: typeof deriveRiffRepoFromWorkingDir;
-    listChildDirs?: (dir: string) => string[];
-  } = {},
+export function deriveRiffReposFromDirs(
+  dirs: string[],
+  deriveOne: typeof deriveRiffRepoFromWorkingDir = deriveRiffRepoFromWorkingDir,
 ): { repos: RiffRepoRef[]; warnings: string[] } | null {
-  const deriveOne = deps.deriveOne ?? deriveRiffRepoFromWorkingDir;
-  const direct = deriveOne(workingDir);
-  if (direct) return { repos: [direct.repo], warnings: direct.warnings };
-
-  const listChildDirs = deps.listChildDirs ?? defaultListChildDirs;
   const repos: RiffRepoRef[] = [];
   const warnings: string[] = [];
   const seen = new Set<string>();
-  for (const child of listChildDirs(workingDir)) {
-    const derived = deriveOne(child);
+  for (const dir of dirs) {
+    const derived = deriveOne(dir);
     if (!derived || seen.has(derived.repo.repoName)) continue;
     seen.add(derived.repo.repoName);
     repos.push(derived.repo);
-    const label = derived.repo.repoName;
-    warnings.push(...derived.warnings.map(w => `[${label}] ${w}`));
+    warnings.push(...derived.warnings.map(w => `[${derived.repo.repoName}] ${w}`));
   }
   return repos.length > 0 ? { repos, warnings } : null;
 }
 
-/** Immediate child directories (skip hidden), capped to keep the scan cheap. */
-function defaultListChildDirs(dir: string, cap = 16): string[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter(e => e.isDirectory() && !e.name.startsWith('.'))
-      .slice(0, cap)
-      .map(e => join(dir, e.name));
-  } catch {
-    return [];
+/**
+ * Daemon-side orphan cancel: /close on a worker-less riff session must still
+ * cancel the persisted remote task (the sandbox agent otherwise keeps running
+ * with injected Lark credentials after the topic is closed). Bounded + one
+ * retry; failures are logged, never thrown.
+ */
+export async function cancelRiffTaskById(
+  cfg: { baseUrl: string; jwt?: string; jwtEnv?: string },
+  taskId: string,
+): Promise<boolean> {
+  const attempt = async (): Promise<void> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const jwt = new RiffBackend(cfg as RiffBackendConfig, 'orphan-cancel')['resolveJwt']();
+    if (jwt) headers['x-jwt-token'] = jwt;
+    const resp = await fetch(`${cfg.baseUrl}/api/task-cancel`, {
+      method: 'POST', headers, body: JSON.stringify({ id: taskId }), signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) throw new Error(`task-cancel HTTP ${resp.status}`);
+  };
+  try { await attempt(); return true; } catch {
+    try { await attempt(); return true; } catch (err) {
+      logger.warn(`[riff] orphan task-cancel failed (task ${taskId} may keep running remotely): ${err}`);
+      return false;
+    }
   }
+}
+
+/** Irreversible short hash of a sandbox URL for log correlation — the unique
+ *  subdomain IS the write capability, so neither URL nor host may be logged. */
+export function hashUrlForLog(u: string): string {
+  return createHash('sha256').update(u).digest('hex').slice(0, 8);
 }
 
 function defaultRunGit(cwd: string): (args: string[]) => string | null {
@@ -275,7 +301,7 @@ export class RiffBackend implements SessionBackend {
   private exitCb: ((code: number | null, signal: string | null) => void) | null = null;
   private accessUrlCb: ((url: string) => void) | null = null;
   private taskDoneCb: (() => void) | null = null;
-  private taskIdCb: ((taskId: string) => void) | null = null;
+  private taskIdCb: ((taskId: string | null) => void) | null = null;
   private outputBuffer = '';
   private currentTaskId: string | null = null;
   private currentAccessUrl: string | null = null;
@@ -318,7 +344,7 @@ export class RiffBackend implements SessionBackend {
   /** Called whenever a new task id becomes current (create/follow-up). The
    *  worker forwards it to the daemon so the follow-up lineage survives a
    *  daemon restart (currentTaskId otherwise lives only in this process). */
-  onTaskId(cb: (taskId: string) => void): void {
+  onTaskId(cb: (taskId: string | null) => void): void {
     this.taskIdCb = cb;
     if (this.currentTaskId) cb(this.currentTaskId);
   }
@@ -417,11 +443,23 @@ export class RiffBackend implements SessionBackend {
     this.exitCb?.(0, null);
   }
 
-  destroySession(): void {
+  async destroySession(): Promise<void> {
+    // /close（及 /restart 的替换路径）必须把远端任务真正取消掉——fire-and-forget
+    // 在 worker 紧接 process.exit 时大概率发不出去，已关闭话题的远端 agent 会
+    // 继续拿着注入的凭证发消息。有界 await + 一次重试，失败也明确留痕。
     if (this.currentTaskId && !this.taskDone) {
-      this.cancelTask(this.currentTaskId).catch((err) => {
-        logger.warn(`[riff] task-cancel failed: ${err}`);
-      });
+      const id = this.currentTaskId;
+      try {
+        await this.cancelTask(id);
+        logger.info(`[riff] task ${id} cancelled on close`);
+      } catch (err) {
+        try {
+          await this.cancelTask(id);
+          logger.info(`[riff] task ${id} cancelled on close (retry)`);
+        } catch (err2) {
+          logger.warn(`[riff] task-cancel failed on close (task ${id} may keep running remotely): ${err2}`);
+        }
+      }
     }
     this.kill();
   }
@@ -574,8 +612,11 @@ export class RiffBackend implements SessionBackend {
       this.streamTask(taskId);
     } catch (err) {
       // Broken lineage (parent expired/GC'd etc.) — fall back to a fresh task
-      // on the next message instead of failing every follow-up forever.
+      // on the next message instead of failing every follow-up forever. Also
+      // clear the DAEMON-side persisted lineage: without the null broadcast a
+      // daemon restart would resurrect the parent we just declared broken.
       this.currentTaskId = null;
+      this.taskIdCb?.(null);
       this.emitError(`riff follow-up 失败: ${err}（下一条消息将新建任务）`);
     }
   }
@@ -675,12 +716,14 @@ export class RiffBackend implements SessionBackend {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const jwt = this.getJwt();
     if (jwt) headers['x-jwt-token'] = jwt;
-    await fetch(url, {
+    const resp = await fetch(url, {
       method: 'POST',
       headers,
       // The API expects { id } — { taskId } is silently rejected ("id Required").
       body: JSON.stringify({ id: taskId }),
-    }).catch(() => { /* best effort */ });
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) throw new Error(`task-cancel HTTP ${resp.status}`);
   }
 
   private async streamTask(taskId: string): Promise<void> {
@@ -708,6 +751,10 @@ export class RiffBackend implements SessionBackend {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        // SSE 允许 CRLF 行结束（常见于代理）——先归一化，否则 \r\n\r\n 永远
+        // 切不出事件块，整条流会在 EOF 后被误判成「无 done」。跨 chunk 撕裂的
+        // \r\n 也安全：残留的尾部 \r 会留在 buffer 里等下一个 chunk 拼上。
+        buffer = buffer.replace(/\r\n/g, '\n');
 
         // Standard SSE: events separated by blank line (\n\n)
         const events = buffer.split('\n\n');
@@ -717,6 +764,11 @@ export class RiffBackend implements SessionBackend {
           this.handleSseEvent(eventBlock, taskId);
         }
       }
+      // EOF 尾部：最后一个事件块后面可能没有空行分隔（decoder 也可能还压着
+      // 末尾字节）——冲洗并把完整的残块按事件处理，否则收尾的 done 会被丢掉。
+      buffer += decoder.decode();
+      buffer = buffer.replace(/\r\n/g, '\n');
+      if (buffer.trim()) this.handleSseEvent(buffer, taskId);
 
       // Clean EOF without a done event: a proxy/link can close the stream
       // gracefully while the task is still running. Silently returning here
@@ -740,6 +792,9 @@ export class RiffBackend implements SessionBackend {
         logger.info(`[riff] SSE reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
         this.emitLine(`[riff] 连接中断，正在重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})`, 'warn');
         await new Promise((r) => setTimeout(r, delay));
+        // Re-check after the delay: a follow-up may have replaced the task
+        // while we slept — reconnecting the stale stream would resurrect it.
+        if (this.killed || taskId !== this.currentTaskId || this.completedTaskIds.has(taskId)) return;
         this.streamTask(taskId);
       } else if (!this.killed && !this.taskDone) {
         this.emitError(`SSE 连接中断，重连失败`);
@@ -748,6 +803,11 @@ export class RiffBackend implements SessionBackend {
   }
 
   private handleSseEvent(block: string, taskId: string): void {
+    // Task isolation: once a newer task is current, EVERY event from an older
+    // task's stream (output/log/init/session_info/done alike) is inert — a
+    // stale stream must never write into the new task's log or replace its
+    // sandbox URL.
+    if (taskId !== this.currentTaskId) return;
     // Standard SSE parsing: event type from `event:` line, data from `data:` lines
     // Also handle SSE comments (lines starting with `:`) — ignore them (heartbeats)
     let eventType = 'message';
@@ -787,7 +847,10 @@ export class RiffBackend implements SessionBackend {
             directAccessUrl: data['directAccessUrl'] as string | undefined,
           });
           if (changed && this.currentAccessUrl && this.config.injectStatusLines !== false) {
-            this.emitLine(`[riff] Sandbox: ${this.currentAccessUrl}`);
+            // 群成员可经「显示输出/导出文字」看到状态行，而 AIO 链接的可写能力
+            // 编码在唯一子域里（port-8080-<sandbox-id>.…）——host 也不能露，
+            // 状态行只报就绪，链接一律走 canOperate 门控的「获取操作链接」私发。
+            this.emitLine('[riff] Sandbox 已就绪（链接经「获取操作链接」按钮获取）');
           }
           // SSE events usually carry only accessUrl (riff frontend page — its
           // domain may not match the configured baseUrl environment). The
@@ -902,6 +965,9 @@ export class RiffBackend implements SessionBackend {
         success: boolean;
         data?: { task?: { accessUrl?: string; directAccessUrl?: string } };
       };
+      // A slow detail response may land after a follow-up replaced the task —
+      // never let the OLD task's URL overwrite the new task's.
+      if (taskId !== this.currentTaskId) return;
       const task = result.data?.task;
       if (task) this.updateAccessUrl(task);
     } catch (err) {
@@ -948,6 +1014,14 @@ export class RiffBackend implements SessionBackend {
         };
       };
 
+      // Stale guard: if a follow-up already replaced this task while the
+      // detail request was in flight, drop both the URL and the report —
+      // appending the OLD task's report into the NEW task's log (or replacing
+      // its sandbox URL) is worse than losing a tail report.
+      if (taskId !== this.currentTaskId) {
+        logger.info(`[riff] task ${taskId} detail arrived after a newer task started — report dropped`);
+        return;
+      }
       if (result.data?.task) this.updateAccessUrl(result.data.task);
 
       // Prefer displayReport content (cleaner), fall back to raw output

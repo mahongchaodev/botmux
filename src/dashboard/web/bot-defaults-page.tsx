@@ -489,7 +489,9 @@ function BotDefaultsCard(props: { bot: BotDefaultsRow; cliState: CliOptionsState
             <WorkingDirSection bot={bot} patchBot={patchBot} putCardPref={putCardPref} />
             {/* riff 在远端沙箱执行、本地无 CLI 进程，文件沙盒对它无意义（worker 侧已旁路）。 */}
             {bot.cliId !== 'riff' && <SandboxSection bot={bot} patchBot={patchBot} />}
-            <BackendTypeSection bot={bot} patchBot={patchBot} />
+            {/* riff：backendType 与 CLI 选择 1:1 绑定（spawn 层强制配对），
+                手动切 pty/tmux 只会制造坏组合，隐藏该区块。 */}
+            {bot.cliId !== 'riff' && <BackendTypeSection bot={bot} patchBot={patchBot} />}
           </section>
           <section className="bd-tile">
             <RuntimeEnvironmentSection bot={bot} patchBot={patchBot} />
@@ -2293,7 +2295,7 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
   const [model, setModel] = useState(typeof riff.model === 'string' ? riff.model : '');
   const [jwtEnv, setJwtEnv] = useState(typeof riff.jwtEnv === 'string' ? riff.jwtEnv : '');
   const [sandboxCluster, setSandboxCluster] = useState(typeof riff.sandboxCluster === 'string' ? riff.sandboxCluster : '');
-  const [injectStatusLines, setInjectStatusLines] = useState(riff.injectStatusLines === true);
+  const [injectStatusLines, setInjectStatusLines] = useState(riff.injectStatusLines !== false);
   const [systemPrompt, setSystemPrompt] = useState(typeof riff.systemPrompt === 'string' ? riff.systemPrompt : '');
   const [setupCommands, setSetupCommands] = useState(
     Array.isArray(riff.setupCommands) ? riff.setupCommands.join('\n') : '',
@@ -2308,7 +2310,7 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
     setModel(typeof r.model === 'string' ? r.model : '');
     setJwtEnv(typeof r.jwtEnv === 'string' ? r.jwtEnv : '');
     setSandboxCluster(typeof r.sandboxCluster === 'string' ? r.sandboxCluster : '');
-    setInjectStatusLines(r.injectStatusLines === true);
+    setInjectStatusLines(r.injectStatusLines !== false);
     setSystemPrompt(typeof r.systemPrompt === 'string' ? r.systemPrompt : '');
     setSetupCommands(Array.isArray(r.setupCommands) ? r.setupCommands.join('\n') : '');
   }, [props.bot.riff]);
@@ -2323,7 +2325,9 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
       if (model.trim()) config.model = model.trim();
       if (jwtEnv.trim()) config.jwtEnv = jwtEnv.trim();
       if (sandboxCluster.trim()) config.sandboxCluster = sandboxCluster.trim();
-      if (injectStatusLines) config.injectStatusLines = true;
+      // 显式持久化布尔——省略字段时后端按“开启”解释（!== false），
+      // 只存 true 会导致该开关永远关不掉。
+      config.injectStatusLines = injectStatusLines;
       if (systemPrompt.trim()) config.systemPrompt = systemPrompt.trim();
       if (setupCommands.trim()) {
         config.setupCommands = setupCommands.split('\n').map(s => s.trim()).filter(Boolean);

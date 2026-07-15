@@ -4529,10 +4529,22 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
  *  failure so callers can stay focused on the happy path. */
 async function resolveSessionAppId(sessionIdArg: string | undefined): Promise<{ sid: string; larkAppId: string; session: SessionData }> {
   process.env.SESSION_DATA_DIR ??= resolveDataDir();
-  const sid = sessionIdArg ?? findAncestorSessionId();
+  const sid = sessionIdArg ?? findAncestorSessionId() ?? process.env.BOTMUX_SESSION_ID;
   if (!sid) {
     console.error('无法推断 session-id。请在 Lark 话题/群里的 CLI 会话中运行，或传 --session-id <id>。');
     process.exit(1);
+  }
+  // riff sandbox env-mode：与 cmdSend 同一权威规则（仅覆盖 env 注入的 sid）。
+  // 远端沙箱没有 sessions.json / bots.json，history/quoted/bots 走同一合成会话，
+  // 且跳过本地 bots 重载（沙箱残留的 stale bots.json 不得覆盖 env 凭证）。
+  {
+    const riff = riffModeSession({ evenWithLocalSessions: sid === process.env.BOTMUX_SESSION_ID });
+    if (riff && riff.session.sessionId === sid) {
+      const { registerBot } = await import('./bot-registry.js');
+      try { registerBot(riff.botConfig); } catch { /* already registered */ }
+      envPinnedRiffBot = riff.botConfig;
+      return { sid, larkAppId: riff.session.larkAppId!, session: riff.session };
+    }
   }
   const sessions = loadSessions();
   const s = sessions.get(sid);
@@ -4942,6 +4954,11 @@ async function registerSelfFromCredFile(): Promise<void> {
  * Returns null when not in riff mode (env vars missing or local session data
  * exists), so the normal flow takes over.
  */
+/** J（二审）：riff env 模式选定的 bot。cmdSend/history 等后续路径里的
+ *  `loadBotConfigs()` 重载会把沙箱残留的 stale bots.json（可能是同 appId 的旧
+ *  secret）覆盖到注册表上——每次本地重载后必须把 env bot 重新注册回去压轴。 */
+let envPinnedRiffBot: import('./bot-registry.js').BotConfig | null = null;
+
 function riffModeSession(opts: { evenWithLocalSessions?: boolean } = {}): { session: SessionData; botConfig: import('./bot-registry.js').BotConfig } | null {
   const appId = process.env.BOTMUX_LARK_APP_ID;
   const appSecret = process.env.BOTMUX_LARK_APP_SECRET;
@@ -4993,8 +5010,9 @@ function riffModeSession(opts: { evenWithLocalSessions?: boolean } = {}): { sess
     larkAppId: appId,
     scope,
     ownerOpenId,
-    // Lets `--mention-back` @ the turn's sender even without local session state.
-    quoteTargetSenderOpenId: ownerOpenId,
+    // 刻意不设 quoteTargetSenderOpenId：env 是任务创建时冻结的，follow-up 轮
+    // 换了触发人后 --mention-back 会错误 @ 最初 owner。riff routing 明确禁用
+    // mention-back（@ 硬门会拒绝并提示 agent 改用 --mention <本轮 sender>）。
   };
 
   return { session, botConfig };
@@ -5141,6 +5159,7 @@ async function cmdSend(rest: string[]): Promise<void> {
       s = riff.session;
       const { registerBot } = await import('./bot-registry.js');
       try { registerBot(riff.botConfig); } catch { /* already registered */ }
+      envPinnedRiffBot = riff.botConfig;
     }
   }
 
@@ -5203,6 +5222,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     if (!content.trim()) { console.error('--voice 需要要朗读的文字'); process.exit(1); }
     const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
     try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
     const { uploadFile, sendMessage, replyMessage } = await import('./im/lark/client.js');
     const { synthesizeVoiceOpus } = await import('./services/voice/index.js');
     const { rmSync } = await import('node:fs');
@@ -5254,6 +5274,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     }
     const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
     try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
     const { replyToDocComment, chunkCommentText, removeCommentReaction } = await import('./im/lark/doc-comment.js');
     const appId = s.larkAppId!;
     const loc = localeForBot(appId);
@@ -5344,6 +5365,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Register bots so Lark client works
   const { registerBot, loadBotConfigs, findOncallChatForAnyBot } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
 
   const { sendMessage, replyMessage, uploadImage, uploadFile, MessageWithdrawnError } = await import('./im/lark/client.js');
   const appId = s.larkAppId!;
@@ -5943,6 +5965,7 @@ async function cmdDispatch(rest: string[]): Promise<void> {
 
   const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
   const { sendMessage, replyMessage } = await import('./im/lark/client.js');
   const appId = s.larkAppId!;
   const briefJson = JSON.stringify({ zh_cn: { title: '', content: built.threadContent } });
@@ -6106,6 +6129,7 @@ async function cmdReport(rest: string[]): Promise<void> {
 
   const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
   const { sendMessage, replyMessage } = await import('./im/lark/client.js');
   const appId = s.larkAppId!;
 
@@ -6733,6 +6757,7 @@ async function cmdBots(sub: string, rest: string[]): Promise<void> {
   // Register bots
   const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  if (envPinnedRiffBot) { try { registerBot(envPinnedRiffBot); } catch { /* */ } }
 
   const appId = s.larkAppId!;
   const dataDir = resolveDataDir();

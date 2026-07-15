@@ -48,7 +48,6 @@ export interface SessionBackend {
   kill(): void;
   /** Permanently destroy the backing session (e.g. kill tmux session).
    *  Called only on explicit /close. Default: same as kill(). */
-  destroySession?(): void;
   getAttachInfo?(): { type: 'tmux'; sessionName: string } | null;
   /** PID of the CLI process running inside the backend. */
   getChildPid?(): number | null;
@@ -73,8 +72,11 @@ export interface SessionBackend {
    */
   onTaskDone?(cb: () => void): void;
   /** Remote-task id updates (riff) — the worker forwards these to the daemon
-   *  so the follow-up lineage survives daemon restarts. Optional. */
-  onTaskId?(cb: (taskId: string) => void): void;
+   *  so the follow-up lineage survives daemon restarts. `null` clears the
+   *  persisted lineage (follow-up failed → next message starts fresh). */
+  onTaskId?(cb: (taskId: string | null) => void): void;
+  /** Async-capable teardown: riff awaits the remote task-cancel here. */
+  destroySession?(): void | Promise<void>;
 }
 
 /**

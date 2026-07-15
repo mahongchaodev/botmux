@@ -117,7 +117,7 @@ import { ZellijObserveBackend } from './adapters/backend/zellij-observe-backend.
 import { zellijEnv } from './setup/ensure-zellij.js';
 import { isObserveBackend, type ObserveBackend } from './adapters/backend/types.js';
 import { selectSessionBackend, decideBackendGate, backendGateUserMessage } from './adapters/backend/session-backend-selector.js';
-import { deriveRiffReposFromWorkingDir } from './adapters/backend/riff-backend.js';
+import { deriveRiffReposFromDirs, deriveRiffRepoFromWorkingDir, isValidRiffBaseUrl } from './adapters/backend/riff-backend.js';
 import { prepareSandbox, attachSandboxOutbox, startOutboxWatcher, sandboxEnabled, sandboxedClaudeDataDir, localSandboxApplies } from './adapters/backend/sandbox.js';
 import type { BackendType, SessionBackend } from './adapters/backend/types.js';
 import { tmuxEnv, probeTmuxFunctionalWithRetry } from './setup/ensure-tmux.js';
@@ -604,6 +604,13 @@ async function runStartupCommands(): Promise<void> {
   if (!cmds || cmds.length === 0) return;
   if (lastInitConfig?.adoptMode) return;
   if (!backend) return;
+  // riff：generic startupCommands 是 PTY 语义（sendRawCommandLine = write 文本 +
+  // 200ms 后 write 回车），对 RiffBackend 每条会裂成两个远端任务并打乱血缘。
+  // riff 的初始化命令走自己的 riff.setupCommands（沙箱内执行），这里必须跳过。
+  if (effectiveBackendType === 'riff') {
+    log(`Skipping ${cmds.length} generic startup command(s) — riff backend uses riff.setupCommands instead`);
+    return;
+  }
   log(`Running ${cmds.length} startup command(s) before first prompt`);
   for (const cmd of cmds) {
     if (!backend) break;
@@ -2954,6 +2961,12 @@ function exitTmuxScrollMode(): void {
 }
 
 function handleTermAction(key: TermActionKey): void {
+  // riff：没有远端终端可驱动——把控制字符 write 进 RiffBackend 会变成一个内容为
+  // ANSI 序列的 follow-up 任务（^C 也不会 cancel 任务），必须整体拒绝。
+  if (effectiveBackendType === 'riff') {
+    log(`term_action '${key}' ignored — riff backend has no local terminal to drive`);
+    return;
+  }
   if (!backend) return;
   const isHalfPage = key === 'half_page_up' || key === 'half_page_down';
 
@@ -4389,6 +4402,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     if (!cfg.backendConfig) {
       throw new Error('riff backend requires backendConfig (baseUrl, etc.)');
     }
+    // Fail fast on a missing/invalid baseUrl — every config entry point funnels
+    // through this spawn gate, and a late `fetch("undefined/api/…")` error is
+    // far harder to diagnose than an explicit spawn refusal.
+    if (!isValidRiffBaseUrl(cfg.backendConfig.baseUrl)) {
+      throw new Error(`riff baseUrl 未配置或非法（需 http(s) URL，当前: ${JSON.stringify(cfg.backendConfig.baseUrl ?? null)}）——请在 dashboard 的 Riff 配置中填写`);
+    }
     const sessionEnv: Record<string, string> = {
       BOTMUX_SESSION_ID: cfg.sessionId,
       BOTMUX_CHAT_ID: cfg.chatId,
@@ -4420,12 +4439,13 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // explicit riff config.env takes precedence over both.
     const mergedEnv: Record<string, string> = { ...sessionEnv, ...sanitizePerBotEnv(cfg.env), ...cfg.backendConfig.env };
     riffBackendConfig = Object.assign({}, cfg.backendConfig, { env: mergedEnv, resumeParentTaskId: cfg.riffParentTaskId });
-    // 复用本地仓库+分支：从会话 workingDir 推导内部 repoName + 当前分支，
-    // riff 沙箱据此克隆同一份代码。多仓 worktree 父目录（仓库选择卡多选）会
-    // 逐个子目录推导，首个为 primary 其余为 workspace。显式 repos 优先（预留
-    // 给未来调用方）；workingDir 推不出任何内部仓时静默跳过。
+    // 复用本地仓库+分支：多仓只认会话上的显式 stamp（仓库选择卡多选流按用户
+    // 顺序写入 cfg.riffRepoDirs，首仓=primary）；否则仅对 workingDir 本身做单仓
+    // 推导——绝不扫描任意非 git 目录的子目录（home/仓库集合目录会乱带仓库）。
     if (!cfg.backendConfig.repos || cfg.backendConfig.repos.length === 0) {
-      const derived = deriveRiffReposFromWorkingDir(cfg.workingDir);
+      const derived = cfg.riffRepoDirs && cfg.riffRepoDirs.length > 0
+        ? deriveRiffReposFromDirs(cfg.riffRepoDirs)
+        : (() => { const one = deriveRiffRepoFromWorkingDir(cfg.workingDir); return one ? { repos: [one.repo], warnings: one.warnings } : null; })();
       if (derived) {
         riffBackendConfig = Object.assign({}, riffBackendConfig, {
           repos: derived.repos,
@@ -4487,11 +4507,20 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // the bwrap sandbox (its masks go into the same bwrap plan), so it requires the
   // sandbox to be on — hence the trigger is the sandbox toggle there, never the bare
   // legacy flag (which would redirect the data dir but apply no masks → a hole).
-  const wantsFileSandbox = cfg.sandbox === true || sandboxEnabled();
+  // riff runs in its own REMOTE sandbox with no local CLI process — every
+  // local isolation flavor (Linux bwrap, macOS Seatbelt write-sandbox, read
+  // isolation incl. the legacy fail-closed flag) is meaningless for it and
+  // must be bypassed on ALL platforms, or a sandbox/readIsolation-enabled bot
+  // bricks the moment it switches to riff.
+  const riffRemoteBackend = effectiveBackendType === 'riff';
+  if (riffRemoteBackend && (cfg.sandbox === true || cfg.readIsolation === true)) {
+    log('Sandbox/read-isolation flags set but backend is riff (remote sandbox, no local process) — local isolation bypassed');
+  }
+  const wantsFileSandbox = !riffRemoteBackend && (cfg.sandbox === true || sandboxEnabled());
   // Legacy EXPLICIT read-isolation opt-in (macOS only — Linux read-iso rides the
   // bwrap sandbox, so it's driven solely by the sandbox toggle there). Keeps
   // FAIL-CLOSED semantics: you asked for read isolation → refuse to start without it.
-  const explicitLegacyReadIso = process.platform === 'darwin' && cfg.readIsolation === true;
+  const explicitLegacyReadIso = process.platform === 'darwin' && cfg.readIsolation === true && !riffRemoteBackend;
   const readIsolationGate = evaluateReadIsolationGate({
     configured: wantsFileSandbox || explicitLegacyReadIso,
     adapterSupports: cliAdapter.supportsReadIsolation === true,
@@ -6877,9 +6906,16 @@ process.on('message', async (raw: unknown) => {
       // process would never actually restart. destroySession() tears the session
       // down so the respawn starts a fresh CLI. (PTY has no destroySession, so
       // the ?. no-ops and killCli()'s kill() does the teardown.)
-      const restart = () => {
+      const restart = async () => {
         tmuxRestartTimer = null;
-        backend?.destroySession?.();
+        // riff：teardown=远端 task-cancel（异步）。必须等它完成再 spawn，否则
+        // 旧任务与新任务并跑、双方都往话题里发消息。
+        const t = backend?.destroySession?.();
+        if (t && typeof (t as Promise<void>).then === 'function') {
+          try {
+            await Promise.race([t, new Promise((r) => setTimeout(r, 8000))]);
+          } catch { /* logged inside destroySession */ }
+        }
         killCli();
         awaitingFirstPrompt = true;
         setTimeout(() => {
@@ -6973,8 +7009,15 @@ process.on('message', async (raw: unknown) => {
     case 'close': {
       log('Close requested');
       stopScreenshotLoop();
-      // destroySession kills tmux session permanently; kill() only detaches
-      backend?.destroySession?.();
+      // destroySession kills tmux session permanently; kill() only detaches.
+      // riff 的 destroySession 是异步远端取消——必须有界 await：紧跟着的
+      // process.exit 会掐断未发出的 fetch，让已关闭话题的远端 agent 继续跑。
+      const closeTeardown = backend?.destroySession?.();
+      if (closeTeardown && typeof (closeTeardown as Promise<void>).then === 'function') {
+        try {
+          await Promise.race([closeTeardown, new Promise((r) => setTimeout(r, 8000))]);
+        } catch { /* logged inside destroySession */ }
+      }
       killCli();
       // Bridge marker file outlives a single CLI process (we keep it across
       // restarts so a mid-flight send is still credited), but a real close
@@ -7002,7 +7045,12 @@ process.on('message', async (raw: unknown) => {
       // forkWorker(resume=true) → a fresh `new-session --resume <cliSessionId>`
       // that rebuilds context from the on-disk transcript (same path the daemon
       // uses to recover sessions after a reboot kills the tmux server).
-      try { (backend?.destroySession ?? backend?.kill)?.call(backend); } catch { /* best-effort */ }
+      try {
+        // riff：suspend 语义是「休眠待续」——绝不能 cancel 远端任务（血缘已持久化，
+        // 恢复时 follow-up 续上）；只断流 detach。
+        if (effectiveBackendType === 'riff') backend?.kill();
+        else (backend?.destroySession ?? backend?.kill)?.call(backend);
+      } catch { /* best-effort */ }
       backend = null;
       isPromptReady = false;
       // Suspend INTENDS to resume later: preserve the sandbox overlay mount + the
