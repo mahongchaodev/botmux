@@ -94,6 +94,16 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     };
     chat.directBotMention = input.enabled;
     cur.chats[targetKey] = chat;
+    if (input.enabled) {
+      for (const [otherOpenId, other] of mockDirect.entries()) {
+        for (const [otherKey, otherChat] of Object.entries<any>(other.chats ?? {})) {
+          if (otherOpenId === input.substituteOpenId && otherKey === targetKey) continue;
+          if (otherKey !== targetKey && otherChat.chatId !== chat.chatId) continue;
+          if (otherChat.scope !== chat.scope || otherChat.anchor !== chat.anchor) continue;
+          otherChat.directBotMention = false;
+        }
+      }
+    }
     mockDirect.set(input.substituteOpenId, cur);
     return true;
   },
@@ -110,6 +120,18 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     if (!cur?.chats?.[chatId]) return false;
     delete cur.chats[chatId];
     return true;
+  },
+  clearSubstituteDirectChatsByGroup: (_app: string, openId: string, chatId?: string) => {
+    const cur = mockDirect.get(openId);
+    if (!cur || !chatId) return false;
+    let changed = false;
+    for (const [targetKey, chat] of Object.entries<any>(cur.chats ?? {})) {
+      if (chat.chatId !== chatId) continue;
+      delete cur.chats[targetKey];
+      changed = true;
+    }
+    if (!Object.keys(cur.chats ?? {}).length) mockDirect.delete(openId);
+    return changed;
   },
 }));
 
@@ -496,6 +518,15 @@ describe('tryHandleEchoCommand', () => {
       action: 'substitute_direct_enter',
       chatId: 'oc_group',
     });
+    mockDirect.get(USER).chats['thread:om_topic_root'] = {
+      targetKey: 'thread:om_topic_root',
+      scope: 'thread',
+      anchor: 'om_topic_root',
+      chatId: 'oc_group',
+      mode: 'direct',
+      enabled: true,
+      updatedAt: Date.now(),
+    };
     const result = await handleSubstituteDirectCardAction({
       larkAppId: APP,
       operatorOpenId: USER,
@@ -505,7 +536,7 @@ describe('tryHandleEchoCommand', () => {
     });
     expect(mockLeaveChat).toHaveBeenCalledWith(APP, 'oc_group');
     expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_leave_group_ok' });
-    expect(mockDirect.get(USER)?.chats?.oc_group).toBeFalsy();
+    expect(mockDirect.get(USER)).toBeUndefined();
   });
 
   it('DM leave-group requires operator permission', async () => {
@@ -766,6 +797,49 @@ describe('tryHandleEchoCommand', () => {
       directBotMention: true,
     });
     expect(mockDirect.get(USER)?.activeChatId).toBe('thread:om_topic_root');
+  });
+
+  it('card action keeps only one @bot forwarding receiver for the same session', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        substituteMode: {
+          enabled: true,
+          targets: [
+            { openId: USER, name: 'User' },
+            { openId: 'ou_other', name: 'Other' },
+          ],
+          disclosure: 'prefix',
+        },
+      },
+    });
+    mockDirect.set('ou_other', {
+      chats: {
+        'chat:oc_group': {
+          targetKey: 'chat:oc_group',
+          chatId: 'oc_group',
+          scope: 'chat',
+          anchor: 'oc_group',
+          mode: 'direct',
+          enabled: true,
+          directBotMention: true,
+          updatedAt: Date.now(),
+        },
+      },
+      activeChatId: 'chat:oc_group',
+    });
+
+    const on = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_bot_mention_enable',
+      chatId: 'oc_group',
+      detailTargetKey: 'chat:oc_group',
+    });
+
+    expect(on.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_bot_mention_updated_on' });
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.directBotMention).toBe(true);
+    expect(mockDirect.get('ou_other')?.chats?.['chat:oc_group']?.directBotMention).toBe(false);
   });
 
   it('card action can enable and disable substitute for the target group', async () => {

@@ -215,6 +215,7 @@ export function getSubstituteDirectChatByTargetKey(
   larkAppId: string,
   chatId: string | undefined,
   targetKey?: string,
+  opts?: { requireDirectBotMention?: boolean },
 ): { chat: SubstituteDirectChat; substituteOpenId: string; targetOpenId?: string; substituteUserId?: string; substituteUnionId?: string; targetName?: string } | undefined {
   if (!chatId) return undefined;
   const strictTarget = !!targetKey && targetKey.startsWith('thread:');
@@ -225,6 +226,7 @@ export function getSubstituteDirectChatByTargetKey(
     const chat = (targetKey ? binding.chats[targetKey] : undefined)
       ?? (strictTarget ? undefined : binding.chats[chatKey]);
     if (!chat || chat.enabled === false || chat.mode !== 'direct') continue;
+    if (opts?.requireDirectBotMention === true && chat.directBotMention !== true) continue;
     return {
       chat,
       substituteOpenId: binding.substituteOpenId,
@@ -363,6 +365,20 @@ export function setSubstituteDirectChatBotMention(input: {
   chat.updatedAt = Date.now();
   binding.chats[targetKey] = chat;
   binding.updatedAt = Date.now();
+  if (input.enabled) {
+    for (const other of Object.values(store.bindings)) {
+      if (other.larkAppId !== input.larkAppId) continue;
+      for (const [otherKey, otherChat] of Object.entries(other.chats)) {
+        if (other.substituteOpenId === input.substituteOpenId && otherKey === targetKey) continue;
+        if (otherKey !== targetKey && otherChat.chatId !== chat.chatId) continue;
+        if (otherChat.scope !== chat.scope || otherChat.anchor !== chat.anchor) continue;
+        if (otherChat.directBotMention !== true) continue;
+        otherChat.directBotMention = false;
+        otherChat.updatedAt = Date.now();
+        other.updatedAt = Date.now();
+      }
+    }
+  }
   store.bindings[k] = binding;
   writeStore(store);
   return true;
@@ -443,6 +459,29 @@ export function clearSubstituteDirectChat(larkAppId: string, substituteOpenId: s
   else store.bindings[k] = binding;
   if (existed) writeStore(store);
   return existed;
+}
+
+export function clearSubstituteDirectChatsByGroup(larkAppId: string, substituteOpenId: string | undefined, chatId: string | undefined): boolean {
+  if (!substituteOpenId || !chatId) return false;
+  const store = readStore();
+  const k = key(larkAppId, substituteOpenId);
+  const binding = store.bindings[k];
+  if (!binding) return false;
+  let changed = false;
+  for (const [targetKey, chat] of Object.entries(binding.chats)) {
+    if (chat.chatId !== chatId) continue;
+    delete binding.chats[targetKey];
+    changed = true;
+  }
+  if (!changed) return false;
+  if (binding.activeChatId && !binding.chats[binding.activeChatId]) {
+    binding.activeChatId = Object.values(binding.chats).filter(c => c.enabled !== false).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.targetKey;
+  }
+  binding.updatedAt = Date.now();
+  if (Object.keys(binding.chats).length === 0) delete store.bindings[k];
+  else store.bindings[k] = binding;
+  writeStore(store);
+  return true;
 }
 
 export function deactivateSubstituteDirectChat(larkAppId: string, substituteOpenId: string | undefined, targetKeyOrChatId?: string): boolean {

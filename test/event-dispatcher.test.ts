@@ -169,12 +169,13 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     }
     return undefined;
   },
-  getSubstituteDirectChatByTargetKey: (appId: string, chatId: string | undefined, targetKey?: string) => {
+  getSubstituteDirectChatByTargetKey: (appId: string, chatId: string | undefined, targetKey?: string, opts?: { requireDirectBotMention?: boolean }) => {
     if (!chatId) return undefined;
     for (const binding of mockDirectBindings.values()) {
       if (binding.larkAppId !== appId) continue;
       const chat = (targetKey ? binding.chats?.[targetKey] : undefined) ?? binding.chats?.[chatId];
       if (chat?.enabled !== false && chat?.mode === 'direct') {
+        if (opts?.requireDirectBotMention === true && chat.directBotMention !== true) continue;
         return {
           chat,
           substituteOpenId: binding.substituteOpenId,
@@ -2238,6 +2239,85 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
     expect(mockSendUserMessage).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: @bot skips disabled receivers and forwards to the enabled substitute', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [
+          { openId: 'ou_sub_disabled', name: 'Disabled Sub' },
+          { openId: 'ou_sub_enabled', name: 'Enabled Sub' },
+        ],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub_disabled'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub_disabled',
+      targetOpenId: 'ou_sub_disabled',
+      targetName: 'Disabled Sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Disabled Sub',
+          mode: 'direct',
+          directBotMention: false,
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub_enabled'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub_enabled',
+      targetOpenId: 'ou_sub_enabled',
+      targetName: 'Enabled Sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Enabled Sub',
+          mode: 'direct',
+          directBotMention: true,
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatName.mockResolvedValue('Ops Group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Bot route to enabled receiver' }),
+      messageId: 'msg-substitute-direct-bot-mention-enabled-receiver',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_bot', name: 'Bot', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendUserMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'ou_sub_enabled',
+      expect.stringContaining('@Bot route to enabled receiver'),
+      'text',
+    );
+    expect(mockSendUserMessage).not.toHaveBeenCalledWith(
+      MY_APP_ID,
+      'ou_sub_disabled',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 
   it('substituteMode direct: @bot falls back to the global default for old direct bindings', async () => {

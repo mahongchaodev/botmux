@@ -2096,7 +2096,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
         const directTargetKey = substituteDirectTargetKey(routing.scope, routing.anchor, chatId);
         if (substituteDirectEligible && !substituteTrigger && explicitlyMentionedThisBot) {
-          const direct = getSubstituteDirectChatByTargetKey(larkAppId, chatId, directTargetKey);
+          const direct = getSubstituteDirectChatByTargetKey(larkAppId, chatId, directTargetKey, { requireDirectBotMention: true })
+            ?? (substituteModeConfig?.directBotMention === true ? getSubstituteDirectChatByTargetKey(larkAppId, chatId, directTargetKey) : undefined);
           const directBotMention = direct?.chat.directBotMention ?? substituteModeConfig?.directBotMention === true;
           if (direct?.chat.mode === 'direct' && directBotMention) {
             const directTrigger: import('../../types.js').SubstituteTrigger = {

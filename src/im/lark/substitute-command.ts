@@ -4,6 +4,7 @@ import { getChatMode, getChatNameAndMode, replyMessage, sendUserMessage } from '
 import { isSubstituteEnabledForChat, setSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
 import {
   clearSubstituteDirectChat,
+  clearSubstituteDirectChatsByGroup,
   deactivateSubstituteDirectChat,
   getSubstituteDirectBinding,
   setSubstituteDirectChatBotMention,
@@ -580,7 +581,8 @@ async function applyDirectAction(
         if (closeSession) await closeSession(sessionId);
       }
     }
-    clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
+    clearSubstituteDirectChatsByGroup(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.chatId)
+      || clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
     return { ok: true, message: t('cmd.substitute.direct_leave_group_ok', { chat: row.name || row.chatId }, loc) };
   }
   return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
