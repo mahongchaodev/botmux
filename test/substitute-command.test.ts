@@ -66,9 +66,14 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     cur.substituteUserId = input.substituteUserId;
     cur.substituteUnionId = input.substituteUnionId;
     cur.targetName = input.targetName;
+    const targetKey = input.targetKey ?? input.chatId;
+    const existingChat = cur.chats[targetKey];
     if (!input.preserveExistingChats) cur.chats = {};
-    cur.chats[input.targetKey ?? input.chatId] = { ...input };
-    cur.activeChatId = input.targetKey ?? input.chatId;
+    cur.chats[targetKey] = {
+      ...input,
+      directBotMention: input.directBotMention ?? existingChat?.directBotMention,
+    };
+    cur.activeChatId = targetKey;
     mockDirect.set(input.substituteOpenId, cur);
     return cur;
   },
@@ -90,6 +95,13 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     chat.directBotMention = input.enabled;
     cur.chats[targetKey] = chat;
     mockDirect.set(input.substituteOpenId, cur);
+    return true;
+  },
+  deactivateSubstituteDirectChat: (_app: string, openId: string, chatId: string) => {
+    const cur = mockDirect.get(openId);
+    const chat = cur?.chats?.[chatId];
+    if (!chat || chat.enabled === false) return false;
+    chat.enabled = false;
     return true;
   },
   clearSubstituteDirectChat: (_app: string, openId: string, chatId?: string) => {
@@ -221,7 +233,7 @@ describe('tryHandleEchoCommand', () => {
     const actions = cardActions(lastReplyCard());
     expect(actions.filter((a: any) => a.value?.action === 'substitute_direct_manage')).toHaveLength(3);
     expect(actions.filter((a: any) => a.value?.target_key === 'chat:oc_group')).toHaveLength(2);
-    expect(actions.filter((a: any) => a.value?.target_key === 'thread:om_topic_root')).toHaveLength(1);
+    expect(actions.filter((a: any) => a.value?.target_key === 'thread:om_topic_root')).toHaveLength(2);
     expect(actions.filter((a: any) => a.value?.target_key === 'chat:oc_group_2')).toHaveLength(2);
   });
 
@@ -391,7 +403,7 @@ describe('tryHandleEchoCommand', () => {
       chatId: 'oc_group',
     });
     expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_enter_ok' });
-    expect(mockDirect.get(USER)?.chats?.oc_group).toBeTruthy();
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']).toBeTruthy();
 
     result = await handleSubstituteDirectCardAction({
       larkAppId: APP,
@@ -401,7 +413,7 @@ describe('tryHandleEchoCommand', () => {
       chatId: 'oc_group',
     });
     expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_exit_ok' });
-    expect(mockDirect.get(USER)?.chats?.oc_group).toBeFalsy();
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.enabled).toBe(false);
   });
 
   it('card enter keeps only one active substitute group', async () => {
@@ -529,7 +541,7 @@ describe('tryHandleEchoCommand', () => {
 
     expect(result.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_enter_ok' });
     expect(result.card.type).toBe('raw');
-    expect(mockDirect.get(USER)?.chats?.oc_group).toBeTruthy();
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']).toBeTruthy();
   });
 
   it('entering direct mode in DM thread mode always creates a fresh topic root', async () => {
@@ -638,8 +650,8 @@ describe('tryHandleEchoCommand', () => {
     const actions = cardActions(detail.card.data).filter((a: any) => a.value?.action !== 'substitute_direct_back');
     expect(actions.map((a: any) => a.text.content)).toEqual([
       'cmd.substitute.direct_btn_exit',
-      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_enable_bot_mention',
+      'cmd.substitute.direct_btn_disable_substitute',
       'cmd.substitute.direct_btn_leave_group',
       'cmd.substitute.direct_btn_open_chat',
     ]);

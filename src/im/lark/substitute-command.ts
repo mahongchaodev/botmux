@@ -524,7 +524,7 @@ async function applyDirectAction(
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
       dmRootMessageId,
       resetDmHistory: threadMode,
-      directBotMention: getBot(larkAppId).config.substituteMode?.directBotMention === true,
+      directBotMention: row.directBotMentionConfigured ? undefined : getBot(larkAppId).config.substituteMode?.directBotMention === true,
       preserveExistingChats: threadMode,
     });
     return { ok: true, message: t('cmd.substitute.direct_enter_ok', { chat: row.name || row.chatId }, loc) };

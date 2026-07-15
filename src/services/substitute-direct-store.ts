@@ -272,10 +272,11 @@ export function upsertSubstituteDirectChat(input: {
   current.substituteUserId = input.substituteUserId;
   current.substituteUnionId = input.substituteUnionId;
   current.targetName = input.targetName;
-  if (!input.preserveExistingChats) current.chats = {};
   const scope = input.scope === 'thread' ? 'thread' : 'chat';
   const anchor = input.anchor || (scope === 'thread' ? input.targetKey?.replace(/^thread:/, '') : input.chatId);
   const targetKey = input.targetKey ?? substituteDirectTargetKey(scope, anchor, input.chatId) ?? input.chatId;
+  const existingChat = current.chats[targetKey];
+  if (!input.preserveExistingChats) current.chats = {};
   current.chats[targetKey] = {
     targetKey,
     scope,
@@ -290,9 +291,9 @@ export function upsertSubstituteDirectChat(input: {
     enabled: true,
     disclosure: input.disclosure === 'none' ? 'none' : 'prefix',
     lastGroupMessageId: input.lastGroupMessageId,
-    dmRootMessageId: input.dmRootMessageId ?? current.chats[targetKey]?.dmRootMessageId,
-    directBotMention: input.directBotMention ?? current.chats[targetKey]?.directBotMention,
-    dmToGroupMessageIds: input.resetDmHistory ? undefined : current.chats[targetKey]?.dmToGroupMessageIds,
+    dmRootMessageId: input.dmRootMessageId ?? existingChat?.dmRootMessageId,
+    directBotMention: input.directBotMention ?? existingChat?.directBotMention,
+    dmToGroupMessageIds: input.resetDmHistory ? undefined : existingChat?.dmToGroupMessageIds,
     updatedAt: Date.now(),
   };
   current.activeChatId = targetKey;

@@ -59,7 +59,7 @@ function isP2pThreadMode(larkAppId: string): boolean {
 }
 
 function dmAnchorFromMessage(message: any): string | undefined {
-  return message?.root_id ?? message?.thread_id ?? message?.parent_id;
+  return message?.thread_id ?? message?.root_id ?? message?.parent_id;
 }
 
 function isDmRootUnavailableError(err: unknown): boolean {
