@@ -38,7 +38,7 @@ import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
 import { tryHandleEchoCommand } from './substitute-command.js';
 import { forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
-import { getSubstituteDirectChat, getSubstituteDirectChatByTarget, getSubstituteDirectChatByTargetKey, substituteDirectTargetKey } from '../../services/substitute-direct-store.js';
+import { getSubstituteDirectBotMentionChat, getSubstituteDirectChat, getSubstituteDirectChatByTarget, substituteDirectTargetKey } from '../../services/substitute-direct-store.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled, clearPending } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
@@ -2096,10 +2096,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
         const directTargetKey = substituteDirectTargetKey(routing.scope, routing.anchor, chatId);
         if (substituteDirectEligible && !substituteTrigger && explicitlyMentionedThisBot) {
-          const direct = getSubstituteDirectChatByTargetKey(larkAppId, chatId, directTargetKey, { requireDirectBotMention: true })
-            ?? (substituteModeConfig?.directBotMention === true ? getSubstituteDirectChatByTargetKey(larkAppId, chatId, directTargetKey) : undefined);
-          const directBotMention = direct?.chat.directBotMention ?? substituteModeConfig?.directBotMention === true;
-          if (direct?.chat.mode === 'direct' && directBotMention) {
+          const direct = getSubstituteDirectBotMentionChat(larkAppId, chatId, directTargetKey, substituteModeConfig?.directBotMention === true);
+          if (direct?.chat.mode === 'direct') {
             const directTrigger: import('../../types.js').SubstituteTrigger = {
               target: {
                 name: direct.targetName ?? direct.chat.targetName,

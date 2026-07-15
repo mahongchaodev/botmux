@@ -169,13 +169,14 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     }
     return undefined;
   },
-  getSubstituteDirectChatByTargetKey: (appId: string, chatId: string | undefined, targetKey?: string, opts?: { requireDirectBotMention?: boolean }) => {
+  getSubstituteDirectChatByTargetKey: (appId: string, chatId: string | undefined, targetKey?: string, opts?: { requireDirectBotMention?: boolean; requireUnconfiguredBotMention?: boolean }) => {
     if (!chatId) return undefined;
     for (const binding of mockDirectBindings.values()) {
       if (binding.larkAppId !== appId) continue;
       const chat = (targetKey ? binding.chats?.[targetKey] : undefined) ?? binding.chats?.[chatId];
       if (chat?.enabled !== false && chat?.mode === 'direct') {
         if (opts?.requireDirectBotMention === true && chat.directBotMention !== true) continue;
+        if (opts?.requireUnconfiguredBotMention === true && chat.directBotMention !== undefined) continue;
         return {
           chat,
           substituteOpenId: binding.substituteOpenId,
@@ -187,6 +188,29 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
       }
     }
     return undefined;
+  },
+  getSubstituteDirectBotMentionChat: (appId: string, chatId: string | undefined, targetKey: string | undefined, fallback: boolean) => {
+    const find = (mode: 'enabled' | 'unconfigured') => {
+      if (!chatId) return undefined;
+      for (const binding of mockDirectBindings.values()) {
+        if (binding.larkAppId !== appId) continue;
+        const chat = (targetKey ? binding.chats?.[targetKey] : undefined) ?? binding.chats?.[chatId];
+        if (chat?.enabled !== false && chat?.mode === 'direct') {
+          if (mode === 'enabled' && chat.directBotMention !== true) continue;
+          if (mode === 'unconfigured' && chat.directBotMention !== undefined) continue;
+          return {
+            chat,
+            substituteOpenId: binding.substituteOpenId,
+            targetOpenId: binding.targetOpenId ?? binding.substituteOpenId,
+            substituteUserId: binding.substituteUserId,
+            substituteUnionId: binding.substituteUnionId,
+            targetName: binding.targetName ?? chat.targetName,
+          };
+        }
+      }
+      return undefined;
+    };
+    return find('enabled') ?? (fallback ? find('unconfigured') : undefined);
   },
   upsertSubstituteDirectChat: (input: any) => {
     const k = directKey(input.larkAppId, input.substituteOpenId);
