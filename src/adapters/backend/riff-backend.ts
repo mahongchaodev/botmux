@@ -231,7 +231,7 @@ export async function cancelRiffTaskById(
     const jwt = new RiffBackend(cfg as RiffBackendConfig, 'orphan-cancel')['resolveJwt']();
     if (jwt) headers['x-jwt-token'] = jwt;
     const resp = await fetch(`${cfg.baseUrl}/api/task-cancel`, {
-      method: 'POST', headers, body: JSON.stringify({ id: taskId }), signal: AbortSignal.timeout(5000),
+      method: 'POST', headers, body: JSON.stringify({ id: taskId }), signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) throw new Error(`task-cancel HTTP ${resp.status}`);
   };
@@ -404,7 +404,8 @@ export class RiffBackend implements SessionBackend {
 
     this.writeChain = this.writeChain
       .then(async () => {
-        if (this.killed) return;
+        // closing 也要在链内复查：write 可能在 close 之前就排进了队列。
+        if (this.killed || this.closing) return;
         // Route by task lineage only: task-follow-up is exactly the "continue
         // the conversation after the parent finished" API, so a completed task
         // (taskDone) must still route to followUp — spinning up a fresh task
@@ -456,23 +457,29 @@ export class RiffBackend implements SessionBackend {
     // 门（拒新写 + 令 in-flight 完成后自取消），再有界等 writeChain 沉降，最后
     // cancel 沉降后的 current task。
     this.closing = true;
-    try {
-      await Promise.race([this.writeChain, new Promise((r) => setTimeout(r, 6000))]);
-    } catch { /* writeChain never rejects (caught internally) */ }
-    if (this.currentTaskId && !this.taskDone) {
-      const id = this.currentTaskId;
+    // 预算层级（单调覆盖）：cancel 单次 4s → 本函数自限 12s（chain 等待 5s +
+    // cancel 4s×2 重试，含 late-task 情形——它在 chain 内被 await）→ worker
+    // close 分支 race 14s → daemon SIGTERM backstop 16s / SIGKILL 21s。
+    const teardown = (async () => {
       try {
-        await this.cancelTask(id);
-        logger.info(`[riff] task ${id} cancelled on close`);
-      } catch (err) {
+        await Promise.race([this.writeChain, new Promise((r) => setTimeout(r, 5000))]);
+      } catch { /* writeChain never rejects (caught internally) */ }
+      if (this.currentTaskId && !this.taskDone) {
+        const id = this.currentTaskId;
         try {
           await this.cancelTask(id);
-          logger.info(`[riff] task ${id} cancelled on close (retry)`);
-        } catch (err2) {
-          logger.warn(`[riff] task-cancel failed on close (task ${id} may keep running remotely): ${err2}`);
+          logger.info(`[riff] task ${id} cancelled on close`);
+        } catch (err) {
+          try {
+            await this.cancelTask(id);
+            logger.info(`[riff] task ${id} cancelled on close (retry)`);
+          } catch (err2) {
+            logger.warn(`[riff] task-cancel failed on close (task ${id} may keep running remotely): ${err2}`);
+          }
         }
       }
-    }
+    })();
+    await Promise.race([teardown, new Promise((r) => setTimeout(r, 12_000))]);
     this.kill();
   }
 
@@ -597,7 +604,7 @@ export class RiffBackend implements SessionBackend {
 
     try {
       const taskId = await this.uploadAndCreate(url, payload, attachments);
-      if (!this.adoptLateTask(taskId)) return;
+      if (!(await this.adoptLateTask(taskId))) return;
       this.reconnectAttempts = 0; // per-task budget (see streamTask)
       this.streamTask(taskId);
     } catch (err) {
@@ -617,7 +624,7 @@ export class RiffBackend implements SessionBackend {
 
     try {
       const taskId = await this.uploadAndCreate(url, payload, attachments);
-      if (!this.adoptLateTask(taskId)) return;
+      if (!(await this.adoptLateTask(taskId))) return;
       this.reconnectAttempts = 0; // per-task budget (see streamTask)
       this.streamTask(taskId);
     } catch (err) {
@@ -726,12 +733,20 @@ export class RiffBackend implements SessionBackend {
    *   （任务合法续跑，重启后 follow-up 接上）；
    * - 正常：登记 + 由调用方启动 stream。
    */
-  private adoptLateTask(taskId: string): boolean {
+  private async adoptLateTask(taskId: string): Promise<boolean> {
     if (this.closing) {
+      // 在 writeChain 内 await——destroySession 等 writeChain 沉降时就能把这次
+      // 取消一起等到（void 触发会在 worker exit 时被掐断）。
       logger.info(`[riff] task ${taskId} created during close — cancelling late task`);
-      void this.cancelTask(taskId).catch(() =>
-        this.cancelTask(taskId).catch((err) =>
-          logger.warn(`[riff] late-task cancel failed (task ${taskId} may keep running remotely): ${err}`)));
+      try {
+        await this.cancelTask(taskId);
+      } catch {
+        try {
+          await this.cancelTask(taskId);
+        } catch (err) {
+          logger.warn(`[riff] late-task cancel failed (task ${taskId} may keep running remotely): ${err}`);
+        }
+      }
       return false;
     }
     this.currentTaskId = taskId;
@@ -758,7 +773,7 @@ export class RiffBackend implements SessionBackend {
       headers,
       // The API expects { id } — { taskId } is silently rejected ("id Required").
       body: JSON.stringify({ id: taskId }),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(4000),
     });
     if (!resp.ok) throw new Error(`task-cancel HTTP ${resp.status}`);
   }

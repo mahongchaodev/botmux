@@ -488,6 +488,40 @@ describe('RiffBackend', () => {
     });
   });
 
+  describe('close teardown awaits pending cancel (finding L-race hard proof)', () => {
+    it('destroySession does NOT resolve while the late-task cancel is still pending', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      let resolveCancel!: (r: Response) => void;
+      const cancelCalls: string[] = [];
+      fetchMock.mockImplementation(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        calls.push({ url: u, init });
+        if (u.includes('/api/task-cancel')) {
+          cancelCalls.push(JSON.parse(String(init?.body)).id);
+          return new Promise<Response>((r) => { resolveCancel = r; }); // cancel 挂起
+        }
+        if (u.includes('/api2/task-stream')) return pendingSseResponse();
+        if (u.includes('/api/task-detail')) return Response.json({ success: true, data: { task: {} } });
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      });
+      be.spawn('', [], {} as any);
+      be.write('hello');
+      await flush();
+      let destroyed = false;
+      const destroyP = be.destroySession().then(() => { destroyed = true; });
+      await flush();
+      // create 返回 late task —— closing 已立，late cancel 在链内 await
+      resolvers.shift()!(taskResponse('task-late'));
+      await new Promise((r) => setTimeout(r, 30));
+      expect(cancelCalls).toContain('task-late');
+      expect(destroyed).toBe(false); // cancel 未 resolve 前 teardown 不得完成
+      resolveCancel(Response.json({ success: true, data: {} }));
+      await destroyP;
+      expect(destroyed).toBe(true);
+      expect(calls.filter(c => c.url.includes('/api2/task-stream')).length).toBe(0);
+    });
+  });
+
   describe('final report ordering (F-edge)', () => {
     it('emits the completed task report BEFORE firing the turn boundary', async () => {
       const be = makeBackend({ injectStatusLines: false });

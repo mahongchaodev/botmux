@@ -6913,7 +6913,7 @@ process.on('message', async (raw: unknown) => {
         const t = backend?.destroySession?.();
         if (t && typeof (t as Promise<void>).then === 'function') {
           try {
-            await Promise.race([t, new Promise((r) => setTimeout(r, 8000))]);
+            await Promise.race([t, new Promise((r) => setTimeout(r, 14_000))]);
           } catch { /* logged inside destroySession */ }
         }
         killCli();
@@ -7015,7 +7015,8 @@ process.on('message', async (raw: unknown) => {
       const closeTeardown = backend?.destroySession?.();
       if (closeTeardown && typeof (closeTeardown as Promise<void>).then === 'function') {
         try {
-          await Promise.race([closeTeardown, new Promise((r) => setTimeout(r, 8000))]);
+          // 预算层级见 RiffBackend.destroySession（自限 12s）——这里 14s 只作兜底。
+          await Promise.race([closeTeardown, new Promise((r) => setTimeout(r, 14_000))]);
         } catch { /* logged inside destroySession */ }
       }
       killCli();
