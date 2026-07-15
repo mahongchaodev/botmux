@@ -74,6 +74,9 @@ export interface RiffBackendConfig {
    * deriveRiffRepoFromWorkingDir.
    */
   repos?: RiffRepoRef[];
+  /** Parent task id persisted by the daemon (see worker riff_task_id IPC) —
+   *  restores the follow-up lineage after a daemon restart. */
+  resumeParentTaskId?: string;
   /** Human-readable notes about the derived repo state (dirty tree, unpushed
    *  commits). Printed as status lines on task creation so the user knows the
    *  sandbox may not see their latest local changes. */
@@ -272,6 +275,7 @@ export class RiffBackend implements SessionBackend {
   private exitCb: ((code: number | null, signal: string | null) => void) | null = null;
   private accessUrlCb: ((url: string) => void) | null = null;
   private taskDoneCb: (() => void) | null = null;
+  private taskIdCb: ((taskId: string) => void) | null = null;
   private outputBuffer = '';
   private currentTaskId: string | null = null;
   private currentAccessUrl: string | null = null;
@@ -294,6 +298,10 @@ export class RiffBackend implements SessionBackend {
   constructor(config: RiffBackendConfig, sessionId: string) {
     this.config = config;
     this.sessionId = sessionId;
+    // Daemon-restart resume: the persisted parent task id restores the
+    // follow-up lineage — the first write after restart continues the riff
+    // conversation instead of cold-booting a context-less fresh task.
+    if (config.resumeParentTaskId) this.currentTaskId = config.resumeParentTaskId;
   }
 
   /** Called when the riff sandbox accessUrl becomes available or changes. */
@@ -305,6 +313,14 @@ export class RiffBackend implements SessionBackend {
   /** Called when the current riff task completes or fails (turn boundary). */
   onTaskDone(cb: () => void): void {
     this.taskDoneCb = cb;
+  }
+
+  /** Called whenever a new task id becomes current (create/follow-up). The
+   *  worker forwards it to the daemon so the follow-up lineage survives a
+   *  daemon restart (currentTaskId otherwise lives only in this process). */
+  onTaskId(cb: (taskId: string) => void): void {
+    this.taskIdCb = cb;
+    if (this.currentTaskId) cb(this.currentTaskId);
   }
 
   /** Resolve JWT dynamically — re-reads env/keychain each call so auto-refresh works. */
@@ -391,19 +407,22 @@ export class RiffBackend implements SessionBackend {
   kill(): void {
     if (this.killed) return;
     this.killed = true;
-    logger.info('[riff] kill requested');
-
-    if (this.currentTaskId && !this.taskDone) {
-      this.cancelTask(this.currentTaskId).catch((err) => {
-        logger.warn(`[riff] task-cancel failed: ${err}`);
-      });
-    }
-
+    // Stream detach ONLY — the remote task keeps running. kill() fires on
+    // worker teardown / daemon restart, where the task should survive: its
+    // agent still delivers via `botmux send`, and the persisted parent task id
+    // resumes the follow-up lineage after restart. Cancelling belongs to the
+    // explicit /close path (destroySession).
+    logger.info('[riff] kill requested (stream detach — remote task keeps running)');
     this.abortController?.abort();
     this.exitCb?.(0, null);
   }
 
   destroySession(): void {
+    if (this.currentTaskId && !this.taskDone) {
+      this.cancelTask(this.currentTaskId).catch((err) => {
+        logger.warn(`[riff] task-cancel failed: ${err}`);
+      });
+    }
     this.kill();
   }
 
@@ -529,6 +548,8 @@ export class RiffBackend implements SessionBackend {
     try {
       const taskId = await this.uploadAndCreate(url, payload, attachments);
       this.currentTaskId = taskId;
+      this.taskIdCb?.(taskId);
+      this.reconnectAttempts = 0; // per-task budget (see streamTask)
       this.streamTask(taskId);
     } catch (err) {
       this.emitError(`创建 riff 任务失败: ${err}`);
@@ -548,6 +569,8 @@ export class RiffBackend implements SessionBackend {
     try {
       const taskId = await this.uploadAndCreate(url, payload, attachments);
       this.currentTaskId = taskId;
+      this.taskIdCb?.(taskId);
+      this.reconnectAttempts = 0; // per-task budget (see streamTask)
       this.streamTask(taskId);
     } catch (err) {
       // Broken lineage (parent expired/GC'd etc.) — fall back to a fresh task
@@ -674,7 +697,9 @@ export class RiffBackend implements SessionBackend {
         throw new Error(`SSE HTTP ${resp.status}`);
       }
 
-      this.reconnectAttempts = 0;
+      // NOTE: reconnectAttempts is reset per TASK (createTask/followUp), not
+      // here — resetting on every 200 would let a "connect OK → immediate
+      // clean EOF" loop retry forever.
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -691,6 +716,14 @@ export class RiffBackend implements SessionBackend {
         for (const eventBlock of events) {
           this.handleSseEvent(eventBlock, taskId);
         }
+      }
+
+      // Clean EOF without a done event: a proxy/link can close the stream
+      // gracefully while the task is still running. Silently returning here
+      // would leave the session busy FOREVER (nothing else fires onTaskDone),
+      // so route it through the same reconnect/exhausted path as a hard break.
+      if (!this.killed && taskId === this.currentTaskId && !this.completedTaskIds.has(taskId)) {
+        throw new Error('SSE stream ended without done event');
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
@@ -777,7 +810,13 @@ export class RiffBackend implements SessionBackend {
           if (taskId !== this.currentTaskId) break;
           if (this.completedTaskIds.has(taskId)) break;
           this.completedTaskIds.add(taskId);
-          if (this.completedTaskIds.size > 64) this.completedTaskIds.clear();
+          // Bounded FIFO eviction — never a blanket clear(), which would drop
+          // the id just added and let its ~500ms duplicate done re-fire.
+          while (this.completedTaskIds.size > 64) {
+            const oldest = this.completedTaskIds.values().next().value!;
+            if (oldest === taskId) break;
+            this.completedTaskIds.delete(oldest);
+          }
           this.taskDone = true;
           const status = data['status'] as string | undefined;
           const exitCode = data['exitCode'] as number | undefined;

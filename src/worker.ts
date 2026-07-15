@@ -4419,7 +4419,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // Per-bot env (bots.json `env`) takes precedence over session context;
     // explicit riff config.env takes precedence over both.
     const mergedEnv: Record<string, string> = { ...sessionEnv, ...sanitizePerBotEnv(cfg.env), ...cfg.backendConfig.env };
-    riffBackendConfig = Object.assign({}, cfg.backendConfig, { env: mergedEnv });
+    riffBackendConfig = Object.assign({}, cfg.backendConfig, { env: mergedEnv, resumeParentTaskId: cfg.riffParentTaskId });
     // 复用本地仓库+分支：从会话 workingDir 推导内部 repoName + 当前分支，
     // riff 沙箱据此克隆同一份代码。多仓 worktree 父目录（仓库选择卡多选）会
     // 逐个子目录推导，首个为 primary 其余为 workspace。显式 repos 优先（预留
@@ -5499,6 +5499,10 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   backend.onTaskDone?.(() => {
     log(`${cliName()} task finished — re-arming prompt-ready for queued follow-ups`);
     markPromptReady();
+  });
+  // riff：任务 id 变更同步给 daemon 持久化，daemon 重启后 follow-up 血缘不断。
+  backend.onTaskId?.((taskId) => {
+    send({ type: 'riff_task_id', taskId });
   });
   backend.onExit((code, signal) => {
     log(`${cliName()} exited (code: ${code}, signal: ${signal})`);

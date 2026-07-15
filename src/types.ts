@@ -45,6 +45,9 @@ export interface Session {
   pid?: number;
   workingDir?: string;
   webPort?: number;
+  /** riff：最近一个任务 id（follow-up 血缘锚点）。持久化后 daemon 重启的下一条
+   *  消息仍走 task-follow-up 延续沙箱与上下文，而非冷启新任务。 */
+  riffParentTaskId?: string;
   larkAppId?: string;
   ownerOpenId?: string;       // topic creator's open_id — for @mention in replies
   /** Best-effort human-readable title for direct/p2p chats. Lark chat APIs
@@ -325,7 +328,7 @@ export type TermActionKey =
 
 /** Messages sent from Daemon to Worker */
 export type DaemonToWorker =
-  | { type: 'init'; sessionId: string; chatId: string; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; wrapperCli?: string; launchShell?: string; model?: string; disableCliBypass?: boolean; startupCommands?: string[]; env?: Record<string, string>; sandbox?: boolean; sandboxHidePaths?: string[]; sandboxReadonlyPaths?: string[]; sandboxNetwork?: boolean; readIsolation?: boolean; readDenyExtraPaths?: string[]; daemonBootId?: string; backendType: BackendType; backendConfig?: RiffBackendConfig; prompt: string; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; pluginBindings?: string[]; skillPolicy?: BotSkillPolicy; skillPluginDir?: string; skillReadonlyRoots?: string[]; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
+  | { type: 'init'; sessionId: string; chatId: string; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; wrapperCli?: string; launchShell?: string; model?: string; disableCliBypass?: boolean; startupCommands?: string[]; env?: Record<string, string>; sandbox?: boolean; sandboxHidePaths?: string[]; sandboxReadonlyPaths?: string[]; sandboxNetwork?: boolean; readIsolation?: boolean; readDenyExtraPaths?: string[]; daemonBootId?: string; backendType: BackendType; backendConfig?: RiffBackendConfig; riffParentTaskId?: string; prompt: string; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; pluginBindings?: string[]; skillPolicy?: BotSkillPolicy; skillPluginDir?: string; skillReadonlyRoots?: string[]; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
   | { type: 'message'; content: string; turnId?: string }
   /** Literal slash-command passthrough. `followUpContent` rides along so the
    *  worker enqueues it strictly AFTER the slash command's Enter — two separate
@@ -394,4 +397,5 @@ export type WorkerToDaemon =
       userText?: string;
     }
   | { type: 'adopt_preamble'; userText: string; assistantText: string; turnId?: string }
-  | { type: 'riff_access_url'; accessUrl: string; directAccessUrl?: string };
+  | { type: 'riff_access_url'; accessUrl: string; directAccessUrl?: string }
+  | { type: 'riff_task_id'; taskId: string };

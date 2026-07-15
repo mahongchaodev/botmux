@@ -1819,6 +1819,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     // from live config, so a dashboard backend switch only affects NEW sessions.
     backendType: resolveSpawnBackendType(ds.session.backendType, botCfg.backendType, config.daemon.backendType),
     backendConfig: botCfg.riff,
+    riffParentTaskId: ds.session.riffParentTaskId,
     prompt,
     resume,
     cliSessionId: ds.session.cliSessionId,
@@ -2578,6 +2579,18 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
         // Refresh the live streaming card (writable/AIO link) — parks a pending
         // flag when the card POST is still in-flight and flushes once it lands.
         scheduleRiffAccessUrlPatch(ds);
+        break;
+      }
+
+      case 'riff_task_id': {
+        if (ds.worker !== worker) break;
+        if (ds.session.riffParentTaskId === msg.taskId) break;
+        // Persist the follow-up lineage anchor: after a daemon restart the
+        // rebuilt RiffBackend resumes from this id (resumeParentTaskId) so the
+        // next message continues the riff conversation in the warm sandbox
+        // instead of cold-booting a context-less fresh task (4-5 min).
+        ds.session.riffParentTaskId = msg.taskId;
+        sessionStore.updateSession(ds.session);
         break;
       }
 

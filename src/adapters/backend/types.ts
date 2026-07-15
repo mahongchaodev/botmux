@@ -72,6 +72,9 @@ export interface SessionBackend {
    * Optional — local backends never implement it.
    */
   onTaskDone?(cb: () => void): void;
+  /** Remote-task id updates (riff) — the worker forwards these to the daemon
+   *  so the follow-up lineage survives daemon restarts. Optional. */
+  onTaskId?(cb: (taskId: string) => void): void;
 }
 
 /**

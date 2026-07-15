@@ -160,6 +160,91 @@ describe('RiffBackend', () => {
     });
   });
 
+  describe('SSE clean EOF without done (finding C)', () => {
+    it('treats a clean EOF with no done event as a stream failure — session must not stay busy forever', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      (be as any).maxReconnectAttempts = 0; // skip the timed retries in test
+      const done = vi.fn();
+      be.onTaskDone(done);
+      // task-stream responds 200 then closes immediately WITHOUT a done event.
+      fetchMock.mockImplementation(async (url: string | URL) => {
+        const u = String(url);
+        calls.push({ url: u });
+        if (u.includes('/api2/task-stream')) {
+          return new Response(new ReadableStream<Uint8Array>({ start(c) { c.close(); } }), { status: 200 });
+        }
+        if (u.includes('/api/task-detail')) return Response.json({ success: true, data: { task: {} } });
+        return taskResponse('task-1');
+      });
+      be.spawn('', [], {} as any);
+      be.write('hi');
+      await flush();
+      await flush();
+      // Reconnect budget exhausted (0) → emitError → turn boundary fires so
+      // queued follow-ups are not stuck.
+      expect(done).toHaveBeenCalledTimes(1);
+    });
+
+    it('clean EOF AFTER done is normal shutdown — no error, no second boundary', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      (be as any).maxReconnectAttempts = 0;
+      const done = vi.fn();
+      be.onTaskDone(done);
+      fetchMock.mockImplementation(async (url: string | URL) => {
+        const u = String(url);
+        calls.push({ url: u });
+        if (u.includes('/api2/task-stream')) {
+          const body = 'event:done\ndata:{"status":"completed"}\n\n';
+          return new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); } }), { status: 200 });
+        }
+        if (u.includes('/api/task-detail')) return Response.json({ success: true, data: { task: {} } });
+        return taskResponse('task-1');
+      });
+      be.spawn('', [], {} as any);
+      be.write('hi');
+      await flush();
+      await flush();
+      expect(done).toHaveBeenCalledTimes(1); // done event only — EOF added nothing
+    });
+  });
+
+  describe('restart lineage resume (finding D)', () => {
+    it('resumeParentTaskId makes the first write a follow-up on the persisted parent', async () => {
+      const be = makeBackend({ resumeParentTaskId: 'task-old', injectStatusLines: false });
+      const ids: string[] = [];
+      be.onTaskId(id => ids.push(id));
+      expect(ids).toEqual(['task-old']); // immediate replay for late subscribers
+      be.spawn('', [], {} as any);
+      be.write('after restart');
+      await flush();
+      expect(calls.filter(c => c.url.includes('/api/task-execute')).length).toBe(0);
+      const follow = calls.filter(c => c.url.includes('/api/task-follow-up'));
+      expect(follow.length).toBe(1);
+      expect(JSON.parse(String(follow[0]!.init?.body)).parentTaskId).toBe('task-old');
+      resolvers.shift()!(taskResponse('task-new'));
+      await flush();
+      expect(ids).toEqual(['task-old', 'task-new']); // new id announced for persistence
+    });
+  });
+
+  describe('completedTaskIds bounded eviction (finding E)', () => {
+    it('never evicts the just-completed task — its duplicate done stays inert past 64 turns', () => {
+      const be = makeBackend({ injectStatusLines: false });
+      const done = vi.fn();
+      be.onTaskDone(done);
+      for (let i = 1; i <= 70; i++) {
+        (be as any).currentTaskId = `task-${i}`;
+        (be as any).taskDone = false;
+        (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', `task-${i}`);
+      }
+      expect(done).toHaveBeenCalledTimes(70);
+      // 第 70 轮的 duplicate done（~500ms 后到达）必须仍被吞掉
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-70');
+      expect(done).toHaveBeenCalledTimes(70);
+      expect(((be as any).completedTaskIds as Set<string>).size).toBeLessThanOrEqual(64);
+    });
+  });
+
   describe('onTaskDone turn boundary', () => {
     it('fires when the done SSE event arrives', () => {
       const be = makeBackend({ injectStatusLines: false });
