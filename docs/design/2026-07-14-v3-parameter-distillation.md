@@ -1,7 +1,7 @@
 # Workflow v3 parameter distillation
 
-Status: design only; explicit dogfood is required before implementation is
-enabled by default.
+Status: implemented behind the explicit `--distill` entry point; dogfood is
+required before any natural-language or default-on entry is enabled.
 
 ## Problem
 
@@ -23,8 +23,9 @@ The initial entry point is explicit:
 /workflow save last Weekly report --distill
 ```
 
-Natural-language equivalents may call the same path only after the existing
-Workflow intent confirmation. Exact save remains unchanged.
+Natural-language equivalents remain disabled until dogfood; if enabled later,
+they must still pass the existing Workflow intent confirmation. Exact save
+remains unchanged.
 
 The first release is intentionally narrow:
 
@@ -47,21 +48,44 @@ There are three distinct objects:
 
 1. **Source run** — immutable `run.json` plus digest-pinned DAG, spec, and bot
    snapshots. It is the only source of execution truth.
-2. **Model suggestion** — untrusted temporary output from an isolated worker.
-   It can name candidate literals and locations, but has no authority to write
-   the library.
+2. **Model suggestion** — untrusted structured output from a no-tool model
+   call. It can select candidate literals and locations, but cannot name
+   parameters and has no authority to write the library.
 3. **Host proposal** — a normalized, content-addressed patch compiled by the
    host from the source run and suggestion. Only this object is shown for
    approval and later committed.
 
-The distiller worker runs in a fresh scratch directory with only a minimized
-copy of the source DAG/spec as input. It receives no transcripts, PTY logs,
-result files, credentials, library directory, or live workspace. C0 continues
-to deny Workflow mutations and external messaging from the worker. Its raw
-suggestion is a `0600` staging artifact and is removed after the host compiles
-the normalized proposal; it never becomes a library or approval artifact.
-Startup recovery removes abandoned uncommitted scratch/staging directories;
-none of these files are exposed through Dashboard or IM.
+P0 uses Claude Code's non-interactive structured-output surface directly; it
+does not reuse the general Workflow goal worker. The subprocess runs with
+`--bare` and safe mode, no skills/plugins/MCP/session persistence, and an empty
+built-in tool set. Its HOME, cwd, TMPDIR, and every config root point at one
+fresh `0700` scratch directory; no user OAuth/keychain/config state is copied.
+The child environment is rebuilt from a narrow, documented direct-credential
+allowlist: Anthropic API key, Bedrock static key pair or bearer token plus
+region, or Foundry API key plus resource/base URL. Vertex ADC, OAuth/bearer-only
+Claude sessions, credential files/profiles/helpers, wrapper launchers, and
+machine-identity fallback all fail closed in P0. Botmux/Lark/session variables
+are never inherited.
+
+The classifier additionally runs inside a dedicated Linux bubblewrap boundary:
+the host root and a frozen `/etc` snapshot are read-only, scratch is the only
+writable host bind, network remains available for the selected provider, and a
+new PID namespace plus `--die-with-parent` collapses descendants before scratch
+cleanup. Endpoint-managed Claude policy is excluded from the frozen child view;
+if such policy is already active, the runner refuses to start instead of
+claiming a no-side-effect boundary it cannot prove.
+Only the minimized allowlisted execution-text field array is written to stdin;
+the process receives no transcript, result file, library path, source-run path,
+or workspace path. The provider/model is trusted with this explicitly
+authorized text, while the returned structure remains untrusted. Raw stdout is
+bounded, retained only in memory, and discarded after host validation; scratch
+cleanup is a mandatory success condition. Before classifier execution is
+released, the host durably pins both the bubblewrap monitor and PID-namespace
+init identities. Normal completion, timeout, and startup recovery wait for both
+exact identities to disappear before removing scratch. Corrupt/future markers
+and pre-spawn directories without ownership proof are retained for inspection;
+only old markerless directories are age-cleaned. Other CLIs and wrapper launchers fail loud until
+they provide an equivalent mechanically no-tool structured-call contract.
 
 ## Allowed transformation
 
@@ -84,9 +108,11 @@ metadata field, P0 rejects the candidate instead of leaving a concrete value
 behind.
 
 Each suggestion identifies an allowlisted JSON pointer, an exact source
-literal, an occurrence index, a safe parameter name, and a scalar type. The
-host resolves the literal against the pinned baseline, rejects ambiguous or
-overlapping spans, and canonicalizes it to:
+literal, an occurrence index, and a scalar type. The host resolves the literal
+against the pinned baseline, rejects ambiguous or overlapping spans, sorts the
+candidates canonically, and assigns deterministic generic names (`param_1`,
+`param_2`, ...). Identical literals intentionally share a parameter. The host
+then canonicalizes each replacement to:
 
 ```ts
 interface DistilledReplacementV1 {
@@ -106,8 +132,8 @@ baseline revision hash is mandatory at approval time.
 P0 generates only required `string` parameters. Number, boolean, object, and
 array parameters remain valid in hand-authored definitions but need a
 structured input/editing surface before automatic inference is safe. All
-generated parameter names must pass the existing Saved Workflow name validator
-and reserved-name checks.
+generated host-owned parameter names must pass the existing Saved Workflow
+name validator and reserved-name checks.
 
 The final revision goes back through the normal host-owned validators:
 
@@ -148,11 +174,13 @@ resolved values would enter immutable run artifacts. Distillation must return
 an actionable blocked result instead: move the value to a bot-managed
 credential or remove it before saving.
 
-Machine-local paths can become required string parameters only when the path
-literal is fully removed from every reusable text field. No proposal or card
-stores a default value. Parameter descriptions and names are linted so they
-cannot copy the source literal, an open ID, an email address, a hostname, or an
-absolute path.
+Machine-local absolute paths, network locators, explicit platform identities,
+emails, and secret-looking values are rejected in P0 rather than converted. No
+proposal or card stores a default value or model-authored metadata; parameter
+names are generic host-owned identifiers. Free-form person-name inference is
+not treated as a reliable security boundary: the model is instructed not to
+select it, while cards and durable proposal metadata never render or default
+any selected source value.
 
 ## Proposal and approval
 
@@ -202,6 +230,9 @@ and idempotent. Recovery never asks the model to regenerate an existing
 proposal. If the process crashes after library publication but before the last
 transition, recovery loads the allocated workflow ID, verifies the byte-exact
 revision, and completes `committed`; a mismatch fails closed.
+Accepted/committing transitions recover in a global startup pass and therefore
+do not depend on the source Bot still being configured. Prepared/proposed card
+delivery and new model generation remain scoped to the matching configured Bot.
 
 Only one live proposal may exist for the same `(source artifact digests,
 owner, app, chat, compiler version)`. Starting a replacement first marks the
@@ -233,13 +264,13 @@ reason codes, including:
 - source run not successful, owned, or digest-valid;
 - unsupported path or structural mutation;
 - missing/ambiguous literal occurrence or overlapping spans;
-- invalid/reserved/duplicate parameter name;
+- malformed or duplicate model candidate;
 - parameter marker already present with incompatible declaration;
 - source-value residue in metadata, structural fields, or unpatched spec text;
 - secret-like value or leaked identity/path in generated metadata;
 - source/proposal changed between review and approval;
 - cross-app/chat approval or stale nonce;
-- model timeout, malformed manifest, or zero usable candidates.
+- model timeout, malformed structured output, or zero usable candidates.
 
 Errors rendered to chat contain reason classes and safe ordinal field labels
 only, never the source literal, raw node ID/path, or model raw output.

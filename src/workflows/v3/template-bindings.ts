@@ -1,4 +1,9 @@
-import type { V3DagTemplate, SavedWorkflowBuiltinContextRef, SavedWorkflowParamDef } from './library-schema.js';
+import type {
+  V3DagTemplate,
+  V3SpecTemplate,
+  SavedWorkflowBuiltinContextRef,
+  SavedWorkflowParamDef,
+} from './library-schema.js';
 import type { V3Node } from './dag.js';
 import {
   collectV3HostBindingRefs,
@@ -47,6 +52,79 @@ export function savedWorkflowBindingsForNode(node: V3Node): SavedWorkflowTemplat
         .map((ref) => ref.path[0] as SavedWorkflowBuiltinContextRef),
     ])],
   };
+}
+
+/** All bindings in a DAG, including goal nodes nested inside loop bodies. */
+export function collectSavedWorkflowTemplateBindings(
+  dagTemplate: V3DagTemplate,
+): SavedWorkflowTemplateBindings {
+  const params = new Set<string>();
+  const context = new Set<SavedWorkflowBuiltinContextRef>();
+  const visit = (nodes: readonly V3Node[]): void => {
+    for (const node of nodes) {
+      const own = savedWorkflowBindingsForNode(node);
+      own.params.forEach((name) => params.add(name));
+      own.context.forEach((name) => context.add(name));
+      if (node.type === 'loop' && node.body) visit(node.body.nodes);
+    }
+  };
+  visit(dagTemplate.nodes);
+  return { params: [...params], context: [...context] };
+}
+
+/**
+ * Spec markers are documentation mirrors only. They may occur in narrative
+ * fields, never in sketch ids, booleans, schema fields, or other structure.
+ */
+export function assertSavedWorkflowSpecTemplateBindings(
+  specTemplate: V3SpecTemplate,
+  inputs: Record<string, SavedWorkflowParamDef>,
+  contextRefs: readonly SavedWorkflowBuiltinContextRef[],
+): void {
+  const allowed = (path: string): boolean =>
+    path === 'specTemplate.title' ||
+    path === 'specTemplate.requirement' ||
+    path === 'specTemplate.acceptance' ||
+    /^specTemplate\.nonGoals\[\d+\]$/.test(path) ||
+    /^specTemplate\.nodes\[\d+\]\.(?:goal|acceptance)$/.test(path) ||
+    /^specTemplate\.nodes\[\d+\]\.(?:input_needs|expected_outputs|unknowns)\[\d+\]$/.test(path);
+
+  const walk = (value: unknown, path: string): void => {
+    if (typeof value === 'string') {
+      if (!value.includes('${')) return;
+      if (!allowed(path)) {
+        throw new Error(`Saved Workflow spec marker is not allowed in structural field ${path}`);
+      }
+      const covered = new Array<boolean>(value.length).fill(false);
+      MARKER_RE.lastIndex = 0;
+      for (let match = MARKER_RE.exec(value); match; match = MARKER_RE.exec(value)) {
+        const [whole, namespace, name] = match;
+        for (let i = match.index; i < match.index + whole.length; i++) covered[i] = true;
+        if (namespace === 'params' && !Object.prototype.hasOwnProperty.call(inputs, name)) {
+          throw new Error(`Saved Workflow spec references undeclared parameter ${name} at ${path}`);
+        }
+        if (namespace === 'context' && !contextRefs.includes(name as SavedWorkflowBuiltinContextRef)) {
+          throw new Error(`Saved Workflow spec references undeclared context ${name} at ${path}`);
+        }
+      }
+      for (let i = value.indexOf('${'); i >= 0; i = value.indexOf('${', i + 2)) {
+        if (!covered[i]) {
+          throw new Error(`Saved Workflow has malformed/unsupported spec marker at ${path}`);
+        }
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => walk(item, `${path}[${index}]`));
+      return;
+    }
+    if (value && typeof value === 'object') {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        walk(child, `${path}.${key}`);
+      }
+    }
+  };
+  walk(specTemplate, 'specTemplate');
 }
 
 /**

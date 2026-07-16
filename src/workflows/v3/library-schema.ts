@@ -30,7 +30,9 @@ export const SAVED_WORKFLOW_ID_RE = /^wf_[0-9a-f]{32}$/;
 export const SAVED_WORKFLOW_REVISION_ID_RE = /^rev_[0-9a-f]{64}$/;
 export const SAVED_WORKFLOW_CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
 export const SAVED_WORKFLOW_PARAM_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-const FORBIDDEN_SAVED_PARAM_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
+const FORBIDDEN_SAVED_WORKFLOW_PARAM_NAMES = new Set([
+  '__proto__', 'prototype', 'constructor',
+]);
 
 const MAX_DISPLAY_NAME_LENGTH = 128;
 const MAX_ALIAS_LENGTH = 128;
@@ -306,7 +308,7 @@ function normalizeInputs(value: unknown, problems: string[]): Record<string, Sav
   if (entries.length > MAX_PARAMS) problems.push(`inputs may contain at most ${MAX_PARAMS} parameters`);
   const out: Record<string, SavedWorkflowParamDef> = {};
   for (const [name, rawDef] of entries) {
-    if (!SAVED_WORKFLOW_PARAM_NAME_RE.test(name) || FORBIDDEN_SAVED_PARAM_NAMES.has(name)) {
+    if (!isValidSavedWorkflowParamName(name)) {
       problems.push(
         `input name ${JSON.stringify(name)} must match ${SAVED_WORKFLOW_PARAM_NAME_RE} ` +
         'and must not be __proto__/prototype/constructor',
@@ -352,6 +354,12 @@ function normalizeInputs(value: unknown, problems: string[]): Record<string, Sav
     };
   }
   return out;
+}
+
+/** Shared by host-owned compilers before they construct an input definition. */
+export function isValidSavedWorkflowParamName(name: string): boolean {
+  return SAVED_WORKFLOW_PARAM_NAME_RE.test(name) &&
+    !FORBIDDEN_SAVED_WORKFLOW_PARAM_NAMES.has(name);
 }
 
 const BUILTIN_CONTEXT_REFS: readonly SavedWorkflowBuiltinContextRef[] = [
@@ -557,6 +565,40 @@ export function validateSavedWorkflowRevisionPayload(raw: unknown): SavedWorkflo
     dagTemplate,
     safety,
   };
+}
+
+/**
+ * Strict host-owned validation for a revision before the store allocates its
+ * identity/version fields. Unknown identity fields are rejected rather than
+ * allowed to override the store's authority later.
+ */
+export function validateSavedWorkflowRevisionDraft(raw: unknown): SavedWorkflowRevisionDraft {
+  if (!isRecord(raw)) throw new SavedWorkflowSchemaError(['revision draft must be an object']);
+  const allowed = new Set([
+    'sourceRunId', 'inputs', 'contextRefs', 'specTemplate', 'specStatus',
+    'dagTemplate', 'safety',
+  ]);
+  const extra = Object.keys(raw).filter((key) => !allowed.has(key));
+  if (extra.length > 0) {
+    throw new SavedWorkflowSchemaError([
+      `revision draft has unsupported key(s): ${extra.sort().join(', ')}`,
+    ]);
+  }
+  const normalized = validateSavedWorkflowRevisionPayload({
+    workflowId: 'wf_00000000000000000000000000000000',
+    humanVersion: 1,
+    createdAt: '1970-01-01T00:00:00.000Z',
+    createdBy: { openId: 'validation-owner', larkAppId: 'validation-app' },
+    ...raw,
+  });
+  const {
+    workflowId: _workflowId,
+    humanVersion: _humanVersion,
+    createdAt: _createdAt,
+    createdBy: _createdBy,
+    ...draft
+  } = normalized;
+  return draft;
 }
 
 export function computeSavedWorkflowRevisionContentHash(schemaVersion: number, payload: unknown): string {

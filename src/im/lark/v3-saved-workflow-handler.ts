@@ -247,6 +247,9 @@ export async function executeV3SavedWorkflowCommand(
     }
 
     if (command.kind === 'save') {
+      if (command.distill) {
+        throw new Error('参数蒸馏必须由飞书提案审批链处理，不能回退为普通精确保存');
+      }
       const runDir = await deps.resolveOwnedRun({ baseDir, source: command.source, context });
       const result = await deps.saveRun({
         dataDir,

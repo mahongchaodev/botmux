@@ -2,12 +2,15 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { withFileLock } from '../src/utils/file-lock.js';
 
 import {
   SavedWorkflowConflictError,
   SavedWorkflowPermissionError,
   appendSavedWorkflowRevision,
   archiveSavedWorkflow,
+  createOrRecoverExactSavedWorkflow,
+  verifyExactSavedWorkflowOrigin,
   createSavedWorkflow,
   listSavedWorkflows,
   loadCurrentSavedWorkflow,
@@ -229,6 +232,102 @@ describe('v3 Saved Workflow library store', () => {
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     expect(rejected?.reason).toBeInstanceOf(SavedWorkflowConflictError);
+  });
+
+  it('uses one workflow mutation lock for exact verification and normal mutation', async () => {
+    const created = await createSavedWorkflow(dataDir, {
+      workflowId: IDS.one,
+      displayName: '锁一致性',
+      owner: OWNER,
+      scope: { kind: 'global' },
+      revision: revisionDraft('v1'),
+    });
+    const lockTarget = join(workflowLibraryRoot(dataDir), `.mutation-${IDS.one}`);
+
+    let exactSettled = false;
+    let exact!: ReturnType<typeof createOrRecoverExactSavedWorkflow>;
+    await withFileLock(lockTarget, async () => {
+      exact = createOrRecoverExactSavedWorkflow(dataDir, {
+        expectedMetadata: created.metadata,
+        expectedRevision: JSON.parse(readFileSync(
+          savedWorkflowRevisionPath(dataDir, IDS.one, created.revision.revisionId),
+          'utf8',
+        )),
+        createIfMissing: false,
+      }).finally(() => { exactSettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(exactSettled).toBe(false);
+    });
+    await expect(exact).resolves.toMatchObject({ created: false });
+
+    let appendSettled = false;
+    let append!: ReturnType<typeof appendSavedWorkflowRevision>;
+    await withFileLock(lockTarget, async () => {
+      append = appendSavedWorkflowRevision(dataDir, IDS.one, {
+        actor: OWNER,
+        expectedLatestRevision: created.metadata.latestRevision,
+        revision: revisionDraft('v2', 'source-v2'),
+      }).finally(() => { appendSettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(appendSettled).toBe(false);
+    });
+    await expect(append).resolves.toMatchObject({ revision: { payload: { humanVersion: 2 } } });
+
+    // Rolling-upgrade compatibility: the previous release locked metadata.json
+    // directly. New mutations take that legacy lock inside the stable lock, so
+    // an old writer and a new writer cannot race metadata/revision updates.
+    const latest = (await loadCurrentSavedWorkflow(dataDir, IDS.one, {
+      revision: 'latest',
+      requireActive: false,
+    })).metadata.latestRevision;
+    let legacyBlockedSettled = false;
+    let legacyBlocked!: ReturnType<typeof appendSavedWorkflowRevision>;
+    await withFileLock(savedWorkflowMetadataPath(dataDir, IDS.one), async () => {
+      legacyBlocked = appendSavedWorkflowRevision(dataDir, IDS.one, {
+        actor: OWNER,
+        expectedLatestRevision: latest,
+        revision: revisionDraft('v3', 'source-v3'),
+      }).finally(() => { legacyBlockedSettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(legacyBlockedSettled).toBe(false);
+    });
+    await expect(legacyBlocked).resolves.toMatchObject({
+      revision: { payload: { humanVersion: 3 } },
+    });
+  });
+
+  it('ignores only inert recognized legacy-lock recovery artifacts during exact origin verification', async () => {
+    const created = await createSavedWorkflow(dataDir, {
+      workflowId: IDS.one,
+      displayName: '恢复兼容',
+      owner: OWNER,
+      scope: { kind: 'chat', chatId: 'oc_a' },
+      revision: revisionDraft('v1'),
+    });
+    const dir = join(workflowLibraryRoot(dataDir), IDS.one);
+    const expectedRevision = JSON.parse(readFileSync(
+      savedWorkflowRevisionPath(dataDir, IDS.one, created.revision.revisionId),
+      'utf8',
+    ));
+    writeFileSync(join(dir, 'metadata.json.lock.stale-claim'), 'legacy-lock-artifact');
+    writeFileSync(join(dir, `.botmux-stale-claim-${'a'.repeat(24)}`), 'generation-claim');
+    writeFileSync(
+      join(dir, `.botmux-stale-claim-${'b'.repeat(24)}.owner-000000000001`),
+      'generation-owner',
+    );
+
+    await expect(verifyExactSavedWorkflowOrigin(dataDir, {
+      expectedMetadata: created.metadata,
+      expectedRevision,
+      createIfMissing: false,
+    })).resolves.toMatchObject({ metadata: { workflowId: IDS.one } });
+
+    writeFileSync(join(dir, 'unrecognized-artifact'), 'must-fail');
+    await expect(verifyExactSavedWorkflowOrigin(dataDir, {
+      expectedMetadata: created.metadata,
+      expectedRevision,
+      createIfMissing: false,
+    })).rejects.toBeInstanceOf(SavedWorkflowConflictError);
   });
 
   it('detects an on-disk immutable revision tamper and reports corrupt catalog entries', async () => {

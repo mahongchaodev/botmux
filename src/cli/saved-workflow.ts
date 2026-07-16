@@ -21,6 +21,10 @@ import { postWorkflowDaemonMutation } from '../workflows/v3/daemon-ipc-client.js
 
 const FORBIDDEN_PARAM_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
 const RUN_FLAGS_WITH_VALUE = new Set(['--library-dir', '--base-dir', '--run-id']);
+const SAVE_FLAGS_WITH_VALUE = new Set([
+  '--library-dir', '--base-dir', '--workflow-id', '--expected-revision',
+]);
+const SAVE_BOOLEAN_FLAGS = new Set(['--json', '--allow-draft']);
 
 function savedWorkflowScopeLabel(scope: { kind: 'chat' | 'global' }): string {
   return scope.kind === 'global' ? '当前 Bot 全局' : '本群';
@@ -152,17 +156,48 @@ export function assertDaemonManagedRunBaseDir(baseDir: string, canonical = defau
 
 /** Agent-facing CLI cannot prove the daemon's per-chat `canOperate` policy. */
 export function assertAgentFacingSaveScope(args: readonly string[]): void {
-  if (args.includes('--global')) {
+  if (args.some((token) => token === '--distill' || token.startsWith('--distill='))) {
+    throw new Error(
+      'botmux workflow save 不接受 --distill：参数蒸馏必须由用户在飞书中显式发送 ' +
+      '`/workflow save [last|runId] <名称> --distill`，并在提案卡片中确认',
+    );
+  }
+  if (args.some((token) => token === '--global' || token.startsWith('--global='))) {
     throw new Error(
       'botmux workflow save 不接受 --global（当前 Bot 全局）：请由用户在飞书中显式发送 ' +
       '`/workflow save [last|runId] [名称] --global`，由 daemon 校验 canOperate 权限',
     );
   }
-  if (args.includes('--ack-unsafe')) {
+  if (args.some((token) => token === '--ack-unsafe' || token.startsWith('--ack-unsafe='))) {
     throw new Error(
       'botmux workflow save 不接受 --ack-unsafe：agent 不能代替用户确认疑似 secret/绝对路径；' +
       '请先向用户展示 lint，再由用户在飞书中显式发送原 `/workflow save ... --ack-unsafe` 命令',
     );
+  }
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index]!;
+    if (!token.startsWith('--')) continue;
+    if (SAVE_BOOLEAN_FLAGS.has(token)) continue;
+    if (SAVE_FLAGS_WITH_VALUE.has(token)) {
+      const value = args[index + 1];
+      if (!value || value.startsWith('--')) {
+        throw new Error(`botmux workflow save 参数 ${token} 缺少值`);
+      }
+      index++;
+      continue;
+    }
+    const matchedValueFlag = [...SAVE_FLAGS_WITH_VALUE]
+      .find((flag) => token.startsWith(`${flag}=`));
+    if (matchedValueFlag) {
+      if (token.length === matchedValueFlag.length + 1) {
+        throw new Error(`botmux workflow save 参数 ${matchedValueFlag} 缺少值`);
+      }
+      continue;
+    }
+    // Preserve the historical CLI surface: unknown `--*` tokens are ignored
+    // by positional parsing. Only the three agent-forbidden authority flags
+    // above are security decisions; tightening unrelated tokens here would be
+    // a compatibility break for existing callers.
   }
 }
 

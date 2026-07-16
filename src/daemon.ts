@@ -28,7 +28,7 @@ import {
 } from './core/cli-runtime-update.js';
 import { sendRestartReportIfPending } from './core/restart-report.js';
 import { statSync } from 'node:fs';
-import { addReaction, getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
+import { addReaction, getChatMode, getMessageChatId, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, sendUserMessage, updateMessage } from './im/lark/client.js';
 import { resolveGroupJoinPrompt, waitForAllowedUserInChat } from './core/auto-start.js';
 import { loadBotConfigs, registerBot, getBot, getAllBots, getOwnerOpenId, findOncallChat, effectiveDefaultWorkingDir, effectiveBotDisplayName, type BotConfig, type BotState, type OncallChat, type VcMeetingAgentConfig, type VcMeetingConsumerAgentConfig } from './bot-registry.js';
 import { setDisplayNameRefresher, findConfigField, applyConfigField } from './services/bot-config-store.js';
@@ -44,6 +44,7 @@ import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type
 import { expandMergeForward } from './im/lark/merge-forward.js';
 import { buildQuoteHint } from './im/lark/quote-hint.js';
 import { logger } from './utils/logger.js';
+import { withFileLock } from './utils/file-lock.js';
 import { delay } from './utils/timing.js';
 import { BoundedMap } from './utils/bounded-map.js';
 import { checkAllowedChatGroupsConfig } from './services/allowed-chat-groups.js';
@@ -154,6 +155,24 @@ import { buildV3RevisitGrantCard } from './im/lark/v3-revisit-grant-card.js';
 import { buildV3ProgressCard } from './im/lark/v3-progress-card.js';
 import { V3ProgressCardManager } from './im/lark/v3-progress-card-manager.js';
 import { buildV3RunSaveActionValue } from './im/lark/v3-run-save-card.js';
+import { buildV3DistillationProposalCard } from './im/lark/v3-distillation-card.js';
+import { v3DistillationUserErrorMessage } from './im/lark/v3-distillation-card-handler.js';
+import {
+  acceptV3WorkflowDistillation,
+  generateV3WorkflowDistillationProposal,
+  prepareV3WorkflowDistillation,
+  v3DistillationProposalNonce,
+  type ProposedV3WorkflowDistillation,
+} from './workflows/v3/distillation-service.js';
+import {
+  listActiveV3DistillationProposals,
+  v3DistillationProposalDir,
+} from './workflows/v3/distillation-store.js';
+import {
+  runV3DistillationModel,
+  sweepAbandonedV3DistillationScratch,
+} from './workflows/v3/distillation-runner.js';
+import { botToSnapshot } from './workflows/v3/bot-resolve.js';
 import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
 import { defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
 import { persistV3StartIntent } from './workflows/v3/start-intent.js';
@@ -1445,6 +1464,215 @@ interface V3SavedWorkflowImInvocation {
   memberUnionId?: string;
 }
 
+const v3DistillationGenerationInFlight = new Map<string, Promise<void>>();
+const V3_DISTILLATION_GENERATION_LOCK_WAIT_MS = 20 * 60 * 1000;
+const SAFE_V3_DISTILLATION_ERROR_NAMES = new Set([
+  'Error',
+  'SavedWorkflowConflictError',
+  'SavedWorkflowNotFoundError',
+  'V3DistillationCompileError',
+  'V3DistillationRunnerError',
+  'V3DistillationServiceError',
+  'V3DistillationSourceError',
+  'V3DistillationStoreError',
+]);
+
+function stableV3DistillationErrorCode(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code)) return code;
+    if (error instanceof Error && SAFE_V3_DISTILLATION_ERROR_NAMES.has(error.name)) return error.name;
+  }
+  return 'UNKNOWN_ERROR';
+}
+
+function buildV3DistillationReviewCard(proposed: ProposedV3WorkflowDistillation): string {
+  return buildV3DistillationProposalCard({
+    proposalId: proposed.proposalId,
+    nonce: proposed.nonce,
+    parameters: proposed.compiled.safeSummary.parameters.map((parameter) => ({
+      name: parameter.name,
+      type: parameter.type,
+      required: parameter.required,
+      hasDefault: parameter.hasDefault,
+      replacementCount: parameter.replacementCount,
+      fieldCategories: parameter.fields.map((field) => ({
+        category: field.field === 'goal' ? 'goal' as const : 'system_prompt_append' as const,
+        ordinal: field.nodeOrdinal,
+      })),
+    })),
+  });
+}
+
+async function deliverV3DistillationReviewCard(input: {
+  proposed: ProposedV3WorkflowDistillation;
+  larkAppId: string;
+  anchor: string;
+}): Promise<void> {
+  const card = buildV3DistillationReviewCard(input.proposed);
+  const uuid = `v3-distill-${input.proposed.proposalId}`;
+  if (input.anchor.startsWith('oc_')) {
+    await sendMessage(input.larkAppId, input.anchor, card, 'interactive', uuid);
+  } else {
+    await replyMessage(input.larkAppId, input.anchor, card, 'interactive', true, uuid);
+  }
+}
+
+function launchV3DistillationGeneration(input: {
+  proposalId: string;
+  dataDir: string;
+  baseDir: string;
+  larkAppId: string;
+  anchor: string;
+  botSnapshot: ReturnType<typeof botToSnapshot>;
+  providerEnv: Readonly<Record<string, string>>;
+  onFailure?: (error: unknown) => Promise<void>;
+}): Promise<void> {
+  const existing = v3DistillationGenerationInFlight.get(input.proposalId);
+  if (existing) return existing;
+  const generation = (async () => {
+    try {
+      await withFileLock(
+        join(v3DistillationProposalDir(input.dataDir, input.proposalId), '.generation'),
+        async () => {
+          // A previous daemon can die after publishing the generation lock but
+          // before its detached model process exits. Reap that owner only after
+          // this process wins the cross-process claim; a live old daemon keeps
+          // the lock, so its subprocess is never killed by a concurrent recovery.
+          await sweepAbandonedV3DistillationScratch();
+          const proposed = await generateV3WorkflowDistillationProposal({
+            dataDir: input.dataDir,
+            baseDir: input.baseDir,
+            proposalId: input.proposalId,
+            suggest: (fields) => runV3DistillationModel({
+              fields,
+              botSnapshot: input.botSnapshot,
+              providerEnv: input.providerEnv,
+            }),
+          });
+          await deliverV3DistillationReviewCard({
+            proposed,
+            larkAppId: input.larkAppId,
+            anchor: input.anchor,
+          });
+        },
+        { maxWaitMs: V3_DISTILLATION_GENERATION_LOCK_WAIT_MS },
+      );
+    } catch (err) {
+      logger.warn(
+        `[v3-distillation:${input.proposalId}] generation/recovery failed: ` +
+        stableV3DistillationErrorCode(err),
+      );
+      // A live peer may legitimately own generation for up to the model
+      // timeout. A local wait timeout is not a business failure and must not
+      // contradict the peer's eventual review card with a false failure reply.
+      if (!(err instanceof Error && err.message.startsWith('file-lock timeout waiting for '))) {
+        await input.onFailure?.(err);
+      }
+    }
+  })();
+  v3DistillationGenerationInFlight.set(input.proposalId, generation);
+  void generation.finally(() => {
+    if (v3DistillationGenerationInFlight.get(input.proposalId) === generation) {
+      v3DistillationGenerationInFlight.delete(input.proposalId);
+    }
+  });
+  return generation;
+}
+
+async function recoverV3DistillationCommits(): Promise<void> {
+  const dataDir = dirname(v3DefaultBaseDir());
+  const baseDir = v3DefaultBaseDir();
+  const proposals = listActiveV3DistillationProposals(dataDir);
+
+  // Approval and the exact library allocation are durable. Resume these
+  // transitions without requiring the source run, model, old card click, or a
+  // currently configured bot. This global pass matters when the approving bot
+  // was removed or is temporarily invalid when the daemon restarts.
+  for (const loaded of proposals) {
+    if (loaded.state.state !== 'accepted' && loaded.state.state !== 'committing') continue;
+    if (!loaded.proposal) continue;
+    try {
+      await acceptV3WorkflowDistillation({
+        dataDir,
+        baseDir,
+        proposalId: loaded.prepared.proposalId,
+        proposalHash: loaded.proposal.proposalHash,
+        nonce: v3DistillationProposalNonce(loaded),
+        operatorOpenId: loaded.state.approval.operatorOpenId,
+        larkAppId: loaded.state.approval.larkAppId,
+        chatId: loaded.state.approval.chatId,
+      });
+    } catch (err) {
+      logger.warn(
+        `[v3-distillation:${loaded.prepared.proposalId}] commit recovery failed: ` +
+        stableV3DistillationErrorCode(err),
+      );
+    }
+  }
+}
+
+async function recoverV3DistillationProposalsForBot(larkAppId: string): Promise<void> {
+  const dataDir = dirname(v3DefaultBaseDir());
+  const baseDir = v3DefaultBaseDir();
+  const proposals = listActiveV3DistillationProposals(dataDir)
+    .filter((loaded) => loaded.prepared.sourceIdentity.larkAppId === larkAppId);
+
+  // A proposed body is already host-compiled and durable. Deliver its review
+  // card even if the bot's current CLI configuration no longer supports
+  // generating new proposals; no model invocation is needed on this path.
+  for (const loaded of proposals) {
+    if (
+      !loaded.proposal ||
+      (loaded.state.state !== 'prepared' && loaded.state.state !== 'proposed')
+    ) continue;
+    const target = loaded.prepared.replyTarget;
+    const anchor = target.kind === 'thread' ? target.rootMessageId : target.chatId;
+    try {
+      const proposed = await generateV3WorkflowDistillationProposal({
+        dataDir,
+        baseDir,
+        proposalId: loaded.prepared.proposalId,
+        suggest: async () => { throw new Error('unreachable stored-proposal model path'); },
+      });
+      await deliverV3DistillationReviewCard({ proposed, larkAppId, anchor });
+    } catch (err) {
+      logger.warn(
+        `[v3-distillation:${loaded.prepared.proposalId}] card recovery failed: ` +
+        stableV3DistillationErrorCode(err),
+      );
+    }
+  }
+
+  const bot = loadBotConfigs().find((candidate) => candidate.larkAppId === larkAppId);
+  if (
+    process.platform !== 'linux' || !bot || bot.cliId !== 'claude-code' ||
+    Boolean(bot.wrapperCli?.trim()) || Boolean(bot.cliPathOverride?.trim())
+  ) return;
+  let botSnapshot: ReturnType<typeof botToSnapshot>;
+  try {
+    botSnapshot = botToSnapshot(bot);
+  } catch {
+    return;
+  }
+  const providerEnv = { ...(bot.env ?? {}) };
+  const generative = proposals.filter((loaded) =>
+    loaded.state.state === 'prepared' && !loaded.proposal);
+  for (const loaded of generative) {
+    const target = loaded.prepared.replyTarget;
+    const anchor = target.kind === 'thread' ? target.rootMessageId : target.chatId;
+    await launchV3DistillationGeneration({
+      proposalId: loaded.prepared.proposalId,
+      dataDir,
+      baseDir,
+      larkAppId,
+      anchor,
+      botSnapshot,
+      providerEnv,
+    });
+  }
+}
+
 async function handleV3SavedWorkflowCommandIfAny(
   invocation: V3SavedWorkflowImInvocation,
 ): Promise<boolean> {
@@ -1530,6 +1758,59 @@ async function handleV3SavedWorkflowCommandIfAny(
   };
   const dataDir = dirname(v3DefaultBaseDir());
   const baseDir = v3DefaultBaseDir();
+  if (command.kind === 'save' && command.distill) {
+    if (!command.displayName) {
+      await notify('❌ 参数蒸馏必须显式指定模板名称。', 'validation');
+      return true;
+    }
+    const distillationBot = loadBotConfigs().find((candidate) => candidate.larkAppId === larkAppId);
+    if (
+      process.platform !== 'linux' || !distillationBot ||
+      distillationBot.cliId !== 'claude-code' || Boolean(distillationBot.wrapperCli?.trim()) ||
+      Boolean(distillationBot.cliPathOverride?.trim())
+    ) {
+      await notify('❌ 参数蒸馏 P0 目前只支持 Linux 上未使用启动 wrapper 的 Claude Code Bot。', 'validation');
+      return true;
+    }
+    let distillationBotSnapshot: ReturnType<typeof botToSnapshot>;
+    try {
+      distillationBotSnapshot = botToSnapshot(distillationBot);
+    } catch {
+      await notify('❌ 当前 Bot 的 Workflow 权限配置不支持参数蒸馏。', 'authorization');
+      return true;
+    }
+    const distillationProviderEnv = { ...(distillationBot.env ?? {}) };
+    let prepared;
+    try {
+      prepared = await prepareV3WorkflowDistillation({
+        dataDir,
+        baseDir,
+        source: command.source,
+        displayName: command.displayName,
+        requestKey: messageId,
+        context: { ownerOpenId: initiatorOpenId, larkAppId, chatId },
+        replyTarget: targets.replyAnchor.startsWith('oc_')
+          ? { kind: 'chat', chatId }
+          : { kind: 'thread', rootMessageId: targets.replyAnchor },
+      });
+    } catch (err) {
+      logger.warn(`[v3-distillation] prepare failed: ${stableV3DistillationErrorCode(err)}`);
+      await notify(`❌ ${v3DistillationUserErrorMessage(err, 'prepare')}`, 'failed');
+      return true;
+    }
+    await notify(`⏳ 正在分析可复用参数：\`${prepared.proposalId}\`。生成后会发送确认卡片；确认前不会创建 Saved Workflow。`, 'read_completed');
+    void launchV3DistillationGeneration({
+      proposalId: prepared.proposalId,
+      dataDir,
+      baseDir,
+      larkAppId,
+      anchor: targets.replyAnchor,
+      botSnapshot: distillationBotSnapshot,
+      providerEnv: distillationProviderEnv,
+      onFailure: (error) => notify(`❌ ${v3DistillationUserErrorMessage(error, 'generate')}`, 'failed'),
+    });
+    return true;
+  }
   const result = await executeV3SavedWorkflowCommand(
     { command, dataDir, baseDir, context, operatorCanOperate },
     {
@@ -1885,6 +2166,15 @@ const cardDeps: CardHandlerDeps = {
     dataDir: dirname(v3DefaultBaseDir()),
     onError: (runId, err) => logger.warn(
       `[v3:${runId}] terminal save card failed: ${err instanceof Error ? err.message : String(err)}`,
+    ),
+  },
+  v3DistillationDeps: {
+    baseDir: v3DefaultBaseDir(),
+    dataDir: dirname(v3DefaultBaseDir()),
+    resolveMessageChatId: getMessageChatId,
+    onError: (proposalId, err) => logger.warn(
+      `[v3-distillation:${proposalId}] card action failed: ` +
+      stableV3DistillationErrorCode(err),
     ),
   },
 };
@@ -7917,6 +8207,26 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Don't keep the event loop alive on this interval alone.
   if (typeof descriptorHeartbeat.unref === 'function') descriptorHeartbeat.unref();
 
+  // Reap a dead prior daemon's detached classifier before any prepared
+  // proposal can be recovered. Per-proposal generation locks still serialize
+  // live rolling-restart overlap; this sweep handles only dead-owner markers.
+  await sweepAbandonedV3DistillationScratch().catch((err) => {
+    logger.warn(
+      `[v3-distillation] scratch sweep failed: ${stableV3DistillationErrorCode(err)}`,
+    );
+  });
+
+  // Accepted distillation transactions no longer need a live bot/provider or
+  // Lark delivery. Recover them once globally before per-bot card/generation
+  // recovery, so removing a bot cannot strand an already approved save.
+  try {
+    await recoverV3DistillationCommits();
+  } catch (err) {
+    logger.warn(
+      `[v3-distillation] global commit recovery failed: ${stableV3DistillationErrorCode(err)}`,
+    );
+  }
+
   // Per-bot initialization
   for (const bot of getAllBots()) {
     const cfg = bot.config;
@@ -8026,6 +8336,16 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       },
     }, normalizeBrand(cfg.brand));
 
+    // A distillation command is durably prepared before its model run/card
+    // delivery. Resume active prepared/proposed allocations after a daemon
+    // crash; deterministic Lark UUIDs suppress duplicate cards in the
+    // transport dedupe window, while callback CAS keeps later clicks safe.
+    void recoverV3DistillationProposalsForBot(cfg.larkAppId).catch((err) => {
+      logger.warn(
+        `[v3-distillation] cold recovery failed: ${stableV3DistillationErrorCode(err)}`,
+      );
+    });
+
     const vcCfg = effectiveVcMeetingAgentConfig(cfg.larkAppId);
     if (vcCfg) restoreVcMeetingRuntimeSessionsForBot(cfg.larkAppId, vcCfg);
   }
@@ -8072,7 +8392,6 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   } catch (err: any) {
     logger.warn(`[sandbox-sweep] failed: ${err?.message ?? err}`);
   }
-
   const idleWorkerSweepTimer = setInterval(() => {
     // Dashboard config edits need no restart; the timer also backstops any
     // missed lifecycle edge. Normal new/resumed sessions enforce immediately.

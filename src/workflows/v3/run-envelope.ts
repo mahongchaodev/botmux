@@ -308,7 +308,7 @@ export function validateRunEnvelope(raw: unknown, expectedRunId?: string): V3Run
 export type ReadRunEnvelopeResult =
   | { kind: 'missing'; path: string }
   | { kind: 'invalid'; path: string; problems: string[] }
-  | { kind: 'ok'; path: string; envelope: V3RunEnvelope };
+  | { kind: 'ok'; path: string; envelope: V3RunEnvelope; bytes: Buffer };
 
 /**
  * Defensive reader that preserves the crucial missing-vs-corrupt distinction.
@@ -319,8 +319,10 @@ export function readRunEnvelope(runDir: string, expectedRunId: string = basename
   const path = join(runDir, V3_RUN_ENVELOPE_FILE);
   if (!existsSync(path)) return { kind: 'missing', path };
   let raw: unknown;
+  let bytes: Buffer;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf-8'));
+    bytes = readFileSync(path);
+    raw = JSON.parse(bytes.toString('utf-8'));
   } catch (err) {
     return {
       kind: 'invalid',
@@ -329,7 +331,7 @@ export function readRunEnvelope(runDir: string, expectedRunId: string = basename
     };
   }
   try {
-    return { kind: 'ok', path, envelope: validateRunEnvelope(raw, expectedRunId) };
+    return { kind: 'ok', path, envelope: validateRunEnvelope(raw, expectedRunId), bytes };
   } catch (err) {
     return {
       kind: 'invalid',
@@ -413,6 +415,7 @@ export interface LoadedAuthorizedV3Run {
   definitionSnapshot?: unknown;
   /** Exact verified bytes, for a caller that must avoid a second filesystem read. */
   bytes: {
+    runEnvelope: Buffer;
     dag: Buffer;
     spec?: Buffer;
     botSnapshots?: Buffer;
@@ -470,7 +473,10 @@ export function loadAuthorizedV3Run(
     );
   }
 
-  const bytes: LoadedAuthorizedV3Run['bytes'] = { dag: dagBytes };
+  const bytes: LoadedAuthorizedV3Run['bytes'] = {
+    runEnvelope: read.bytes,
+    dag: dagBytes,
+  };
   let spec: Spec | undefined;
   let botSnapshots: unknown;
   let resolvedParams: unknown;

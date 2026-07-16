@@ -12,6 +12,10 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import { atomicWriteFile } from '../../utils/atomic-write.js';
+import {
+  fsyncDirectorySyncPortable,
+  fsyncRegularFileSync,
+} from '../../utils/fs-durability.js';
 import { withFileLock } from '../../utils/file-lock.js';
 import {
   SAVED_WORKFLOW_ID_RE,
@@ -84,6 +88,23 @@ export interface SavedWorkflowWriteResult {
   revision: LoadedSavedWorkflowRevision;
 }
 
+/**
+ * Fully allocated deterministic library object used by crash-recoverable
+ * host-owned publishers. Unlike `createSavedWorkflow`, this API never adopts
+ * or removes a partial final directory: an existing target must be the exact
+ * canonical object the caller expected.
+ */
+export interface CreateOrRecoverExactSavedWorkflowInput {
+  expectedMetadata: SavedWorkflowMetadata;
+  expectedRevision: StoredSavedWorkflowRevision;
+  /** Committed-state verification sets this false so missing bytes stay fatal. */
+  createIfMissing?: boolean;
+}
+
+export interface ExactSavedWorkflowWriteResult extends SavedWorkflowWriteResult {
+  created: boolean;
+}
+
 export interface ListSavedWorkflowOptions {
   chatId?: string;
   actor?: SavedWorkflowOwner;
@@ -114,6 +135,28 @@ export function savedWorkflowDir(dataDir: string, workflowId: string): string {
 
 export function savedWorkflowMetadataPath(dataDir: string, workflowId: string): string {
   return join(savedWorkflowDir(dataDir, workflowId), METADATA_FILE);
+}
+
+/** Stable lock outside the not-yet-created workflow directory. */
+function savedWorkflowMutationLockTarget(dataDir: string, workflowId: string): string {
+  assertWorkflowId(workflowId);
+  return join(workflowLibraryRoot(dataDir), `.mutation-${workflowId}`);
+}
+
+/**
+ * Existing workflows take both the stable library lock and the pre-v3.1
+ * metadata lock. This preserves mutual exclusion during a coordinated rolling
+ * upgrade while keeping the stable lock available before a workflow directory
+ * exists. Lock order is always stable -> legacy metadata; no new caller takes
+ * the reverse order.
+ */
+function withExistingSavedWorkflowMutationLock<T>(
+  dataDir: string,
+  workflowId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withFileLock(savedWorkflowMutationLockTarget(dataDir, workflowId), () =>
+    withFileLock(savedWorkflowMetadataPath(dataDir, workflowId), fn));
 }
 
 export function savedWorkflowRevisionPath(dataDir: string, workflowId: string, revisionId: string): string {
@@ -164,6 +207,357 @@ function loadedFromStored(stored: StoredSavedWorkflowRevision): LoadedSavedWorkf
   });
 }
 
+function exactLibraryBytes(input: CreateOrRecoverExactSavedWorkflowInput): {
+  metadata: SavedWorkflowMetadata;
+  revision: StoredSavedWorkflowRevision;
+  metadataBytes: string;
+  revisionBytes: string;
+  loadedRevision: LoadedSavedWorkflowRevision;
+} {
+  const metadata = validateSavedWorkflowMetadata(input.expectedMetadata);
+  if (canonicalJsonStringify(metadata) !== canonicalJsonStringify(input.expectedMetadata)) {
+    throw new SavedWorkflowConflictError('Expected Saved Workflow metadata is not canonical');
+  }
+  const revisionKeys = Object.keys(input.expectedRevision).sort();
+  if (canonicalJsonStringify(revisionKeys) !== canonicalJsonStringify([
+    'contentHash', 'payload', 'revisionId', 'schemaVersion',
+  ])) {
+    throw new SavedWorkflowConflictError('Expected Saved Workflow revision has unsupported fields');
+  }
+  const loadedRevision = loadSavedWorkflowRevision(input.expectedRevision, {
+    workflowId: metadata.workflowId,
+    revisionId: input.expectedRevision.revisionId,
+  });
+  const rebuiltRevision = buildSavedWorkflowRevision(loadedRevision.payload);
+  if (canonicalJsonStringify(rebuiltRevision) !== canonicalJsonStringify(input.expectedRevision)) {
+    throw new SavedWorkflowConflictError('Expected Saved Workflow revision is not canonical');
+  }
+  if (
+    metadata.latestRevision !== loadedRevision.revisionId ||
+    (metadata.publishedRevision !== undefined && metadata.publishedRevision !== loadedRevision.revisionId)
+  ) {
+    throw new SavedWorkflowConflictError('Expected Saved Workflow metadata/revision pointers do not match');
+  }
+  return {
+    metadata,
+    revision: input.expectedRevision,
+    metadataBytes: `${canonicalJsonStringify(metadata)}\n`,
+    revisionBytes: `${canonicalJsonStringify(input.expectedRevision)}\n`,
+    loadedRevision,
+  };
+}
+
+function exactMode(stat: { mode: number }, expected: number): boolean {
+  return process.platform === 'win32' || (stat.mode & 0o777) === expected;
+}
+
+async function assertExactPrivateDirectory(path: string, label: string): Promise<void> {
+  let stat;
+  try {
+    stat = await fs.lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new SavedWorkflowNotFoundError(label);
+    }
+    throw error;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !exactMode(stat, 0o700)) {
+    throw new SavedWorkflowConflictError(`Saved Workflow ${label} has unsafe directory topology or permissions`);
+  }
+}
+
+async function readPrivateFileBytes(path: string, label: string): Promise<string> {
+  let before;
+  try {
+    before = await fs.lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new SavedWorkflowConflictError(`Saved Workflow ${label} is missing`);
+    }
+    throw error;
+  }
+  if (
+    !before.isFile() || before.isSymbolicLink() || !exactMode(before, 0o600) ||
+    (process.platform !== 'win32' && before.nlink !== 1)
+  ) {
+    throw new SavedWorkflowConflictError(`Saved Workflow ${label} has unsafe file topology or permissions`);
+  }
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const handle = await fs.open(path, fsConstants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    if (opened.dev !== before.dev || opened.ino !== before.ino || !opened.isFile()) {
+      throw new SavedWorkflowConflictError(`Saved Workflow ${label} changed while being verified`);
+    }
+    const bytes = await handle.readFile({ encoding: 'utf8' });
+    const after = await handle.stat();
+    const finalPath = await fs.lstat(path);
+    if (
+      after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs ||
+      finalPath.dev !== opened.dev || finalPath.ino !== opened.ino ||
+      !finalPath.isFile() || finalPath.isSymbolicLink() ||
+      !exactMode(finalPath, 0o600) ||
+      (process.platform !== 'win32' && finalPath.nlink !== 1)
+    ) {
+      throw new SavedWorkflowConflictError(`Saved Workflow ${label} changed while being verified`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readExactPrivateFile(path: string, expected: string, label: string): Promise<void> {
+  if (await readPrivateFileBytes(path, label) !== expected) {
+    throw new SavedWorkflowConflictError(`Saved Workflow ${label} bytes do not match the expected object`);
+  }
+}
+
+async function assertExactSavedWorkflowDirectory(
+  dataDir: string,
+  expected: ReturnType<typeof exactLibraryBytes>,
+): Promise<void> {
+  const workflowId = expected.metadata.workflowId;
+  const dir = savedWorkflowDir(dataDir, workflowId);
+  const revisionsDir = join(dir, REVISIONS_DIR);
+  await assertExactPrivateDirectory(dir, workflowId);
+  const rootEntries = (await fs.readdir(dir)).sort();
+  if (canonicalJsonStringify(rootEntries) !== canonicalJsonStringify([METADATA_FILE, REVISIONS_DIR])) {
+    throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' has unexpected entries`);
+  }
+  await assertExactPrivateDirectory(revisionsDir, `${workflowId}/${REVISIONS_DIR}`);
+  const revisionName = `${expected.revision.revisionId}.json`;
+  const revisionEntries = await fs.readdir(revisionsDir);
+  if (revisionEntries.length !== 1 || revisionEntries[0] !== revisionName) {
+    throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' has unexpected revisions`);
+  }
+  await readExactPrivateFile(
+    savedWorkflowMetadataPath(dataDir, workflowId),
+    expected.metadataBytes,
+    `${workflowId}/${METADATA_FILE}`,
+  );
+  await readExactPrivateFile(
+    savedWorkflowRevisionPath(dataDir, workflowId, expected.revision.revisionId),
+    expected.revisionBytes,
+    `${workflowId}/${REVISIONS_DIR}/${revisionName}`,
+  );
+}
+
+async function writePrivateStagedFile(path: string, bytes: string): Promise<void> {
+  await fs.writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
+  await fs.chmod(path, 0o600);
+  fsyncRegularFileSync(path);
+}
+
+/**
+ * Publish one deterministic Saved Workflow as an all-or-nothing directory.
+ * The final target is never cleaned up or repaired in place. Recovery accepts
+ * it only after exact topology, permission, and canonical-byte verification.
+ */
+export async function createOrRecoverExactSavedWorkflow(
+  dataDir: string,
+  input: CreateOrRecoverExactSavedWorkflowInput,
+): Promise<ExactSavedWorkflowWriteResult> {
+  const expected = exactLibraryBytes(input);
+  const workflowId = expected.metadata.workflowId;
+  const root = workflowLibraryRoot(dataDir);
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  fsyncDirectorySyncPortable(dataDir);
+  const lockTarget = savedWorkflowMutationLockTarget(dataDir, workflowId);
+  return withFileLock(lockTarget, async () => {
+    try {
+      await assertExactSavedWorkflowDirectory(dataDir, expected);
+      // A prior process may have renamed the final directory and crashed
+      // before fsyncing the library root. Recovery must close that durability
+      // window before it reports the exact object as committed.
+      fsyncRegularFileSync(savedWorkflowMetadataPath(dataDir, workflowId));
+      fsyncRegularFileSync(savedWorkflowRevisionPath(
+        dataDir, workflowId, expected.revision.revisionId,
+      ));
+      fsyncDirectorySyncPortable(join(savedWorkflowDir(dataDir, workflowId), REVISIONS_DIR));
+      fsyncDirectorySyncPortable(savedWorkflowDir(dataDir, workflowId));
+      fsyncDirectorySyncPortable(root);
+      return { metadata: expected.metadata, revision: expected.loadedRevision, created: false };
+    } catch (error) {
+      if (!(error instanceof SavedWorkflowNotFoundError)) throw error;
+      if (input.createIfMissing === false) throw error;
+    }
+
+    const stage = join(root, `.staging-exact-${workflowId}-${randomUUID()}`);
+    const stagedRevisions = join(stage, REVISIONS_DIR);
+    let stageOwned = false;
+    try {
+      await fs.mkdir(stage, { mode: 0o700 });
+      stageOwned = true;
+      await fs.chmod(stage, 0o700);
+      await fs.mkdir(stagedRevisions, { mode: 0o700 });
+      await fs.chmod(stagedRevisions, 0o700);
+      await writePrivateStagedFile(join(stage, METADATA_FILE), expected.metadataBytes);
+      await writePrivateStagedFile(
+        join(stagedRevisions, `${expected.revision.revisionId}.json`),
+        expected.revisionBytes,
+      );
+      fsyncDirectorySyncPortable(stagedRevisions);
+      fsyncDirectorySyncPortable(stage);
+
+      // The workflow-specific lock serializes cooperating publishers. Refuse
+      // any pre-existing final path; in particular, never rm or adopt a
+      // foreign partial directory.
+      try {
+        await fs.lstat(savedWorkflowDir(dataDir, workflowId));
+        throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' already exists incompletely`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      await fs.rename(stage, savedWorkflowDir(dataDir, workflowId));
+      stageOwned = false;
+      fsyncDirectorySyncPortable(root);
+      await assertExactSavedWorkflowDirectory(dataDir, expected);
+      return { metadata: expected.metadata, revision: expected.loadedRevision, created: true };
+    } finally {
+      if (stageOwned) {
+        try { await fs.rm(stage, { recursive: true, force: true }); } catch { /* owned staging only */ }
+      }
+    }
+  });
+}
+
+/**
+ * Recover an exact publisher after its original single-revision directory was
+ * legitimately advanced by ordinary owner mutations. The immutable origin
+ * revision must still have the exact canonical bytes and private topology that
+ * were approved; current metadata and later revisions are read under the same
+ * workflow mutation lock and must themselves remain canonical private files.
+ */
+export async function verifyExactSavedWorkflowOrigin(
+  dataDir: string,
+  input: CreateOrRecoverExactSavedWorkflowInput,
+): Promise<SavedWorkflowWriteResult> {
+  const expected = exactLibraryBytes(input);
+  const workflowId = expected.metadata.workflowId;
+  return withExistingSavedWorkflowMutationLock(dataDir, workflowId, async () => {
+    const dir = savedWorkflowDir(dataDir, workflowId);
+    const revisionsDir = join(dir, REVISIONS_DIR);
+    await assertExactPrivateDirectory(dir, workflowId);
+    const rootEntries = (await fs.readdir(dir)).sort();
+    // This verifier deliberately holds the legacy metadata lock as the inner
+    // half of the rolling-upgrade dual lock. Stale-break protocols may leave
+    // rigorously named, inert hard-link/owner artifacts after the public lock
+    // is gone. They never participate in metadata/revision reads, but rejecting
+    // them here would permanently wedge deterministic commit recovery.
+    const requiredRootEntries = [
+      METADATA_FILE,
+      `${METADATA_FILE}.lock`,
+      REVISIONS_DIR,
+    ];
+    const allowedLockArtifact = (name: string): boolean =>
+      name === `${METADATA_FILE}.lock.stale-claim` ||
+      /^\.botmux-stale-claim-[0-9a-f]{24}(?:\.owner-[0-9]{12})?$/.test(name);
+    const unexpected = rootEntries.filter((name) =>
+      !requiredRootEntries.includes(name) && !allowedLockArtifact(name));
+    if (unexpected.length > 0 || requiredRootEntries.some((name) => !rootEntries.includes(name))) {
+      throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' has unexpected entries`);
+    }
+    for (const name of rootEntries.filter(allowedLockArtifact)) {
+      const artifact = await fs.lstat(join(dir, name));
+      if (!artifact.isFile() || artifact.isSymbolicLink()) {
+        throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' has unsafe lock artifacts`);
+      }
+    }
+    await assertExactPrivateDirectory(revisionsDir, `${workflowId}/${REVISIONS_DIR}`);
+
+    const metadataBytes = await readPrivateFileBytes(
+      savedWorkflowMetadataPath(dataDir, workflowId),
+      `${workflowId}/${METADATA_FILE}`,
+    );
+    let metadata: SavedWorkflowMetadata;
+    try {
+      metadata = validateSavedWorkflowMetadata(JSON.parse(metadataBytes));
+    } catch {
+      throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' metadata is invalid`);
+    }
+    if (metadataBytes !== `${canonicalJsonStringify(metadata)}\n`) {
+      throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' metadata is not canonical`);
+    }
+
+    const revisionNames = (await fs.readdir(revisionsDir)).sort();
+    const expectedName = `${expected.revision.revisionId}.json`;
+    if (!revisionNames.includes(expectedName)) {
+      throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' origin revision is missing`);
+    }
+    const loadedRevisions: LoadedSavedWorkflowRevision[] = [];
+    for (const name of revisionNames) {
+      const revisionId = name.endsWith('.json') ? name.slice(0, -5) : '';
+      if (!SAVED_WORKFLOW_REVISION_ID_RE.test(revisionId)) {
+        throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' has an invalid revision entry`);
+      }
+      const path = savedWorkflowRevisionPath(dataDir, workflowId, revisionId);
+      if (name === expectedName) {
+        await readExactPrivateFile(
+          path,
+          expected.revisionBytes,
+          `${workflowId}/${REVISIONS_DIR}/${name}`,
+        );
+        loadedRevisions.push(expected.loadedRevision);
+        continue;
+      }
+      const bytes = await readPrivateFileBytes(path, `${workflowId}/${REVISIONS_DIR}/${name}`);
+      try {
+        const parsed = JSON.parse(bytes) as unknown;
+        const loaded = loadSavedWorkflowRevision(parsed, { workflowId, revisionId });
+        if (bytes !== `${canonicalJsonStringify(buildSavedWorkflowRevision(loaded.payload))}\n`) {
+          throw new Error('non-canonical');
+        }
+        loadedRevisions.push(loaded);
+      } catch {
+        throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' has an invalid revision`);
+      }
+    }
+    const expectedOwner = canonicalJsonStringify(expected.metadata.owner);
+    const versions = new Map<number, StoredSavedWorkflowRevision>();
+    for (const revision of loadedRevisions) {
+      if (canonicalJsonStringify(revision.payload.createdBy) !== expectedOwner ||
+          versions.has(revision.payload.humanVersion)) {
+        throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' revision lineage is invalid`);
+      }
+      versions.set(revision.payload.humanVersion, revision);
+    }
+    const minVersion = expected.loadedRevision.payload.humanVersion;
+    const maxVersion = Math.max(...versions.keys());
+    for (let version = minVersion; version <= maxVersion; version++) {
+      if (!versions.has(version)) {
+        throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' revision lineage is incomplete`);
+      }
+    }
+    const latest = versions.get(maxVersion)!;
+    const stableMetadata =
+      metadata.workflowId === expected.metadata.workflowId &&
+      metadata.displayName === expected.metadata.displayName &&
+      canonicalJsonStringify(metadata.aliases) === canonicalJsonStringify(expected.metadata.aliases) &&
+      canonicalJsonStringify(metadata.owner) === expectedOwner &&
+      canonicalJsonStringify(metadata.scope) === canonicalJsonStringify(expected.metadata.scope) &&
+      metadata.createdAt === expected.metadata.createdAt;
+    if (
+      !stableMetadata ||
+      (metadata.status !== 'active' && metadata.status !== 'archived') ||
+      metadata.latestRevision !== latest.revisionId ||
+      !metadata.publishedRevision ||
+      !revisionNames.includes(`${metadata.publishedRevision}.json`)
+    ) {
+      throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' metadata lineage is invalid`);
+    }
+    fsyncRegularFileSync(savedWorkflowMetadataPath(dataDir, workflowId));
+    for (const name of revisionNames) {
+      fsyncRegularFileSync(join(revisionsDir, name));
+    }
+    fsyncDirectorySyncPortable(revisionsDir);
+    fsyncDirectorySyncPortable(dir);
+    fsyncDirectorySyncPortable(workflowLibraryRoot(dataDir));
+    return { metadata, revision: expected.loadedRevision };
+  });
+}
+
 export async function createSavedWorkflow(
   dataDir: string,
   input: CreateSavedWorkflowInput,
@@ -192,27 +586,32 @@ export async function createSavedWorkflow(
   const root = workflowLibraryRoot(dataDir);
   const dir = savedWorkflowDir(dataDir, workflowId);
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
-  try {
-    await fs.mkdir(dir, { mode: 0o700 });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' already exists`);
+  fsyncDirectorySyncPortable(dataDir);
+  return withFileLock(savedWorkflowMutationLockTarget(dataDir, workflowId), async () => {
+    try {
+      await fs.mkdir(dir, { mode: 0o700 });
+      fsyncDirectorySyncPortable(root);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' already exists`);
+      }
+      throw err;
     }
-    throw err;
-  }
 
-  try {
-    await fs.mkdir(join(dir, REVISIONS_DIR), { mode: 0o700 });
-    await writeImmutableRevision(dataDir, workflowId, stored);
-    await writeMetadata(dataDir, metadata);
-  } catch (err) {
-    // The id was newly allocated by this call. A failed create is not visible
-    // through metadata, so remove its private partial directory best-effort.
-    try { await fs.rm(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-    throw err;
-  }
+    try {
+      await fs.mkdir(join(dir, REVISIONS_DIR), { mode: 0o700 });
+      fsyncDirectorySyncPortable(dir);
+      await writeImmutableRevision(dataDir, workflowId, stored);
+      await writeMetadata(dataDir, metadata);
+    } catch (err) {
+      // The id was newly allocated by this call. A failed create is not visible
+      // through metadata, so remove its private partial directory best-effort.
+      try { await fs.rm(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+      throw err;
+    }
 
-  return { metadata, revision: loadedFromStored(stored) };
+    return { metadata, revision: loadedFromStored(stored) };
+  });
 }
 
 export async function readSavedWorkflowMetadata(
@@ -268,8 +667,7 @@ export async function appendSavedWorkflowRevision(
   workflowId: string,
   input: AppendSavedWorkflowRevisionInput,
 ): Promise<SavedWorkflowWriteResult> {
-  const metadataPath = savedWorkflowMetadataPath(dataDir, workflowId);
-  return withFileLock(metadataPath, async () => {
+  return withExistingSavedWorkflowMutationLock(dataDir, workflowId, async () => {
     const metadata = await readSavedWorkflowMetadata(dataDir, workflowId);
     assertOwner(metadata, input.actor);
     if (metadata.status === 'archived') {
@@ -311,8 +709,7 @@ export async function publishLatestSavedWorkflow(
   workflowId: string,
   input: { actor: SavedWorkflowOwner; expectedLatestRevision?: string; now?: Date },
 ): Promise<SavedWorkflowMetadata> {
-  const metadataPath = savedWorkflowMetadataPath(dataDir, workflowId);
-  return withFileLock(metadataPath, async () => {
+  return withExistingSavedWorkflowMutationLock(dataDir, workflowId, async () => {
     const metadata = await readSavedWorkflowMetadata(dataDir, workflowId);
     assertOwner(metadata, input.actor);
     if (metadata.status === 'archived') throw new SavedWorkflowConflictError(`Saved workflow '${workflowId}' is archived`);
@@ -339,8 +736,7 @@ export async function archiveSavedWorkflow(
   workflowId: string,
   input: { actor: SavedWorkflowOwner; now?: Date },
 ): Promise<SavedWorkflowMetadata> {
-  const metadataPath = savedWorkflowMetadataPath(dataDir, workflowId);
-  return withFileLock(metadataPath, async () => {
+  return withExistingSavedWorkflowMutationLock(dataDir, workflowId, async () => {
     const metadata = await readSavedWorkflowMetadata(dataDir, workflowId);
     assertOwner(metadata, input.actor);
     const next = validateSavedWorkflowMetadata({
@@ -417,12 +813,16 @@ async function writeMetadata(dataDir: string, metadata: SavedWorkflowMetadata): 
     `${canonicalJsonStringify(normalized)}\n`,
     { mode: 0o600 },
   );
+  const path = savedWorkflowMetadataPath(dataDir, normalized.workflowId);
+  fsyncRegularFileSync(path);
+  fsyncDirectorySyncPortable(savedWorkflowDir(dataDir, normalized.workflowId));
 }
 
 /**
  * Install a completed sibling temp file via hard-link. `link` is atomic and
- * refuses replacement, unlike rename(2). The metadata lock serializes normal
- * writers; the EEXIST comparison keeps retries idempotent and detects tamper.
+ * refuses replacement, unlike rename(2). The workflow mutation lock
+ * serializes normal writers; EEXIST comparison keeps retries idempotent and
+ * detects tamper.
  */
 async function writeImmutableRevision(
   dataDir: string,
@@ -435,6 +835,7 @@ async function writeImmutableRevision(
   try {
     await fs.writeFile(tmp, encoded, { flag: 'wx', mode: 0o600 });
     await fs.chmod(tmp, 0o600);
+    fsyncRegularFileSync(tmp);
     try {
       await fs.link(tmp, target);
     } catch (err) {
@@ -454,4 +855,6 @@ async function writeImmutableRevision(
   // metadata pointer can expose it. access() also catches a failed link on odd
   // filesystems before the pointer update.
   await fs.access(target, fsConstants.R_OK);
+  fsyncRegularFileSync(target);
+  fsyncDirectorySyncPortable(join(savedWorkflowDir(dataDir, workflowId), REVISIONS_DIR));
 }

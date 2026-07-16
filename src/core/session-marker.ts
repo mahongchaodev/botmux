@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 export interface AncestorSessionContext {
   sessionId: string;
@@ -23,6 +23,19 @@ export class SessionMarkerAuthenticationError extends Error {
   }
 }
 
+const LINUX_BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Kernel-generated identity that changes on every Linux boot. */
+export function readLinuxBootIdentity(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    return LINUX_BOOT_ID_RE.test(bootId) ? bootId.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Stable process-birth identity used to reject stale marker files after PID
  * reuse. Linux exposes start ticks in /proc; macOS/other Unix falls back to
@@ -30,24 +43,64 @@ export class SessionMarkerAuthenticationError extends Error {
  */
 export function readProcessStartIdentity(pid: number): string | undefined {
   if (!Number.isInteger(pid) || pid <= 1) return undefined;
-  try {
-    const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const closeParen = raw.lastIndexOf(')');
-    if (closeParen >= 0) {
-      const fields = raw.slice(closeParen + 2).trim().split(/\s+/);
-      if (fields[19]) return fields[19];
-    }
-  } catch { /* non-Linux or process disappeared */ }
+  if (process.platform === 'linux') {
+    try {
+      const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const closeParen = raw.lastIndexOf(')');
+      if (closeParen >= 0) {
+        const fields = raw.slice(closeParen + 2).trim().split(/\s+/);
+        if (fields[19]) return fields[19];
+      }
+    } catch { /* disappeared or unreadable: never fall through to ambient ps */ }
+    return undefined;
+  }
+  const ps = systemPsBin();
+  if (!ps) return undefined;
   try {
     const started = execFileSync(
-      'ps',
+      ps,
       ['-o', 'lstart=', '-p', String(pid)],
-      { encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] },
+      {
+        encoding: 'utf-8',
+        timeout: 2000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: { PATH: '/usr/bin:/bin', LANG: 'C' },
+      },
     ).trim();
     return started || undefined;
   } catch {
     return undefined;
   }
+}
+
+function systemPsBin(): string | undefined {
+  for (const candidate of ['/usr/bin/ps', '/bin/ps']) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function readParentPid(pid: number): number | undefined {
+  if (process.platform === 'linux') {
+    try {
+      const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const closeParen = raw.lastIndexOf(')');
+      if (closeParen < 0) return undefined;
+      const fields = raw.slice(closeParen + 2).trim().split(/\s+/);
+      const parent = Number(fields[1]);
+      return Number.isSafeInteger(parent) && parent > 0 ? parent : undefined;
+    } catch { return undefined; }
+  }
+  const ps = systemPsBin();
+  if (!ps) return undefined;
+  try {
+    const out = execFileSync(ps, ['-o', 'ppid=', '-p', String(pid)], {
+      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+      env: { PATH: '/usr/bin:/bin', LANG: 'C' },
+    }).trim();
+    const parent = Number(out);
+    return Number.isSafeInteger(parent) && parent > 0 ? parent : undefined;
+  } catch { return undefined; }
 }
 
 function parseIdentityBoundSessionMarker(raw: string): IdentityBoundSessionMarker {
@@ -115,11 +168,9 @@ export function findAuthenticatedAncestorSessionContext(
         procStart: marker.procStart,
       };
     }
-    try {
-      const out = execSync(`ps -o ppid= -p ${pid}`, { encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      pid = parseInt(out, 10);
-      if (isNaN(pid)) break;
-    } catch { break; }
+    const parent = readParentPid(pid);
+    if (!parent) break;
+    pid = parent;
   }
   return null;
 }
@@ -140,11 +191,9 @@ export function findAncestorSessionContext(dataDir: string, startPid: number = p
     if (existsSync(markerPath)) {
       try { return parseSessionMarker(readFileSync(markerPath, 'utf-8')); } catch { return { sessionId: '' }; }
     }
-    try {
-      const out = execSync(`ps -o ppid= -p ${pid}`, { encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      pid = parseInt(out, 10);
-      if (isNaN(pid)) break;
-    } catch { break; }
+    const parent = readParentPid(pid);
+    if (!parent) break;
+    pid = parent;
   }
   return null;
 }

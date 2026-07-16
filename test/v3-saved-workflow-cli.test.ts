@@ -171,6 +171,17 @@ describe('Saved Workflow CLI scope authorization', () => {
       .toThrow(/飞书中显式发送.*daemon 校验 canOperate/);
     expect(() => assertAgentFacingSaveScope(['last', '周报', '--ack-unsafe']))
       .toThrow(/agent 不能代替用户确认.*用户在飞书中显式发送/);
+    expect(() => assertAgentFacingSaveScope(['last', '周报', '--distill']))
+      .toThrow(/参数蒸馏必须由用户在飞书中显式发送.*提案卡片中确认/);
+    expect(() => assertAgentFacingSaveScope(['last', '周报', '--distill=true']))
+      .toThrow(/参数蒸馏必须由用户在飞书中显式发送/);
+    expect(() => assertAgentFacingSaveScope(['last', '周报', '--distil']))
+      .not.toThrow();
+    expect(() => assertAgentFacingSaveScope(['last', '周报', '--workflow-id']))
+      .toThrow(/--workflow-id 缺少值/);
+    expect(() => assertAgentFacingSaveScope([
+      'last', '周报', '--workflow-id=wf_test', '--allow-draft', '--json',
+    ])).not.toThrow();
   });
 
   it('rejects appending a revision to an existing global definition', async () => {

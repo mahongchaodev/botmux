@@ -47,6 +47,11 @@ import {
   type V3RunSaveCardHandlerDeps,
 } from './v3-run-save-card-handler.js';
 import type { V3RunSaveActionValue } from './v3-run-save-card.js';
+import {
+  handleV3DistillationAction,
+  isV3DistillationAction,
+  type V3DistillationCardHandlerDeps,
+} from './v3-distillation-card-handler.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { buildClosedSessionCard } from '../../core/closed-session-card.js';
@@ -94,6 +99,8 @@ export interface CardHandlerDeps {
   v3RevisitGrantDeps?: V3RevisitGrantCardHandlerDeps;
   /** v3 成功终态卡的「保存复用」动作。 */
   v3RunSaveDeps?: V3RunSaveCardHandlerDeps;
+  /** v3 参数蒸馏提案的接受/拒绝动作。 */
+  v3DistillationDeps?: V3DistillationCardHandlerDeps;
   /** VC meeting invite/consumer card actions. Implemented in daemon to
    *  keep meeting sessions, tombstones, and listener-group state single-owned. */
   vcMeetingCardAction?: (data: CardActionData, larkAppId: string) => Promise<any>;
@@ -1236,6 +1243,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       operatorOpenId,
       larkAppId,
       deps.v3RunSaveDeps,
+    );
+  }
+  if (isV3DistillationAction(value?.action)) {
+    if (!deps.v3DistillationDeps) return;
+    return await handleV3DistillationAction(
+      value,
+      operatorOpenId,
+      larkAppId,
+      cardMessageId,
+      deps.v3DistillationDeps,
     );
   }
 

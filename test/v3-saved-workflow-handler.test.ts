@@ -44,7 +44,7 @@ describe('Saved Workflow IM policy', () => {
   it.each([
     { kind: 'list' } as const,
     { kind: 'show', ref: 'Weekly Report' } as const,
-    { kind: 'save', source: 'last', global: false, acknowledgeUnsafeLiterals: false } as const,
+    { kind: 'save', source: 'last', global: false, acknowledgeUnsafeLiterals: false, distill: false } as const,
     { kind: 'run', ref: 'Weekly Report', rawParams: {} } as const,
   ])('charges every billable accepted verb exactly once: $kind', async (command) => {
     const quota = vi.fn().mockResolvedValue(true);
@@ -67,7 +67,7 @@ describe('Saved Workflow IM policy', () => {
   it('requires operate permission before publishing global scope', async () => {
     const quota = vi.fn().mockResolvedValue(true);
     await expect(authorizeV3SavedWorkflowInvocation(
-      { kind: 'save', source: 'last', global: true, acknowledgeUnsafeLiterals: false },
+      { kind: 'save', source: 'last', global: true, acknowledgeUnsafeLiterals: false, distill: false },
       { canPublishGlobal: () => false, consumeMessageQuotaOnce: quota },
     )).resolves.toEqual({ ok: false, reason: 'global_requires_operate' });
     expect(quota).not.toHaveBeenCalled();
@@ -158,7 +158,7 @@ describe('Saved Workflow execution seam', () => {
       ...EXECUTION_BASE,
       command: {
         kind: 'save', source: 'last', displayName: 'Weekly Report', global: false,
-        acknowledgeUnsafeLiterals: true,
+        acknowledgeUnsafeLiterals: true, distill: false,
       },
     }, deps);
     expect(result.effect).toBe('save_committed');
@@ -166,6 +166,21 @@ describe('Saved Workflow execution seam', () => {
     expect(result.message).toContain('scope: 本群');
     expect(deps.saveRun).toHaveBeenCalledTimes(1);
     expect(deps.saveRun).toHaveBeenCalledWith(expect.objectContaining({ acknowledgeUnsafeLiterals: true }));
+  });
+
+  it('never degrades a distillation save into the exact-save execution seam', async () => {
+    const deps = executionDeps();
+    const result = await executeV3SavedWorkflowCommand({
+      ...EXECUTION_BASE,
+      command: {
+        kind: 'save', source: 'last', displayName: 'Parameterized report', global: false,
+        acknowledgeUnsafeLiterals: false, distill: true,
+      },
+    }, deps);
+    expect(result).toMatchObject({ effect: 'failed' });
+    expect(result.message).toContain('参数蒸馏必须由飞书提案审批链处理');
+    expect(deps.resolveOwnedRun).not.toHaveBeenCalled();
+    expect(deps.saveRun).not.toHaveBeenCalled();
   });
 
   it('labels global Saved Workflow scope as current-bot global', async () => {
@@ -188,7 +203,7 @@ describe('Saved Workflow execution seam', () => {
       ...EXECUTION_BASE,
       command: {
         kind: 'save', source: 'last', displayName: 'Shared Report', global: true,
-        acknowledgeUnsafeLiterals: false,
+        acknowledgeUnsafeLiterals: false, distill: false,
       },
     }, deps);
     expect(result.message).toContain('scope: 当前 Bot 全局');
@@ -326,7 +341,7 @@ describe('Saved Workflow execution seam', () => {
     const result = await executeV3SavedWorkflowCommand({
       ...EXECUTION_BASE,
       command: {
-        kind: 'save', source: 'last', global: false, acknowledgeUnsafeLiterals: false,
+        kind: 'save', source: 'last', global: false, acknowledgeUnsafeLiterals: false, distill: false,
       },
     }, deps);
     expect(result.effect).toBe('failed');

@@ -52,12 +52,13 @@ import {
   loadAuthorizedV3Run,
   makeSavedDefinitionRunEnvelope,
   publishRunEnvelopeOnce,
+  type LoadedAuthorizedV3Run,
   type V3SavedDefinitionRunEnvelope,
 } from './run-envelope.js';
 import type { BotSnapshot, Spec } from './contract.js';
 import {
   assertSavedWorkflowTemplateBindings,
-  savedWorkflowBindingsForNode,
+  collectSavedWorkflowTemplateBindings,
 } from './template-bindings.js';
 
 export interface CompiledSavedWorkflowFromRun {
@@ -100,6 +101,17 @@ export interface CompileSavedWorkflowFromRunOptions {
   acknowledgeUnsafeLiterals?: boolean;
 }
 
+export type BuildSavedWorkflowRevisionBaselineOptions = Pick<
+  CompileSavedWorkflowFromRunOptions,
+  'inputs' | 'contextRefs' | 'specStatus'
+>;
+
+export interface BuiltSavedWorkflowRevisionBaseline {
+  displayName: string;
+  revision: SavedWorkflowRevisionDraft;
+  lintWarnings: string[];
+}
+
 function cloneNodes(nodes: V3Node[]): V3Node[] {
   return JSON.parse(JSON.stringify(nodes)) as V3Node[];
 }
@@ -129,7 +141,11 @@ function canonicalizeNodeBots(
   });
 }
 
-function lintReusableText(value: unknown, path: string, warnings: string[]): void {
+export function collectSavedWorkflowReusableTextWarnings(
+  value: unknown,
+  path: string,
+  warnings: string[],
+): void {
   if (typeof value === 'string') {
     if (/(?:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*[^\s"']{6,}/i.test(value)) {
       warnings.push(`${path} looks like an embedded secret`);
@@ -140,58 +156,41 @@ function lintReusableText(value: unknown, path: string, warnings: string[]): voi
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => lintReusableText(item, `${path}[${index}]`, warnings));
+    value.forEach((item, index) =>
+      collectSavedWorkflowReusableTextWarnings(item, `${path}[${index}]`, warnings));
     return;
   }
   if (value && typeof value === 'object') {
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      lintReusableText(child, `${path}.${key}`, warnings);
+      collectSavedWorkflowReusableTextWarnings(child, `${path}.${key}`, warnings);
     }
   }
 }
 
-/** Exact run → revision draft. No heuristic literal replacement. */
-export function compileSavedWorkflowFromRun(
-  runDir: string,
-  opts: CompileSavedWorkflowFromRunOptions = {},
-): CompiledSavedWorkflowFromRun {
-  const loaded = loadAuthorizedV3Run(runDir, {
-    allowedSources: ['ad_hoc', 'saved_definition', 'legacy_v3'],
-  });
+/**
+ * Pure exact-revision compiler over one already authenticated/digest-checked
+ * run read. It performs no path or journal IO, so callers cannot accidentally
+ * rebuild a baseline from a different set of source bytes.
+ */
+export function buildSavedWorkflowRevisionBaseline(
+  loaded: LoadedAuthorizedV3Run,
+  opts: BuildSavedWorkflowRevisionBaselineOptions = {},
+): BuiltSavedWorkflowRevisionBaseline {
   if (!loaded.spec) throw new Error('cannot save workflow: source run has no validated spec.json');
   if (loaded.botSnapshots === undefined) {
     throw new Error('cannot save workflow: source run has no pinned bots.snapshot.json');
   }
   const snapshots = parseFrozenBotSnapshots(loaded.botSnapshots, loaded.dag);
-  const journalPath = join(runDir, 'journal.ndjson');
-  if (!existsSync(journalPath)) throw new Error('cannot save workflow: source run has not started');
-  const status = materialize(readJournal(journalPath)).runStatus;
-  if (status !== 'succeeded' && status !== 'failed' && status !== 'blocked') {
-    throw new Error(`cannot save workflow: source run is not terminal (status=${status})`);
-  }
-  if (status !== 'succeeded' && opts.allowDraft !== true) {
-    throw new Error(`cannot publish workflow from a ${status} run; pass allowDraft to save it as draft`);
-  }
-
   const normalizedNodes = canonicalizeNodeBots(cloneNodes(loaded.dag.nodes), snapshots);
   const dagTemplate = validateDagTemplate({ nodes: normalizedNodes });
   const { runId: _runId, ...specWithoutRunId } = loaded.spec;
   const specTemplate = validateSpecTemplate(specWithoutRunId);
   const inputs = opts.inputs ?? {};
-  const contextRefs = opts.contextRefs ?? [...new Set(
-    dagTemplate.nodes.flatMap((node) => savedWorkflowBindingsForNode(node).context),
-  )];
-  // Save and run must enforce the exact same template grammar. Otherwise an
-  // ordinary goal containing `${HOME}` (or an undeclared `${params.x}`) could
-  // be saved successfully but become an un-runnable definition with no P0 edit
-  // path. Fail while the source run is still actionable.
+  const contextRefs = opts.contextRefs ?? collectSavedWorkflowTemplateBindings(dagTemplate).context;
   assertSavedWorkflowTemplateBindings(dagTemplate, inputs, contextRefs);
   const lintWarnings: string[] = [];
-  lintReusableText(dagTemplate, 'dagTemplate', lintWarnings);
-  lintReusableText(specTemplate, 'specTemplate', lintWarnings);
-  if (lintWarnings.length > 0 && opts.acknowledgeUnsafeLiterals !== true) {
-    throw new SavedWorkflowUnsafeLiteralError(lintWarnings);
-  }
+  collectSavedWorkflowReusableTextWarnings(dagTemplate, 'dagTemplate', lintWarnings);
+  collectSavedWorkflowReusableTextWarnings(specTemplate, 'specTemplate', lintWarnings);
   const revision: SavedWorkflowRevisionDraft = {
     sourceRunId: loaded.envelope.runId,
     inputs,
@@ -204,9 +203,35 @@ export function compileSavedWorkflowFromRun(
       sideEffects: computeSavedWorkflowSideEffects(dagTemplate),
     },
   };
+  return { displayName: loaded.spec.title, revision, lintWarnings };
+}
+
+/** Exact run → revision draft. No heuristic literal replacement. */
+export function compileSavedWorkflowFromRun(
+  runDir: string,
+  opts: CompileSavedWorkflowFromRunOptions = {},
+): CompiledSavedWorkflowFromRun {
+  const loaded = loadAuthorizedV3Run(runDir, {
+    allowedSources: ['ad_hoc', 'saved_definition', 'legacy_v3'],
+  });
+  const journalPath = join(runDir, 'journal.ndjson');
+  if (!existsSync(journalPath)) throw new Error('cannot save workflow: source run has not started');
+  const status = materialize(readJournal(journalPath)).runStatus;
+  if (status !== 'succeeded' && status !== 'failed' && status !== 'blocked') {
+    throw new Error(`cannot save workflow: source run is not terminal (status=${status})`);
+  }
+  if (status !== 'succeeded' && opts.allowDraft !== true) {
+    throw new Error(`cannot publish workflow from a ${status} run; pass allowDraft to save it as draft`);
+  }
+
+  const built = buildSavedWorkflowRevisionBaseline(loaded, opts);
+  const { lintWarnings } = built;
+  if (lintWarnings.length > 0 && opts.acknowledgeUnsafeLiterals !== true) {
+    throw new SavedWorkflowUnsafeLiteralError(lintWarnings);
+  }
   return {
-    displayName: loaded.spec.title,
-    revision,
+    displayName: built.displayName,
+    revision: built.revision,
     sourceStatus: status,
     publish: status === 'succeeded',
     lintWarnings,

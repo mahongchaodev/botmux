@@ -14,6 +14,8 @@ export type V3SavedWorkflowCommand =
       displayName?: string;
       global: boolean;
       acknowledgeUnsafeLiterals: boolean;
+      /** Ask the host to propose a parameterized definition before publishing. */
+      distill: boolean;
     }
   | { kind: 'run'; ref: string; rawParams: Record<string, string> }
   | { kind: 'cancel'; runId: string }
@@ -70,20 +72,51 @@ export function parseV3SavedWorkflowCommand(content: string): V3SavedWorkflowCom
       return { kind: 'invalid', error: 'save 的 runId 非法' };
     }
     const rest = tokens.slice(source === 'last' && firstSaveArg?.startsWith('--') ? 1 : 2);
+    const supportedFlags = new Set(['--global', '--ack-unsafe', '--distill']);
+    const malformedDistill = rest.find((token) =>
+      token === '--distil' || token.startsWith('--distill='));
+    if (malformedDistill) {
+      return { kind: 'invalid', error: `save 不支持参数：${malformedDistill}` };
+    }
     const global = rest.includes('--global');
     const acknowledgeUnsafeLiterals = rest.includes('--ack-unsafe');
-    const nameTokens = rest.filter((token) => token !== '--global' && token !== '--ack-unsafe');
+    const distill = rest.includes('--distill');
+    // Exact-save historically allowed tokens beginning with `--` in a
+    // multi-word display name. Preserve that surface. Once `--distill` opts
+    // into the stricter model-backed path, however, every flag must be known
+    // so a typo can never silently alter the requested operation.
+    const unknownFlag = rest.find((token) => token.startsWith('--') && !supportedFlags.has(token));
+    if (distill && unknownFlag) {
+      return { kind: 'invalid', error: `save 不支持参数：${unknownFlag}` };
+    }
+    const nameTokens = rest.filter((token) => !supportedFlags.has(token));
     const displayName = nameTokens.join(' ').trim();
+    if (distill && !displayName) {
+      return {
+        kind: 'invalid',
+        error: '参数蒸馏必须显式指定名称：/workflow save [last|runId] <名称> --distill',
+      };
+    }
+    if (distill && global) {
+      return { kind: 'invalid', error: '参数蒸馏 P0 只支持保存到本群，不能同时使用 --global' };
+    }
+    if (distill && acknowledgeUnsafeLiterals) {
+      return { kind: 'invalid', error: '参数蒸馏不接受 --ack-unsafe；疑似敏感内容会直接拒绝固化' };
+    }
     return {
       kind: 'save',
       source,
       ...(displayName ? { displayName } : {}),
       global,
       acknowledgeUnsafeLiterals,
+      distill,
     };
   }
 
-  const runTokens = tokens.slice(1);
+  const runTokens = tokenizeWorkflowRunTail(tail.slice(tokens[0]!.length).trim());
+  if (!runTokens) {
+    return { kind: 'invalid', error: 'run 参数引号未闭合；多词值请写成 key="multi word"' };
+  }
   const firstParamIndex = runTokens.findIndex((token) => token.includes('='));
   const refTokens = firstParamIndex === -1 ? runTokens : runTokens.slice(0, firstParamIndex);
   const ref = refTokens.join(' ').trim();
@@ -115,11 +148,47 @@ export function parseV3SavedWorkflowCommand(content: string): V3SavedWorkflowCom
   return { kind: 'run', ref, rawParams };
 }
 
+/** Minimal IM quoting: preserve ordinary bytes, but let a value contain spaces
+ * via `key="..."` or `key='...'`. This is intentionally not a shell parser and
+ * never performs expansion or command substitution. */
+function tokenizeWorkflowRunTail(value: string): string[] | undefined {
+  const tokens: string[] = [];
+  let token = '';
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i]!;
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      } else if (quote === '"' && char === '\\' && (value[i + 1] === '"' || value[i + 1] === '\\')) {
+        token += value[++i]!;
+      } else {
+        token += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/\s/.test(char)) {
+      if (token) {
+        tokens.push(token);
+        token = '';
+      }
+    } else {
+      token += char;
+    }
+  }
+  if (quote) return undefined;
+  if (token) tokens.push(token);
+  return tokens;
+}
+
 export function v3SavedWorkflowUsage(): string {
   return [
     'Saved Workflow：',
     '/workflow save [last|runId] [名称] [--global（当前 Bot 全局）] [--ack-unsafe]',
-    '/workflow run <名称或 workflowId> [key=value ...]',
+    '/workflow save [last|runId] <名称> --distill（参数化后保存到本群）',
+    '/workflow run <名称或 workflowId> [key=value ...]（多词值可用 key="multi word"）',
     '/workflow cancel <runId>',
     '/workflow list',
     '/workflow show <名称或 workflowId>',
