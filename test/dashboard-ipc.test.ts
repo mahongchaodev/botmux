@@ -1013,6 +1013,9 @@ describe('PUT /api/bot-riff config safety (finding H)', () => {
           jwt: 'SECRET-JWT',
           env: { API_KEY: 'SECRET-ENV' },
           logLevel: 'verbose',
+          // 已移出 UI 的两个字段：UI 保存省略它们时旧值必须原样保留
+          sandboxCluster: 'boe',
+          injectStatusLines: false,
         },
       }], null, 2));
       loadBotConfigs().forEach((c: any) => registerBot(c));
@@ -1031,7 +1034,7 @@ describe('PUT /api/bot-riff config safety (finding H)', () => {
       const res = await fetch(`${base}/api/bot-riff`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ riff: JSON.stringify({ baseUrl: 'https://riff-new.example', agent: 'codex', injectStatusLines: false }) }),
+        body: JSON.stringify({ riff: JSON.stringify({ baseUrl: 'https://riff-new.example', agent: 'codex' }) }),
       });
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -1043,11 +1046,13 @@ describe('PUT /api/bot-riff config safety (finding H)', () => {
       expect(stored).toMatchObject({
         baseUrl: 'https://riff-new.example',
         agent: 'codex',
-        injectStatusLines: false,
         templateId: 'tpl-1',
         jwt: 'SECRET-JWT',
         env: { API_KEY: 'SECRET-ENV' },
         logLevel: 'verbose',
+        // UI 已不回写这两个字段——存量值按隐藏字段保留
+        sandboxCluster: 'boe',
+        injectStatusLines: false,
       });
     });
   });

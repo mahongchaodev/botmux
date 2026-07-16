@@ -2344,7 +2344,7 @@ function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
 }
 
 /** Agents supported by the riff runner (free text still allowed for new ones). */
-const RIFF_AGENT_SUGGESTIONS = ['aiden', 'aiden-claude', 'codex', 'opencode'];
+const RIFF_AGENT_SUGGESTIONS = ['codex', 'aiden', 'aiden-claude', 'opencode'];
 
 function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCliSelection?: () => Promise<boolean> }) {
   const tr = useT();
@@ -2353,8 +2353,6 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
   const [agent, setAgent] = useState(typeof riff.agent === 'string' ? riff.agent : '');
   const [model, setModel] = useState(typeof riff.model === 'string' ? riff.model : '');
   const [jwtEnv, setJwtEnv] = useState(typeof riff.jwtEnv === 'string' ? riff.jwtEnv : '');
-  const [sandboxCluster, setSandboxCluster] = useState(typeof riff.sandboxCluster === 'string' ? riff.sandboxCluster : '');
-  const [injectStatusLines, setInjectStatusLines] = useState(riff.injectStatusLines !== false);
   const [systemPrompt, setSystemPrompt] = useState(typeof riff.systemPrompt === 'string' ? riff.systemPrompt : '');
   const [setupCommands, setSetupCommands] = useState(
     Array.isArray(riff.setupCommands) ? riff.setupCommands.join('\n') : '',
@@ -2368,8 +2366,6 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
     setAgent(typeof r.agent === 'string' ? r.agent : '');
     setModel(typeof r.model === 'string' ? r.model : '');
     setJwtEnv(typeof r.jwtEnv === 'string' ? r.jwtEnv : '');
-    setSandboxCluster(typeof r.sandboxCluster === 'string' ? r.sandboxCluster : '');
-    setInjectStatusLines(r.injectStatusLines !== false);
     setSystemPrompt(typeof r.systemPrompt === 'string' ? r.systemPrompt : '');
     setSetupCommands(Array.isArray(r.setupCommands) ? r.setupCommands.join('\n') : '');
   }, [props.bot.riff]);
@@ -2383,10 +2379,6 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
       if (agent.trim()) config.agent = agent.trim();
       if (model.trim()) config.model = model.trim();
       if (jwtEnv.trim()) config.jwtEnv = jwtEnv.trim();
-      if (sandboxCluster.trim()) config.sandboxCluster = sandboxCluster.trim();
-      // 显式持久化布尔——省略字段时后端按“开启”解释（!== false），
-      // 只存 true 会导致该开关永远关不掉。
-      config.injectStatusLines = injectStatusLines;
       if (systemPrompt.trim()) config.systemPrompt = systemPrompt.trim();
       if (setupCommands.trim()) {
         config.setupCommands = setupCommands.split('\n').map(s => s.trim()).filter(Boolean);
@@ -2446,17 +2438,6 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCl
           <input type="text" data-input="riff-jwt-env" placeholder={tr('botDefaults.riffJwtEnvPlaceholder')} value={jwtEnv} disabled={busy} onChange={e => setJwtEnv(e.currentTarget.value)} />
         </label>
       </div>
-      <div className="bd-row">
-        <label>
-          <span>{tr('botDefaults.riffSandboxCluster')}</span>
-          <input type="text" data-input="riff-sandbox-cluster" placeholder={tr('botDefaults.riffSandboxClusterPlaceholder')} value={sandboxCluster} disabled={busy} onChange={e => setSandboxCluster(e.currentTarget.value)} />
-        </label>
-      </div>
-      <label className="toggle-row">
-        <input type="checkbox" data-input="riff-inject-status-lines" checked={injectStatusLines} disabled={busy} onChange={e => setInjectStatusLines(e.currentTarget.checked)} />
-        <span className="switch" aria-hidden="true" />
-        <span className="toggle-tx"><strong><FieldTitle help={tr('botDefaults.riffInjectStatusLinesHelp')}>{tr('botDefaults.riffInjectStatusLines')}</FieldTitle></strong></span>
-      </label>
       <div className="bd-row">
         <label>
           <span>{tr('botDefaults.riffSystemPrompt')}</span>
