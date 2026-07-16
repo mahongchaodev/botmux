@@ -399,37 +399,27 @@ export function parseZellijServerProcs(psOut: string): ZellijServerProc[] {
 }
 
 /**
- * Rename-proof server lookup: `zellij action rename-session` (what the
- * session-manager plugin drives) renames the session's SOCKET FILE, but the
- * server's argv AND the kernel's bound-address string (/proc/net/unix) keep
- * the spawn-time path forever (verified live on 0.44.1). So a renamed session
- * is visible in `list-sessions` under its new name while no server argv ends
- * with that name — the argv fast path misses and /adopt used to skip the
- * whole session. There is no passive name→pid mapping left; instead we
- * actively probe: connecting to the renamed socket file makes the server
- * accept() a socket that appears in /proc/net/unix under the STALE bound
- * path — the probe child diffs row counts across the connect and prints the
- * revealed spawn-time path, which we match back to a server argv. Exact, no
- * name guessing. Linux-only (/proc); on other platforms the argv fast path is
- * the whole behavior, as before.
+ * Session-name → server-pid lookup, rename-proof and reuse-proof.
+ *
+ * Why there is NO argv "fast path" on Linux (Codex review, PR #468):
+ * `zellij action rename-session` (what the session-manager plugin drives)
+ * renames the session's SOCKET FILE, but the server's argv and the kernel's
+ * bound-address string (/proc/net/unix) keep the spawn-time path forever, and
+ * a freed name is REUSABLE by new spawns or other renames (verified live on
+ * 0.44.1). So ANY lookup keyed on names — argv tail, bound path, even
+ * "unique candidate + file exists" — can bind a session's name to a DIFFERENT
+ * session's server (spawn old → rename → spawn old again; or rename another
+ * session TO the freed name). Misbinding crosses sessions in adopt discovery
+ * / validation / backend pane-pid lookup, so correctness demands per-lookup
+ * causal attribution: the zellij-socket-probe child connects to the socket
+ * FILE and identifies which candidate server pid accept()ed that specific
+ * connection (see its header for the protocol). No file → session gone →
+ * null. Ambiguity → one retry → null (宁缺勿错).
+ *
+ * Non-Linux keeps the legacy argv-tail match (no /proc to attribute with);
+ * the daemon runs on Linux, and renamed/reused names were never supported
+ * there.
  */
-function findServerPidByProbe(sessionName: string, servers: ZellijServerProc[]): number | null {
-  if (process.platform !== 'linux') return null;
-  const probeScript = fileURLToPath(new URL('./zellij-socket-probe.js', import.meta.url));
-  for (const dir of [...new Set(servers.map(s => dirname(s.socketPath)))]) {
-    const sock = join(dir, sessionName);
-    if (!existsSync(sock)) continue;
-    const r = spawnSync(process.execPath, [probeScript, sock], {
-      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000,
-    });
-    if (r.status !== 0) continue;
-    const bound = (r.stdout ?? '').trim();
-    const hit = servers.find(s => s.socketPath === bound);
-    if (hit) return hit.pid;
-  }
-  return null;
-}
-
 export function findServerPid(sessionName: string): number | null {
   let servers: ZellijServerProc[];
   try {
@@ -441,13 +431,33 @@ export function findServerPid(sessionName: string): number | null {
     });
     servers = parseZellijServerProcs(out);
   } catch { return null; /* ps unavailable */ }
-  // Fast path: argv still ends with the session name (never renamed).
-  const suffix = new RegExp(`/${escapeRe(sessionName)}$`);
-  for (const s of servers) {
-    if (suffix.test(s.socketPath)) return s.pid;
+  if (servers.length === 0) return null;
+
+  if (process.platform !== 'linux') {
+    const suffix = new RegExp(`/${escapeRe(sessionName)}$`);
+    return servers.find(s => suffix.test(s.socketPath))?.pid ?? null;
   }
-  // Renamed session: resolve via an active socket probe.
-  return findServerPidByProbe(sessionName, servers);
+
+  const probeScript = fileURLToPath(new URL('./zellij-socket-probe.js', import.meta.url));
+  for (const dir of [...new Set(servers.map(s => dirname(s.socketPath)))]) {
+    const sock = join(dir, sessionName);
+    if (!existsSync(sock)) continue;
+    const candidates = servers.filter(s => dirname(s.socketPath) === dir);
+    // One retry on ambiguity (exit 3): a concurrent zellij client can race a
+    // single window, but not two in a row. Hard failures don't retry.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = spawnSync(process.execPath, [probeScript, sock, ...candidates.map(c => String(c.pid))], {
+        encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000,
+      });
+      if (r.status === 0) {
+        const pid = Number((r.stdout ?? '').trim());
+        if (candidates.some(c => c.pid === pid)) return pid;
+        break;
+      }
+      if (r.status !== 3) break;
+    }
+  }
+  return null;
 }
 
 /**

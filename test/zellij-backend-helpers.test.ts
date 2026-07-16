@@ -7,8 +7,9 @@ import {
   parseZellijServerProcs,
 } from '../src/adapters/backend/zellij-backend.js';
 import {
-  unixPathCounts,
-  grownPaths,
+  unixInodesUnderDir,
+  socketInodesFromFdLinks,
+  attributeOwners,
 } from '../src/adapters/backend/zellij-socket-probe.js';
 import {
   parseZellijVersion,
@@ -107,35 +108,70 @@ describe('parseZellijServerProcs', () => {
 
 describe('zellij-socket-probe pure helpers', () => {
   // Real /proc/net/unix shape (verified live): the bound path column carries
-  // the SPAWN-TIME name; listening + accepted rows share it; client ends have
-  // no path column. Connecting to the RENAMED socket file makes the stale
-  // path's row count grow — that diff is the name→server mapping.
+  // the SPAWN-TIME name (frozen across renames); listening + accepted rows
+  // share it; client ends have no path column.
   const DIR = '/run/user/0/zellij/contract_version_1';
-  const BEFORE = [
+  const UNIX_TABLE = [
     'Num       RefCount Protocol Flags    Type St Inode Path',
-    `ffff0001: 00000002 00000000 00010000 0001 01 111222 ${DIR}/zadopt-ren`,
+    `ffff0001: 00000002 00000000 00010000 0001 01 111222 ${DIR}/old`,
+    `ffff0002: 00000003 00000000 00000000 0001 03 111333 ${DIR}/old`,
     `ffff0003: 00000002 00000000 00010000 0001 01 444555 ${DIR}/other-sess`,
     'ffff0004: 00000002 00000000 00000000 0001 03 666777',
     'ffff0005: 00000002 00000000 00010000 0001 01 888999 /run/user/0/other-app/sock',
   ].join('\n');
-  const AFTER = [
-    BEFORE,
-    `ffff0006: 00000003 00000000 00000000 0001 03 111333 ${DIR}/zadopt-ren`,
-  ].join('\n');
 
-  it('counts rows per bound path scoped to the socket dir', () => {
-    const counts = unixPathCounts(BEFORE, DIR);
-    expect(counts.get(`${DIR}/zadopt-ren`)).toBe(1);
-    expect(counts.get(`${DIR}/other-sess`)).toBe(1);
-    expect(counts.has('/run/user/0/other-app/sock')).toBe(false);
+  it('unixInodesUnderDir collects inodes bound under the socket dir only', () => {
+    const inodes = unixInodesUnderDir(UNIX_TABLE, DIR);
+    expect([...inodes].sort()).toEqual(['111222', '111333', '444555']);
   });
 
-  it('reveals exactly the stale bound path whose count grew on connect', () => {
-    const grown = grownPaths(unixPathCounts(BEFORE, DIR), unixPathCounts(AFTER, DIR));
-    expect(grown).toEqual([`${DIR}/zadopt-ren`]);
+  it('socketInodesFromFdLinks keeps socket fds only', () => {
+    const s = socketInodesFromFdLinks(['socket:[111333]', '/dev/null', 'pipe:[42]', 'socket:[999]']);
+    expect([...s].sort()).toEqual(['111333', '999']);
   });
 
-  it('reports nothing when no accept happened', () => {
-    expect(grownPaths(unixPathCounts(BEFORE, DIR), unixPathCounts(BEFORE, DIR))).toEqual([]);
+  // The causal core (Codex finding #2 on PR #468): a pid owns the probed
+  // socket iff it gained a dir-bound socket inode during our hold AND that
+  // inode vanished after our close. Set-up: two servers A(447407)/B(447915)
+  // whose spawn-time paths are BOTH ".../old" (rename + name reuse).
+  describe('attributeOwners', () => {
+    const PIDS = [447407, 447915];
+    const bound = new Set(['111333', '444555']);
+    const snap = (m: Record<number, string[]>) => new Map(Object.entries(m).map(([k, v]) => [Number(k), new Set(v)]));
+
+    it('attributes the pid whose accepted socket appeared then vanished', () => {
+      const before = snap({ 447407: ['1'], 447915: ['2'] });
+      const during = snap({ 447407: ['1'], 447915: ['2', '111333'] }); // B accepted us
+      const final = snap({ 447407: ['1'], 447915: ['2'] });            // gone after our close
+      expect(attributeOwners(PIDS, before, during, final, bound)).toEqual([447915]);
+    });
+
+    it('excludes a sibling whose unrelated client stays connected past our close', () => {
+      const before = snap({ 447407: ['1'], 447915: ['2'] });
+      const during = snap({ 447407: ['1', '444555'], 447915: ['2', '111333'] }); // A gained a long-lived client too
+      const final = snap({ 447407: ['1', '444555'], 447915: ['2'] });            // A's client still there
+      expect(attributeOwners(PIDS, before, during, final, bound)).toEqual([447915]);
+    });
+
+    it('yields two candidates (ambiguous → fail-closed) when a sibling short client races the window', () => {
+      const before = snap({ 447407: ['1'], 447915: ['2'] });
+      const during = snap({ 447407: ['1', '444555'], 447915: ['2', '111333'] });
+      const final = snap({ 447407: ['1'], 447915: ['2'] }); // both vanished
+      expect(attributeOwners(PIDS, before, during, final, bound)).toHaveLength(2);
+    });
+
+    it('yields nothing when the accept was not yet visible (slow server → fail-closed, not sibling)', () => {
+      const before = snap({ 447407: ['1'], 447915: ['2'] });
+      const during = snap({ 447407: ['1'], 447915: ['2'] }); // our accept invisible
+      const final = snap({ 447407: ['1'], 447915: ['2'] });
+      expect(attributeOwners(PIDS, before, during, final, bound)).toEqual([]);
+    });
+
+    it('ignores gained fds that are not dir-bound sockets (random files/pipes)', () => {
+      const before = snap({ 447407: ['1'] });
+      const during = snap({ 447407: ['1', '999'] }); // gained socket not bound under dir
+      const final = snap({ 447407: ['1'] });
+      expect(attributeOwners([447407], before, during, final, bound)).toEqual([]);
+    });
   });
 });
