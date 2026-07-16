@@ -1000,6 +1000,45 @@ function canUseSubstituteDirectBinding(larkAppId: string, senderOpenId: string |
     || !!cfg.targets?.some(t => t.openId === senderOpenId);
 }
 
+function resolveSubstituteDirectMatch(
+  larkAppId: string,
+  message: any,
+  chatId: string,
+  targetKey: string | undefined,
+): {
+  trigger: import('../../types.js').SubstituteTrigger;
+  direct: ReturnType<typeof getSubstituteDirectChatByTarget>;
+} | undefined {
+  const cfg = getBot(larkAppId).config.substituteMode;
+  if (!cfg?.enabled || !cfg.targets?.length) return undefined;
+  const mentions = extractMentionIdentities(message);
+  const identityMatches = cfg.targets.filter(target =>
+    mentions.some(mention => substituteTargetMatchesMention(target, mention)));
+  const nameMatches = cfg.targets.filter(target =>
+    !identityMatches.includes(target)
+    && !!target.name
+    && mentions.some(mention => mention.name === target.name));
+  for (const target of [...identityMatches, ...nameMatches]) {
+    const direct = getSubstituteDirectChatByTarget(larkAppId, target, chatId, targetKey);
+    if (!direct?.chat || direct.chat.mode !== 'direct') continue;
+    if (!identityMatches.includes(target)
+        && (!target.openId || direct.targetOpenId !== target.openId)) continue;
+    return {
+      trigger: {
+        target: {
+          name: target.name,
+          openId: target.openId,
+          userId: target.userId,
+          unionId: target.unionId,
+        },
+        disclosure: cfg.disclosure ?? 'prefix',
+      },
+      direct,
+    };
+  }
+  return undefined;
+}
+
 function mentionMatchesBot(m: any, larkAppId: string, botOpenId?: string): boolean {
   const openId = mentionOpenId(m);
   if (botOpenId && openId === botOpenId) return true;
@@ -2088,12 +2127,17 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           && chatType === 'group'
           && isSubstituteEnabledForChat(larkAppId, chatId);
         let substituteTrigger = substituteDirectEligible ? resolveSubstituteTrigger(larkAppId, message) : undefined;
+        let substituteDirectMatch: ReturnType<typeof resolveSubstituteDirectMatch>;
         if (substituteTrigger && !explicitlyMentionedThisBot) {
           const rawText = extractMessageTextForRouting(message);
           const stripped = rawText ? stripLeadingMentions(rawText.trim(), message?.mentions ?? []).trim() : '';
           if (stripped.startsWith('/')) substituteTrigger = undefined;
         }
         const directTargetKey = substituteDirectTargetKey(routing.scope, routing.anchor, chatId);
+        if (substituteDirectEligible && !substituteTrigger) {
+          substituteDirectMatch = resolveSubstituteDirectMatch(larkAppId, message, chatId, directTargetKey);
+          substituteTrigger = substituteDirectMatch?.trigger;
+        }
         if (substituteDirectEligible && !substituteTrigger && explicitlyMentionedThisBot) {
           const direct = getSubstituteDirectBotMentionChat(larkAppId, chatId, directTargetKey, substituteModeConfig?.directBotMention === true);
           if (direct?.chat.mode === 'direct') {
@@ -2126,7 +2170,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           }
         }
         if (substituteTrigger) {
-          const direct = getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId, directTargetKey);
+          const direct = substituteDirectMatch?.direct
+            ?? getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId, directTargetKey);
           logger.info(
             `[substitute-direct:${larkAppId}] lookup chat=${chatId.substring(0, 12)} ` +
             `target=${substituteTrigger.target.openId ?? substituteTrigger.target.userId ?? substituteTrigger.target.unionId ?? substituteTrigger.target.name ?? 'unknown'} ` +

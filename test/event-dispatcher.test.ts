@@ -142,8 +142,12 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   },
   getSubstituteDirectChat: (appId: string, openId: string | undefined, chatId: string | undefined) => (
     chatId
-      ? mockDirectBindings.get(directKey(appId, openId))?.chats?.[chatId]
-        ?? mockDirectBindings.get(directKey(appId, openId))?.chats?.[`chat:${chatId}`]
+      ? (() => {
+          const binding = mockDirectBindings.get(directKey(appId, openId))
+            ?? [...mockDirectBindings.values()].find((candidate: any) =>
+              candidate.larkAppId === appId && candidate.targetOpenId === openId);
+          return binding?.chats?.[chatId] ?? binding?.chats?.[`chat:${chatId}`];
+        })()
       : undefined
   ),
   getSubstituteDirectChatByDmAnchor: (appId: string, openId: string | undefined, dmMessageId: string | undefined) => {
@@ -178,7 +182,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     if (target?.openId) {
       const chats = mockDirectBindings.get(directKey(appId, target.openId))?.chats;
       const direct = chats?.[chatId] ?? chats?.[`chat:${chatId}`];
-      if (direct) return { chat: direct, substituteOpenId: target.openId };
+      if (direct) return { chat: direct, substituteOpenId: target.openId, targetOpenId: target.openId };
     }
     for (const binding of mockDirectBindings.values()) {
       if (binding.larkAppId !== appId) continue;
@@ -189,7 +193,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
         || (!!target?.name && (binding.targetName === target.name || binding.chats?.[chatId]?.targetName === target.name));
       if (!matched) continue;
       const chat = binding.chats?.[chatId] ?? binding.chats?.[`chat:${chatId}`];
-      if (chat) return { chat, substituteOpenId: binding.substituteOpenId };
+      if (chat) return { chat, substituteOpenId: binding.substituteOpenId, targetOpenId: binding.targetOpenId };
     }
     return undefined;
   },
@@ -2787,6 +2791,56 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     await flushEventWork();
 
     expect(mockSendUserMessage).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: display-name fallback requires a binding target identity', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_owner'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_owner',
+      targetOpenId: 'ou_sub',
+      targetName: 'Sub Person',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-direct-name-fallback',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { user_id: 'u_mismatch' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendUserMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'ou_sub',
+      expect.stringContaining('@Sub Person help with this'),
+      'text',
+    );
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });

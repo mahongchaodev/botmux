@@ -238,13 +238,13 @@ export function getSubstituteDirectChatByTarget(
   target: { openId?: string; userId?: string; unionId?: string; name?: string } | undefined,
   chatId: string | undefined,
   targetKey?: string,
-): { chat: SubstituteDirectChat; substituteOpenId: string } | undefined {
+): { chat: SubstituteDirectChat; substituteOpenId: string; targetOpenId?: string } | undefined {
   if (!target || !chatId) return undefined;
   const strictTarget = !!targetKey && targetKey.startsWith('thread:');
   if (target.openId) {
     const chat = getSubstituteDirectChat(larkAppId, target.openId, targetKey)
       ?? getSubstituteDirectChat(larkAppId, target.openId, chatId);
-    if (chat) return { chat, substituteOpenId: target.openId };
+    if (chat) return { chat, substituteOpenId: target.openId, targetOpenId: target.openId };
   }
   const store = readStore();
   for (const binding of Object.values(store.bindings)) {
@@ -258,7 +258,13 @@ export function getSubstituteDirectChatByTarget(
     if (!matched) continue;
     const chat = (targetKey ? binding.chats[targetKey] : undefined)
       ?? binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId];
-    if (chat && chat.enabled !== false) return { chat, substituteOpenId: binding.substituteOpenId };
+    if (chat && chat.enabled !== false) {
+      return {
+        chat,
+        substituteOpenId: binding.substituteOpenId,
+        targetOpenId: binding.targetOpenId,
+      };
+    }
   }
   return undefined;
 }
@@ -276,7 +282,7 @@ export function getSubstituteDirectChatByTargetKey(
   for (const binding of Object.values(store.bindings)) {
     if (binding.larkAppId !== larkAppId) continue;
     const chat = (targetKey ? binding.chats[targetKey] : undefined)
-      ?? (strictTarget ? undefined : binding.chats[chatKey]);
+      ?? binding.chats[chatKey];
     if (!chat || chat.enabled === false || chat.mode !== 'direct') continue;
     if (opts?.requireDirectBotMention === true && chat.directBotMention !== true) continue;
     if (opts?.requireUnconfiguredBotMention === true && chat.directBotMention !== undefined) continue;

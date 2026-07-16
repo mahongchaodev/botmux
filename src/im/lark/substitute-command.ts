@@ -155,7 +155,8 @@ async function listSubstituteDirectChats(
     const chats = await listChats(larkAppId);
     for (const c of chats) {
       if (!c.chatId) continue;
-      if (await getChatMode(larkAppId, c.chatId) !== 'group') continue;
+      const chatMode = await getChatMode(larkAppId, c.chatId);
+      if (chatMode !== 'group' && chatMode !== 'topic') continue;
       const targetKey = substituteDirectTargetKey('chat', c.chatId, c.chatId) ?? c.chatId;
       if (chatScopeKeys.has(targetKey)) continue;
       const stored = binding?.chats[targetKey] ?? binding?.chats[c.chatId];
@@ -184,7 +185,8 @@ async function listSubstituteDirectChats(
   const rows: DirectChatRow[] = [];
   for (const c of chats) {
     if (!c.chatId) continue;
-    if (await getChatMode(larkAppId, c.chatId) !== 'group') continue;
+    const chatMode = await getChatMode(larkAppId, c.chatId);
+    if (chatMode !== 'group' && chatMode !== 'topic') continue;
     const targetKey = substituteDirectTargetKey('chat', c.chatId, c.chatId) ?? c.chatId;
     const stored = binding?.chats[targetKey] ?? binding?.chats[c.chatId];
     rows.push({

@@ -404,7 +404,7 @@ describe('tryHandleEchoCommand', () => {
     expect(lastReply()).toBe('cmd.substitute.direct_forbidden');
   });
 
-  it('DM list filters out topic chats using getChatMode', async () => {
+  it('DM list includes topic chats using getChatMode', async () => {
     mockListChats.mockResolvedValue([
       { chatId: 'oc_group', name: 'Group', chatMode: 'group' },
       { chatId: 'oc_topic', name: 'Topic', chatMode: 'group' },
@@ -414,7 +414,7 @@ describe('tryHandleEchoCommand', () => {
     await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
 
     expect(lastReply()).toContain('oc_group');
-    expect(lastReply()).not.toContain('oc_topic');
+    expect(lastReply()).toContain('oc_topic');
   });
 
   it('card actions enter/exit direct mode for a group', async () => {
