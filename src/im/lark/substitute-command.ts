@@ -60,6 +60,11 @@ function canUseDirectControls(larkAppId: string, openId: string | undefined): bo
   return canOperate(larkAppId, undefined, openId) || !!substituteTargetForOpenId(larkAppId, openId);
 }
 
+function canManageDirectSession(larkAppId: string, openId: string | undefined): boolean {
+  if (!openId) return false;
+  return canOperate(larkAppId, undefined, openId) || !!substituteTargetForDirectAction(larkAppId, openId)?.openId;
+}
+
 const DIRECT_CHAT_PAGE_SIZE = 5;
 const DIRECT_CHAT_JUMP_PAGE_MAX_OPTIONS = 50;
 
@@ -77,6 +82,7 @@ type DirectChatRow = {
   substituteEnabled: boolean;
   directBotMention: boolean;
   directBotMentionConfigured: boolean;
+  canManageDirect: boolean;
   canOperateChat: boolean;
   canLeaveGroup: boolean;
 };
@@ -147,6 +153,7 @@ async function listSubstituteDirectChats(
         substituteEnabled: isSubstituteEnabledForChat(larkAppId, ds.chatId),
         directBotMention: stored?.directBotMention ?? defaultDirectBotMention,
         directBotMentionConfigured: stored?.directBotMention !== undefined,
+        canManageDirect: canManageDirectSession(larkAppId, openId),
         canOperateChat: canOperate(larkAppId, ds.chatId, openId),
         canLeaveGroup: scope === 'chat' && canOperate(larkAppId, undefined, openId),
       });
@@ -174,6 +181,7 @@ async function listSubstituteDirectChats(
         substituteEnabled: isSubstituteEnabledForChat(larkAppId, c.chatId),
         directBotMention: stored?.directBotMention ?? defaultDirectBotMention,
         directBotMentionConfigured: stored?.directBotMention !== undefined,
+        canManageDirect: canManageDirectSession(larkAppId, openId),
         canOperateChat: canOperate(larkAppId, c.chatId, openId),
         canLeaveGroup: canOperate(larkAppId, undefined, openId),
       });
@@ -201,6 +209,7 @@ async function listSubstituteDirectChats(
       substituteEnabled: isSubstituteEnabledForChat(larkAppId, c.chatId),
       directBotMention: stored?.directBotMention ?? defaultDirectBotMention,
       directBotMentionConfigured: stored?.directBotMention !== undefined,
+      canManageDirect: canManageDirectSession(larkAppId, openId),
       canOperateChat: canOperate(larkAppId, c.chatId, openId),
       canLeaveGroup: canOperate(larkAppId, undefined, openId),
     });
@@ -398,7 +407,7 @@ function buildDirectChatDetailCardElements(
           tag: 'button',
           text: { tag: 'plain_text', content: t(row.directBotMention ? 'cmd.substitute.direct_btn_disable_bot_mention' : 'cmd.substitute.direct_btn_enable_bot_mention', undefined, loc) },
           type: row.directBotMention ? 'default' : 'primary',
-          disabled: !row.canOperateChat,
+          disabled: !row.canManageDirect,
           value: directChatCardValue(invokerOpenId, page, {
             action: row.directBotMention ? 'substitute_direct_bot_mention_disable' : 'substitute_direct_bot_mention_enable',
             target_key: row.targetKey,
@@ -458,7 +467,7 @@ function buildDirectChatDetailCardElements(
       ],
     },
   ];
-  if (!row.canOperateChat || !row.canLeaveGroup) {
+  if (!row.canManageDirect || !row.canOperateChat || !row.canLeaveGroup) {
     elements.push({
       tag: 'div',
       text: { tag: 'lark_md', content: `<font color='grey'>${t('cmd.substitute.direct_permission_hint', undefined, loc)}</font>` },
@@ -540,7 +549,7 @@ async function applyDirectAction(
     return { ok: true, message: t(enabled ? 'cmd.substitute.updated_on' : 'cmd.substitute.updated_off', undefined, loc) };
   }
   if (action === 'substitute_direct_bot_mention_enable' || action === 'substitute_direct_bot_mention_disable') {
-    if (!canOperate(larkAppId, row.chatId, openId)) return { ok: false, message: t('cmd.substitute.owner_only', undefined, loc) };
+    if (!canManageDirectSession(larkAppId, openId)) return { ok: false, message: t('cmd.substitute.owner_only', undefined, loc) };
     const enabled = action === 'substitute_direct_bot_mention_enable';
     const target = substituteTargetForDirectAction(larkAppId, openId);
     const ok = setSubstituteDirectChatBotMention({

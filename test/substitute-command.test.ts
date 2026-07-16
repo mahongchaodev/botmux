@@ -294,6 +294,34 @@ describe('tryHandleEchoCommand', () => {
     expect(leaveGroupActions[0].disabled).toBe(true);
   });
 
+  it('substitute target can toggle @bot forwarding without group operator permission', async () => {
+    mockCanOperate.mockReturnValue(false);
+    await tryHandleEchoCommand(APP, msg('/echo', 'p2p'), USER);
+    const detail = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_manage',
+      chatId: 'oc_group',
+    });
+    const actions = cardActions(detail.card.data);
+    const botMention = actions.find((a: any) => a.value?.action === 'substitute_direct_bot_mention_enable');
+    const substituteToggle = actions.find((a: any) => a.value?.action === 'substitute_direct_disable');
+    expect(botMention?.disabled).toBe(false);
+    expect(substituteToggle?.disabled).toBe(true);
+
+    const on = await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_bot_mention_enable',
+      chatId: 'oc_group',
+      detailTargetKey: 'chat:oc_group',
+    });
+    expect(on.toast).toEqual({ type: 'success', content: 'cmd.substitute.direct_bot_mention_updated_on' });
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.directBotMention).toBe(true);
+  });
+
   it('detail card uses dynamic substitute and direct buttons per group', async () => {
     const expectActionRow = (actions: any[], labels: string[], actionValues: Array<string | undefined>) => {
       expect(actions).toHaveLength(5);
