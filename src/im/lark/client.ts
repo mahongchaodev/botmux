@@ -973,6 +973,11 @@ export async function listThreadMessages(larkAppId: string, chatId: string, root
   return listByChatFilter(c, chatId, rootMessageId, pageSize);
 }
 
+export async function getMessageThreadId(larkAppId: string, messageId: string): Promise<string | undefined> {
+  const c = getBotClient(larkAppId);
+  return resolveThreadId(c, messageId);
+}
+
 /** Get the thread_id (omt_xxx) from the root message via message.get. */
 async function resolveThreadId(c: any, rootMessageId: string): Promise<string | undefined> {
   try {

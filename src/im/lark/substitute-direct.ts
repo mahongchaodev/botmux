@@ -11,7 +11,7 @@ import {
   type SubstituteDirectChat,
 } from '../../services/substitute-direct-store.js';
 import { getBot, resolveBrandLabel } from '../../bot-registry.js';
-import { getChatName, MessageWithdrawnError, replyMessage, sendMessage, sendUserMessage } from './client.js';
+import { getChatName, getMessageThreadId, MessageWithdrawnError, replyMessage, sendMessage, sendUserMessage } from './client.js';
 import { resolveName } from './identity-cache.js';
 import { mentionOpenId, stripLeadingMentions } from './message-parser.js';
 import { buildMarkdownCard } from './md-card.js';
@@ -98,6 +98,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
     content: forwardedContent,
   }, loc);
   let dmRootMessageId = existing.dmRootMessageId;
+  let dmThreadId = existing.dmThreadId;
   let dmMessageId: string;
   if (p2pThreadMode && dmRootMessageId && !dmRootMessageId.startsWith('omt_')) {
     try {
@@ -107,10 +108,15 @@ export async function forwardSubstituteGroupMessageToDm(input: {
       logger.warn(`[substitute-direct:${input.larkAppId}] DM root ${dmRootMessageId.substring(0, 12)} unavailable, creating a new direct thread: ${err instanceof Error ? err.message : err}`);
       dmMessageId = await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
       dmRootMessageId = dmMessageId;
+      dmThreadId = await getMessageThreadId(input.larkAppId, dmMessageId).catch(() => undefined);
     }
   } else {
+    const previousThreadId = dmRootMessageId?.startsWith('omt_') ? dmRootMessageId : undefined;
     dmMessageId = await sendUserMessage(input.larkAppId, targetOpenId, content, 'text');
-    if (p2pThreadMode) dmRootMessageId = dmMessageId;
+    if (p2pThreadMode) {
+      dmRootMessageId = dmMessageId;
+      dmThreadId = await getMessageThreadId(input.larkAppId, dmMessageId).catch(() => undefined) ?? previousThreadId;
+    }
   }
   upsertSubstituteDirectChat({
     larkAppId: input.larkAppId,
@@ -130,8 +136,8 @@ export async function forwardSubstituteGroupMessageToDm(input: {
     mode: 'direct',
     disclosure: input.trigger.disclosure,
     lastGroupMessageId: input.message?.message_id,
-    dmRootMessageId: dmRootMessageId?.startsWith('omt_') ? dmMessageId : dmRootMessageId,
-    dmThreadId: dmRootMessageId?.startsWith('omt_') ? dmRootMessageId : undefined,
+    dmRootMessageId,
+    dmThreadId,
     preserveExistingChats: p2pThreadMode,
   });
   recordSubstituteDirectForwardedMessage({

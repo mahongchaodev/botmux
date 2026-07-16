@@ -76,6 +76,7 @@ const mockGetChatInfo = vi.fn(async () => ({ userCount: 1, botCount: 1 }));
 const mockReplyMessage = vi.fn(async () => 'msg-id');
 const mockSendMessage = vi.fn(async () => 'sent-group-msg');
 const mockSendUserMessage = vi.fn(async () => 'sent-dm-msg');
+const mockGetMessageThreadId = vi.fn(async () => undefined as string | undefined);
 const mockGetChatName = vi.fn(async () => 'Group Name' as string | null);
 const mockUpdateMessage = vi.fn(async () => true);
 const mockListChatMessages = vi.fn(async () => [] as any[]);
@@ -91,6 +92,7 @@ vi.mock('../src/im/lark/client.js', () => ({
   getChatMode: (...args: any[]) => mockGetChatMode(...args),
   getCachedChatMode: (...args: any[]) => mockGetCachedChatMode(...args),
   getChatName: (...args: any[]) => mockGetChatName(...args),
+  getMessageThreadId: (...args: any[]) => mockGetMessageThreadId(...args),
   listChatBotMembers: (...args: any[]) => mockListChatBotMembers(...args),
   replyMessage: (...args: any[]) => mockReplyMessage(...args),
   sendMessage: (...args: any[]) => mockSendMessage(...args),
@@ -338,6 +340,7 @@ beforeEach(() => {
   mockGetMessageDetail.mockReset().mockResolvedValue({ items: [] });
   mockSendMessage.mockReset().mockResolvedValue('sent-group-msg');
   mockSendUserMessage.mockReset().mockResolvedValue('sent-dm-msg');
+  mockGetMessageThreadId.mockReset().mockResolvedValue(undefined);
   mockGetChatName.mockReset().mockResolvedValue('Group Name');
   mockResolveName.mockReset().mockResolvedValue(undefined);
   mockIsSubstituteEnabledForChat.mockReset().mockReturnValue(true);
@@ -2476,6 +2479,57 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     const chat = mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct'];
     expect(chat?.dmRootMessageId).toBe('new-dm-root');
     expect(chat?.dmToGroupMessageIds).toEqual({ 'new-dm-root': 'msg-substitute-direct-recreate-dm-root' });
+  });
+
+  it('substituteMode direct: legacy DM thread id creates a new replyable DM root', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat-substitute-direct',
+      chats: {
+        'chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          dmRootMessageId: 'omt_legacy_thread',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatName.mockResolvedValue('Ops Group');
+    mockSendUserMessage.mockResolvedValueOnce('new-dm-root');
+    mockGetMessageThreadId.mockResolvedValueOnce('omt_new_thread');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-direct-legacy-dm-thread',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockReplyMessage).not.toHaveBeenCalledWith(MY_APP_ID, 'omt_legacy_thread', expect.anything(), 'text', true);
+    expect(mockSendUserMessage).toHaveBeenCalledWith(MY_APP_ID, 'ou_sub', expect.stringContaining('Ops Group'), 'text');
+    expect(mockGetMessageThreadId).toHaveBeenCalledWith(MY_APP_ID, 'new-dm-root');
+    const chat = mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct'];
+    expect(chat?.dmRootMessageId).toBe('new-dm-root');
+    expect(chat?.dmThreadId).toBe('omt_new_thread');
+    expect(chat?.dmToGroupMessageIds).toEqual({ 'new-dm-root': 'msg-substitute-direct-legacy-dm-thread' });
   });
 
   it('substituteMode direct: @substitute with a non-text group message notifies the substitute DM', async () => {
