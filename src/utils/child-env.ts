@@ -82,13 +82,31 @@ const TMUX_CLIENT_STRIP_KEYS: ReadonlySet<string> = new Set([
   ...REDACTED_CHILD_ENV_KEYS,
 ]);
 
+const TMUX_SERVER_GLOBAL_SCRUB_KEYS: ReadonlySet<string> = new Set([
+  ...BOTMUX_INJECTED_ENV_KEYS,
+  'LARK_APP_ID',
+  'LARK_APP_SECRET',
+  'CLAUDECODE',
+]);
+
 /**
- * True for any env key botmux manages and must keep out of the (shared) tmux
- * server global environment. Used by tmuxEnv() to strip the tmux client env and
- * by scrubTmuxServerGlobalEnv() to clean an already-polluted server.
+ * True for any env key botmux must keep out of the tmux CLIENT env it hands to
+ * the `tmux` binary. This is stricter than server-global scrub: besides
+ * botmux-owned routing/profile vars, we also strip daemon-side GitHub tokens so
+ * a botmux-started tmux server never seeds them into its shared global env.
  */
 export function isBotmuxManagedTmuxEnvKey(key: string): boolean {
   return key.startsWith('BOTMUX') || TMUX_CLIENT_STRIP_KEYS.has(key);
+}
+
+/**
+ * True for env keys botmux is allowed to repair out of an already-running tmux
+ * SERVER global environment. This intentionally excludes user-wide GitHub
+ * tokens: botmux panes must `unset` them locally, but daemon startup must not
+ * rewrite a shared tmux server's general-purpose env table.
+ */
+export function isBotmuxManagedTmuxServerGlobalEnvKey(key: string): boolean {
+  return key.startsWith('BOTMUX') || TMUX_SERVER_GLOBAL_SCRUB_KEYS.has(key);
 }
 
 /**
