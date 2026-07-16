@@ -141,7 +141,10 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     return binding?.activeChatId ? binding.chats?.[binding.activeChatId] : undefined;
   },
   getSubstituteDirectChat: (appId: string, openId: string | undefined, chatId: string | undefined) => (
-    chatId ? mockDirectBindings.get(directKey(appId, openId))?.chats?.[chatId] : undefined
+    chatId
+      ? mockDirectBindings.get(directKey(appId, openId))?.chats?.[chatId]
+        ?? mockDirectBindings.get(directKey(appId, openId))?.chats?.[`chat:${chatId}`]
+      : undefined
   ),
   getSubstituteDirectChatByDmAnchor: (appId: string, openId: string | undefined, dmMessageId: string | undefined) => {
     const binding = mockDirectBindings.get(directKey(appId, openId))
@@ -173,7 +176,8 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   getSubstituteDirectChatByTarget: (appId: string, target: any, chatId: string | undefined) => {
     if (!chatId) return undefined;
     if (target?.openId) {
-      const direct = mockDirectBindings.get(directKey(appId, target.openId))?.chats?.[chatId];
+      const chats = mockDirectBindings.get(directKey(appId, target.openId))?.chats;
+      const direct = chats?.[chatId] ?? chats?.[`chat:${chatId}`];
       if (direct) return { chat: direct, substituteOpenId: target.openId };
     }
     for (const binding of mockDirectBindings.values()) {
@@ -184,7 +188,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
         || (target?.unionId && binding.substituteUnionId === target.unionId)
         || (!!target?.name && (binding.targetName === target.name || binding.chats?.[chatId]?.targetName === target.name));
       if (!matched) continue;
-      const chat = binding.chats?.[chatId];
+      const chat = binding.chats?.[chatId] ?? binding.chats?.[`chat:${chatId}`];
       if (chat) return { chat, substituteOpenId: binding.substituteOpenId };
     }
     return undefined;
@@ -2576,6 +2580,63 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
         }),
       },
     });
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: thread messages fall back to the same group chat binding', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      targetOpenId: 'ou_sub',
+      targetName: 'Sub Person',
+      activeChatId: 'chat:chat-substitute-direct',
+      chats: {
+        'chat:chat-substitute-direct': {
+          targetKey: 'chat:chat-substitute-direct',
+          chatId: 'chat-substitute-direct',
+          scope: 'chat',
+          anchor: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          dmRootMessageId: 'dm-root',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person topic message' }),
+      messageId: 'msg-substitute-direct-topic-group-binding',
+      rootId: 'topic-root',
+      threadId: 'topic-root',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockReplyMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'dm-root',
+      expect.stringContaining('topic message'),
+      'text',
+      true,
+    );
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });

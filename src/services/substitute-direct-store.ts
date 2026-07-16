@@ -243,7 +243,7 @@ export function getSubstituteDirectChatByTarget(
   const strictTarget = !!targetKey && targetKey.startsWith('thread:');
   if (target.openId) {
     const chat = getSubstituteDirectChat(larkAppId, target.openId, targetKey)
-      ?? (strictTarget ? undefined : getSubstituteDirectChat(larkAppId, target.openId, chatId));
+      ?? getSubstituteDirectChat(larkAppId, target.openId, chatId);
     if (chat) return { chat, substituteOpenId: target.openId };
   }
   const store = readStore();
@@ -257,7 +257,7 @@ export function getSubstituteDirectChatByTarget(
       || (!!target.name && (binding.targetName === target.name || (targetKey && binding.chats[targetKey]?.targetName === target.name) || (!strictTarget && binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId]?.targetName === target.name)));
     if (!matched) continue;
     const chat = (targetKey ? binding.chats[targetKey] : undefined)
-      ?? (strictTarget ? undefined : binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId]);
+      ?? binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId];
     if (chat && chat.enabled !== false) return { chat, substituteOpenId: binding.substituteOpenId };
   }
   return undefined;
