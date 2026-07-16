@@ -59,6 +59,7 @@ const mockDirect = new Map<string, any>();
 vi.mock('../src/services/substitute-direct-store.js', () => ({
   substituteDirectTargetKey: (scope: string | undefined, anchor: string | undefined, chatId?: string) => scope === 'thread' && anchor ? `thread:${anchor}` : `chat:${anchor || chatId}`,
   getSubstituteDirectBinding: (_app: string, openId: string) => mockDirect.get(openId),
+  getSubstituteDirectBindingForSender: (_app: string, openId: string) => mockDirect.get(openId),
   getSubstituteDirectChat: (_app: string, openId: string, chatId: string) => mockDirect.get(openId)?.chats?.[chatId],
   upsertSubstituteDirectChat: (input: any) => {
     const cur = mockDirect.get(input.substituteOpenId) ?? { chats: {} };
@@ -639,8 +640,8 @@ describe('tryHandleEchoCommand', () => {
       chatId: 'oc_group',
     });
 
-    expect(mockDirect.get('ou_sub')).toBeUndefined();
-    expect(mockDirect.get(USER)).toMatchObject({
+    expect(mockDirect.get(USER)).toBeUndefined();
+    expect(mockDirect.get('ou_sub')).toMatchObject({
       targetOpenId: 'ou_sub',
       substituteUserId: 'u_sub',
       substituteUnionId: 'on_sub',

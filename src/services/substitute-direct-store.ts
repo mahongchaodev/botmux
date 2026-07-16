@@ -159,11 +159,40 @@ export function getSubstituteDirectBinding(
   return readStore().bindings[key(larkAppId, substituteOpenId)];
 }
 
+function findSubstituteDirectBindingEntriesForSender(
+  larkAppId: string,
+  senderOpenId: string | undefined,
+  store: Store,
+): Array<[string, SubstituteDirectBinding]> {
+  if (!senderOpenId) return [];
+  return Object.entries(store.bindings)
+    .filter(([, binding]) =>
+      binding.larkAppId === larkAppId
+      && (binding.substituteOpenId === senderOpenId || binding.targetOpenId === senderOpenId))
+    .sort(([, a], [, b]) => b.updatedAt - a.updatedAt);
+}
+
+function getSubstituteDirectBindingsForSender(
+  larkAppId: string,
+  senderOpenId: string | undefined,
+): SubstituteDirectBinding[] {
+  const store = readStore();
+  return findSubstituteDirectBindingEntriesForSender(larkAppId, senderOpenId, store)
+    .map(([, binding]) => binding);
+}
+
+export function getSubstituteDirectBindingForSender(
+  larkAppId: string,
+  senderOpenId: string | undefined,
+): SubstituteDirectBinding | undefined {
+  return getSubstituteDirectBindingsForSender(larkAppId, senderOpenId)[0];
+}
+
 export function getActiveSubstituteDirectChat(
   larkAppId: string,
   substituteOpenId: string | undefined,
 ): SubstituteDirectChat | undefined {
-  const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
+  const binding = getSubstituteDirectBindingForSender(larkAppId, substituteOpenId);
   if (!binding?.activeChatId) return undefined;
   const chat = binding.chats[binding.activeChatId] ?? binding.chats[substituteDirectTargetKey('chat', binding.activeChatId, binding.activeChatId) ?? ''];
   return chat?.enabled === false ? undefined : chat;
@@ -175,10 +204,12 @@ export function getSubstituteDirectChat(
   chatIdOrTargetKey: string | undefined,
 ): SubstituteDirectChat | undefined {
   if (!chatIdOrTargetKey) return undefined;
-  const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
-  const chat = binding?.chats[chatIdOrTargetKey]
-    ?? binding?.chats[substituteDirectTargetKey('chat', chatIdOrTargetKey, chatIdOrTargetKey) ?? ''];
-  return chat?.enabled === false ? undefined : chat;
+  for (const binding of getSubstituteDirectBindingsForSender(larkAppId, substituteOpenId)) {
+    const chat = binding.chats[chatIdOrTargetKey]
+      ?? binding.chats[substituteDirectTargetKey('chat', chatIdOrTargetKey, chatIdOrTargetKey) ?? ''];
+    if (chat && chat.enabled !== false) return chat;
+  }
+  return undefined;
 }
 
 export function getSubstituteDirectChatByTarget(
@@ -415,12 +446,12 @@ export function getSubstituteDirectChatByDmAnchor(
   dmMessageId: string | undefined,
 ): SubstituteDirectChat | undefined {
   if (!substituteOpenId || !dmMessageId) return undefined;
-  const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
-  if (!binding) return undefined;
-  for (const chat of Object.values(binding.chats)) {
-    if (chat.enabled === false) continue;
-    if (chat.dmRootMessageId === dmMessageId) return chat;
-    if (chat.dmToGroupMessageIds?.[dmMessageId]) return chat;
+  for (const binding of getSubstituteDirectBindingsForSender(larkAppId, substituteOpenId)) {
+    for (const chat of Object.values(binding.chats)) {
+      if (chat.enabled === false) continue;
+      if (chat.dmRootMessageId === dmMessageId) return chat;
+      if (chat.dmToGroupMessageIds?.[dmMessageId]) return chat;
+    }
   }
   return undefined;
 }
@@ -432,18 +463,32 @@ export function migrateActiveSubstituteDirectChatToDmRoot(input: {
 }): SubstituteDirectChat | undefined {
   if (!input.substituteOpenId || !input.dmRootMessageId) return undefined;
   const store = readStore();
-  const binding = store.bindings[key(input.larkAppId, input.substituteOpenId)];
-  if (!binding) return undefined;
-  const exact = Object.values(binding.chats).find(chat =>
-    chat.enabled !== false && chat.dmRootMessageId === input.dmRootMessageId);
-  if (exact) return exact;
-  const active = getActiveSubstituteDirectChat(input.larkAppId, input.substituteOpenId);
-  if (!active || active.mode !== 'direct' || active.scope === 'thread' || active.dmRootMessageId) return undefined;
+  const bindings = getSubstituteDirectBindingsForSender(input.larkAppId, input.substituteOpenId);
+  if (!bindings.length) return undefined;
+  for (const binding of bindings) {
+    const exact = Object.values(binding.chats).find(chat =>
+      chat.enabled !== false && chat.dmRootMessageId === input.dmRootMessageId);
+    if (exact) return exact;
+  }
+  let selectedBinding: SubstituteDirectBinding | undefined;
+  let active: SubstituteDirectChat | undefined;
+  for (const binding of bindings) {
+    const candidate = binding.activeChatId
+      ? binding.chats[binding.activeChatId]
+        ?? binding.chats[substituteDirectTargetKey('chat', binding.activeChatId, binding.activeChatId) ?? '']
+      : undefined;
+    if (candidate?.mode === 'direct' && candidate.scope !== 'thread') {
+      selectedBinding = binding;
+      active = candidate;
+      break;
+    }
+  }
+  if (!selectedBinding || !active) return undefined;
   active.dmRootMessageId = input.dmRootMessageId;
   active.dmToGroupMessageIds = undefined;
   active.updatedAt = Date.now();
-  binding.updatedAt = Date.now();
-  store.bindings[key(input.larkAppId, input.substituteOpenId)] = binding;
+  selectedBinding.updatedAt = Date.now();
+  store.bindings[key(selectedBinding.larkAppId, selectedBinding.substituteOpenId)] = selectedBinding;
   writeStore(store);
   return active;
 }
@@ -457,14 +502,18 @@ export function recordSubstituteDirectForwardedMessage(input: {
 }): void {
   if (!input.substituteOpenId || !input.chatId || !input.dmMessageId || !input.groupMessageId) return;
   const store = readStore();
-  const binding = store.bindings[key(input.larkAppId, input.substituteOpenId)];
-  const chat = binding?.chats?.[input.chatId] ?? binding?.chats?.[substituteDirectTargetKey('chat', input.chatId, input.chatId) ?? ''];
-  if (!binding || !chat) return;
+  const chatId = input.chatId;
+  const entry = findSubstituteDirectBindingEntriesForSender(input.larkAppId, input.substituteOpenId, store)
+    .map(([bindingKey, binding]) => [bindingKey, binding, binding.chats?.[chatId] ?? binding.chats?.[substituteDirectTargetKey('chat', chatId, chatId) ?? '']] as const)
+    .find(([, , chat]) => !!chat);
+  if (!entry) return;
+  const [bindingKey, binding, chat] = entry;
   const pairs = Object.entries(chat.dmToGroupMessageIds ?? {});
   pairs.push([input.dmMessageId, input.groupMessageId]);
   chat.dmToGroupMessageIds = Object.fromEntries(pairs.slice(-50));
   chat.updatedAt = Date.now();
   binding.updatedAt = Date.now();
+  store.bindings[bindingKey] = binding;
   writeStore(store);
 }
 
@@ -474,12 +523,12 @@ export function getSubstituteDirectQuotedGroupMessageId(
   dmMessageId: string | undefined,
 ): string | undefined {
   if (!substituteOpenId || !dmMessageId) return undefined;
-  const binding = getSubstituteDirectBinding(larkAppId, substituteOpenId);
-  if (!binding) return undefined;
-  for (const chat of Object.values(binding.chats)) {
-    if (chat.enabled === false) continue;
-    const hit = chat.dmToGroupMessageIds?.[dmMessageId];
-    if (hit) return hit;
+  for (const binding of getSubstituteDirectBindingsForSender(larkAppId, substituteOpenId)) {
+    for (const chat of Object.values(binding.chats)) {
+      if (chat.enabled === false) continue;
+      const hit = chat.dmToGroupMessageIds?.[dmMessageId];
+      if (hit) return hit;
+    }
   }
   return undefined;
 }

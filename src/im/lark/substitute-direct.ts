@@ -79,7 +79,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   trigger: SubstituteTrigger;
   direct?: { substituteOpenId: string; chat: SubstituteDirectChat };
 }): Promise<boolean> {
-  const targetOpenId = input.direct?.substituteOpenId ?? input.trigger.target.openId;
+  const targetOpenId = input.trigger.target.openId ?? input.direct?.substituteOpenId;
   if (!targetOpenId) return false;
   const existing = input.direct?.chat ?? getSubstituteDirectChat(input.larkAppId, targetOpenId, input.chatId);
   if (!existing || existing.mode !== 'direct') return false;

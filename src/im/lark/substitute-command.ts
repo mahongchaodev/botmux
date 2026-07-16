@@ -6,7 +6,7 @@ import {
   clearSubstituteDirectChat,
   clearSubstituteDirectChatsByGroup,
   deactivateSubstituteDirectChat,
-  getSubstituteDirectBinding,
+  getSubstituteDirectBindingForSender,
   setSubstituteDirectChatBotMention,
   substituteDirectTargetKey,
   upsertSubstituteDirectChat,
@@ -52,7 +52,7 @@ function substituteTargetForDirectAction(larkAppId: string, openId: string | und
 }
 
 function substituteBindingOpenIdForControls(larkAppId: string, openId: string | undefined): string | undefined {
-  return openId;
+  return substituteTargetForDirectAction(larkAppId, openId)?.openId ?? openId;
 }
 
 function canUseDirectControls(larkAppId: string, openId: string | undefined): boolean {
@@ -112,7 +112,7 @@ async function listSubstituteDirectChats(
 ): Promise<DirectChatRow[]> {
   if (!canUseDirectControls(larkAppId, openId)) return [];
   const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
-  const binding = getSubstituteDirectBinding(larkAppId, bindingOpenId);
+  const binding = getSubstituteDirectBindingForSender(larkAppId, bindingOpenId);
   const defaultDirectBotMention = getBot(larkAppId).config.substituteMode?.directBotMention === true;
   if (activeSessions) {
     const iterable = activeSessions instanceof Map ? activeSessions.values() : activeSessions;
@@ -508,7 +508,7 @@ async function applyDirectAction(
       : undefined;
     upsertSubstituteDirectChat({
       larkAppId,
-      substituteOpenId: openId,
+      substituteOpenId: target.openId,
       targetOpenId: target.openId,
       substituteUserId: target.userId,
       substituteUnionId: target.unionId,
