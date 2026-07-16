@@ -159,9 +159,8 @@ export async function forwardSubstituteDmMessageToGroup(input: {
   const body = textFromMessage(input.message, { renderAt: true });
   const stripped = rawBody ? stripLeadingMentions(rawBody.trim(), input.message?.mentions ?? []).trim() : '';
   if (stripped.startsWith('/')) return false;
-  const dmRootMessageId = p2pThreadMode ? dmAnchorFromMessage(input.message) : undefined;
-  const canMigrateToNewTopic = p2pThreadMode
-    && dmRootMessageId === input.message?.message_id;
+  const dmRootMessageId = p2pThreadMode ? input.message?.thread_id : undefined;
+  const canMigrateToNewTopic = p2pThreadMode && !!dmRootMessageId;
   const migratedChat = !chat && canMigrateToNewTopic
     ? migrateActiveSubstituteDirectChatToDmRoot({
         larkAppId: input.larkAppId,

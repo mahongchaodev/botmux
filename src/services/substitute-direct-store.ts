@@ -438,7 +438,7 @@ export function migrateActiveSubstituteDirectChatToDmRoot(input: {
     chat.enabled !== false && chat.dmRootMessageId === input.dmRootMessageId);
   if (exact) return exact;
   const active = getActiveSubstituteDirectChat(input.larkAppId, input.substituteOpenId);
-  if (!active || active.mode !== 'direct') return undefined;
+  if (!active || active.mode !== 'direct' || active.scope === 'thread' || active.dmRootMessageId) return undefined;
   active.dmRootMessageId = input.dmRootMessageId;
   active.dmToGroupMessageIds = undefined;
   active.updatedAt = Date.now();

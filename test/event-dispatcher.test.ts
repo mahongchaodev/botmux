@@ -293,6 +293,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
 import { __resetEventClaimsForTest, canOperate, canTalk, decideRouting, ensureBotOpenId, isBotMentioned, mentionsAnotherMember, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+import { forwardSubstituteDmMessageToGroup } from '../src/im/lark/substitute-direct.js';
 import {
   VC_BOT_MEETING_ACTIVITY_EVENT,
   VC_BOT_MEETING_ENDED_EVENT,
@@ -3161,7 +3162,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     const event = makeUserMessageEvent({
       senderOpenId: 'ou_sub',
       content: JSON.stringify({ text: '切换 thread 后的首条消息' }),
-      messageId: 'dm-new-topic-root',
+      messageId: 'dm-topic-reply',
       rootId: 'dm-new-topic-root',
       threadId: 'dm-new-topic-root',
       chatId: 'dm-chat',
