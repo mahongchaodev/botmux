@@ -612,6 +612,13 @@ export async function handleSubstituteDirectCardAction(input: {
   closeSession?: (sessionId: string) => Promise<unknown>;
 }): Promise<any> {
   const loc = localeForBot(input.larkAppId);
+  logger.info(
+    `[echo-direct:${input.larkAppId}] card action=${input.action} ` +
+    `operator=${input.operatorOpenId?.substring(0, 12) ?? '-'} ` +
+    `invoker=${input.invokerOpenId?.substring(0, 12) ?? '-'} ` +
+    `chat=${input.chatId?.substring(0, 12) ?? '-'} ` +
+    `target=${input.detailTargetKey ?? '-'}`,
+  );
   if (!input.operatorOpenId || input.operatorOpenId !== input.invokerOpenId) {
     return { toast: { type: 'error', content: t('cmd.substitute.direct_not_invoker', undefined, loc) } };
   }
