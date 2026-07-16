@@ -1309,7 +1309,11 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       // 注意只进 hasAllowlist 判定，命中仍只认 allowedUsers（与 canOperate 一致，不授 operate）。
       const hasAllowlist = allowedUsers.length > 0
         || bots.some(b => (b.config.allowedChatGroups?.length ?? 0) > 0)
-        || bots.some(b => (b.config.globalGrants?.length ?? 0) > 0);
+        || bots.some(b => (b.config.globalGrants?.length ?? 0) > 0)
+        // p2pOpen 同理（与 evaluateTalk 的 hasConfiguredAllowlist 保持一致）：它是一次显式的
+        // 权限边界声明，不能让这条 fallback 把「只配 p2pOpen」的部署算成无白名单 → 敏感卡片
+        // 动作 fall through 成全开放。
+        || bots.some(b => b.config.p2pOpen === true);
       if (hasAllowlist && (!operatorOpenId || !allowedUsers.includes(operatorOpenId))) {
         logger.info(`Card action "${value.action}" blocked for non-allowed user: ${operatorOpenId}`);
         // 与上面 non-operator 分支同理：仅 get_write_link 破例给 toast，其余保持静默。
@@ -1442,7 +1446,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         return { toast: { type: 'warning', content: t('card.voice.toast_session_gone', undefined, locDs) } };
       }
       // 权限：仅 canTalk / canOperate 用户可点；其他人提示需授权（无声门会让人以为按钮坏了）。
-      if (!canTalk(ds.larkAppId, ds.chatId, operatorOpenId) && !canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
+      // 传 ds.chatType：p2pOpen 的 bot 在私聊里，对方点自己会话的卡片按钮应与其 talk 权一致
+      // （仍不给 canOperate —— 管理类按钮另有 canOperate 闸）。
+      if (!canTalk(ds.larkAppId, ds.chatId, operatorOpenId, undefined, undefined, ds.chatType)
+        && !canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
         logger.info(`[${tag(ds)}] voice_summary blocked for unauthorized user: ${operatorOpenId ?? '?'}`);
         return { toast: { type: 'warning', content: t('card.voice.toast_need_auth', undefined, locDs) } };
       }
