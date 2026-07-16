@@ -18,6 +18,7 @@ export interface SubstituteDirectChat {
   disclosure?: 'prefix' | 'none';
   lastGroupMessageId?: string;
   dmRootMessageId?: string;
+  dmThreadId?: string;
   dmToGroupMessageIds?: Record<string, string>;
   directBotMention?: boolean;
   updatedAt: number;
@@ -89,6 +90,7 @@ function normalize(raw: unknown): Store {
           disclosure: c.disclosure === 'none' ? 'none' : 'prefix',
           lastGroupMessageId: typeof c.lastGroupMessageId === 'string' ? c.lastGroupMessageId : undefined,
           dmRootMessageId: typeof c.dmRootMessageId === 'string' ? c.dmRootMessageId : undefined,
+          dmThreadId: typeof c.dmThreadId === 'string' ? c.dmThreadId : undefined,
           directBotMention: c.directBotMention === true ? true : c.directBotMention === false ? false : undefined,
           dmToGroupMessageIds: c.dmToGroupMessageIds && typeof c.dmToGroupMessageIds === 'object' && !Array.isArray(c.dmToGroupMessageIds)
             ? Object.fromEntries(Object.entries(c.dmToGroupMessageIds).filter((e): e is [string, string] => typeof e[0] === 'string' && typeof e[1] === 'string'))
@@ -111,6 +113,7 @@ function normalize(raw: unknown): Store {
         disclosure: b.disclosure === 'none' ? 'none' : 'prefix',
         lastGroupMessageId: typeof b.lastGroupMessageId === 'string' ? b.lastGroupMessageId : undefined,
         dmRootMessageId: typeof b.dmRootMessageId === 'string' ? b.dmRootMessageId : undefined,
+        dmThreadId: typeof b.dmThreadId === 'string' ? b.dmThreadId : undefined,
         directBotMention: b.directBotMention === true ? true : b.directBotMention === false ? false : undefined,
         updatedAt: typeof b.updatedAt === 'number' ? b.updatedAt : 0,
       };
@@ -347,6 +350,7 @@ export function upsertSubstituteDirectChat(input: {
   disclosure?: 'prefix' | 'none';
   lastGroupMessageId?: string;
   dmRootMessageId?: string;
+  dmThreadId?: string;
   resetDmHistory?: boolean;
   directBotMention?: boolean;
   preserveExistingChats?: boolean;
@@ -384,6 +388,7 @@ export function upsertSubstituteDirectChat(input: {
     disclosure: input.disclosure === 'none' ? 'none' : 'prefix',
     lastGroupMessageId: input.lastGroupMessageId,
     dmRootMessageId: input.dmRootMessageId ?? existingChat?.dmRootMessageId,
+    dmThreadId: input.dmThreadId ?? existingChat?.dmThreadId,
     directBotMention: input.directBotMention ?? existingChat?.directBotMention,
     dmToGroupMessageIds: input.resetDmHistory ? undefined : existingChat?.dmToGroupMessageIds,
     updatedAt: Date.now(),
@@ -478,6 +483,7 @@ export function getSubstituteDirectChatByDmAnchor(
   for (const binding of getSubstituteDirectBindingsForSender(larkAppId, substituteOpenId)) {
     for (const chat of Object.values(binding.chats)) {
       if (chat.enabled === false) continue;
+      if (chat.dmThreadId === dmMessageId) return chat;
       if (chat.dmRootMessageId === dmMessageId) return chat;
       if (chat.dmToGroupMessageIds?.[dmMessageId]) return chat;
     }
@@ -496,7 +502,7 @@ export function migrateActiveSubstituteDirectChatToDmRoot(input: {
   if (!bindings.length) return undefined;
   for (const binding of bindings) {
     const exact = Object.values(binding.chats).find(chat =>
-      chat.enabled !== false && chat.dmRootMessageId === input.dmRootMessageId);
+      chat.enabled !== false && (chat.dmThreadId === input.dmRootMessageId || chat.dmRootMessageId === input.dmRootMessageId));
     if (exact) return exact;
   }
   let selectedBinding: SubstituteDirectBinding | undefined;
@@ -513,7 +519,8 @@ export function migrateActiveSubstituteDirectChatToDmRoot(input: {
     }
   }
   if (!selectedBinding || !active) return undefined;
-  active.dmRootMessageId = input.dmRootMessageId;
+  if (input.dmRootMessageId.startsWith('omt_')) active.dmThreadId = input.dmRootMessageId;
+  else active.dmRootMessageId = input.dmRootMessageId;
   active.dmToGroupMessageIds = undefined;
   active.updatedAt = Date.now();
   selectedBinding.updatedAt = Date.now();

@@ -526,6 +526,7 @@ async function applyDirectAction(
       mode: 'direct',
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
       dmRootMessageId,
+      dmThreadId: dmRootMessageId?.startsWith('omt_') ? dmRootMessageId : undefined,
       resetDmHistory: threadMode,
       directBotMention: row.directBotMentionConfigured ? undefined : getBot(larkAppId).config.substituteMode?.directBotMention === true,
       preserveExistingChats: threadMode,

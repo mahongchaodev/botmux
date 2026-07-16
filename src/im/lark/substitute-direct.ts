@@ -99,7 +99,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   }, loc);
   let dmRootMessageId = existing.dmRootMessageId;
   let dmMessageId: string;
-  if (p2pThreadMode && dmRootMessageId) {
+  if (p2pThreadMode && dmRootMessageId && !dmRootMessageId.startsWith('omt_')) {
     try {
       dmMessageId = await replyMessage(input.larkAppId, dmRootMessageId, content, 'text', true);
     } catch (err) {
@@ -130,7 +130,8 @@ export async function forwardSubstituteGroupMessageToDm(input: {
     mode: 'direct',
     disclosure: input.trigger.disclosure,
     lastGroupMessageId: input.message?.message_id,
-    dmRootMessageId,
+    dmRootMessageId: dmRootMessageId?.startsWith('omt_') ? dmMessageId : dmRootMessageId,
+    dmThreadId: dmRootMessageId?.startsWith('omt_') ? dmRootMessageId : undefined,
     preserveExistingChats: p2pThreadMode,
   });
   recordSubstituteDirectForwardedMessage({

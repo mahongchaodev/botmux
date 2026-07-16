@@ -155,7 +155,8 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
       ?? [...mockDirectBindings.values()].find((candidate: any) =>
         candidate.larkAppId === appId && candidate.targetOpenId === openId);
     if (!binding || !dmMessageId) return undefined;
-    for (const chat of Object.values<any>(binding.chats ?? {})) {
+      for (const chat of Object.values<any>(binding.chats ?? {})) {
+      if (chat.dmThreadId === dmMessageId) return chat;
       if (chat.dmRootMessageId === dmMessageId) return chat;
       if (chat.dmToGroupMessageIds?.[dmMessageId]) return chat;
     }
@@ -168,11 +169,12 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
         candidate.larkAppId === input.larkAppId && candidate.targetOpenId === input.substituteOpenId);
     if (!binding) return undefined;
     const exact = Object.values<any>(binding.chats ?? {}).find(chat =>
-      chat.enabled !== false && chat.dmRootMessageId === input.dmRootMessageId);
+      chat.enabled !== false && (chat.dmRootMessageId === input.dmRootMessageId || chat.dmThreadId === input.dmRootMessageId));
     if (exact) return exact;
     const active = binding.activeChatId ? binding.chats?.[binding.activeChatId] : undefined;
     if (!active || active.mode !== 'direct' || active.scope === 'thread') return undefined;
-    active.dmRootMessageId = input.dmRootMessageId;
+    if (input.dmRootMessageId.startsWith('omt_')) active.dmThreadId = input.dmRootMessageId;
+    else active.dmRootMessageId = input.dmRootMessageId;
     active.dmToGroupMessageIds = undefined;
     mockDirectBindings.set(directKey(input.larkAppId, binding.substituteOpenId), binding);
     return active;
@@ -180,9 +182,12 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   getSubstituteDirectChatByTarget: (appId: string, target: any, chatId: string | undefined) => {
     if (!chatId) return undefined;
     if (target?.openId) {
-      const chats = mockDirectBindings.get(directKey(appId, target.openId))?.chats;
+      const binding = mockDirectBindings.get(directKey(appId, target.openId))
+        ?? [...mockDirectBindings.values()].find((candidate: any) =>
+          candidate.larkAppId === appId && candidate.targetOpenId === target.openId);
+      const chats = binding?.chats;
       const direct = chats?.[chatId] ?? chats?.[`chat:${chatId}`];
-      if (direct) return { chat: direct, substituteOpenId: target.openId, targetOpenId: target.openId };
+      if (direct) return { chat: direct, substituteOpenId: binding?.substituteOpenId ?? target.openId, targetOpenId: binding?.targetOpenId ?? target.openId };
     }
     for (const binding of mockDirectBindings.values()) {
       if (binding.larkAppId !== appId) continue;
