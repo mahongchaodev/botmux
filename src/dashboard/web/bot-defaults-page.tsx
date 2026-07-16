@@ -2109,7 +2109,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
         </div>
       </div>
       <div className="bd-row">
-        <label>
+        <div className="bd-field">
           <FieldTitle help={tr('botDefaults.substituteReplyModeHelp')}>{tr('botDefaults.substituteReplyMode')}</FieldTitle>
           <DropdownField<'thread' | 'quote'>
             dataInput="substituteReplyMode"
@@ -2119,7 +2119,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
             options={replyModeOptions}
             onChange={value => setReplyMode(value)}
           />
-        </label>
+        </div>
       </div>
       <ToggleRow
         checked={controlCard}
