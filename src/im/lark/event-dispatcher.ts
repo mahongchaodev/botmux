@@ -2086,7 +2086,6 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         const substituteModeConfig = getBot(larkAppId).config.substituteMode;
         const substituteDirectEligible = substituteModeConfig?.enabled === true
           && chatType === 'group'
-          && await getChatMode(larkAppId, chatId) === 'group'
           && isSubstituteEnabledForChat(larkAppId, chatId);
         let substituteTrigger = substituteDirectEligible ? resolveSubstituteTrigger(larkAppId, message) : undefined;
         if (substituteTrigger && !explicitlyMentionedThisBot) {

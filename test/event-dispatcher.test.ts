@@ -2641,6 +2641,63 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  it('substituteMode direct: topic-mode groups still forward substitute mentions to DM', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      targetOpenId: 'ou_sub',
+      targetName: 'Sub Person',
+      activeChatId: 'chat:chat-substitute-direct',
+      chats: {
+        'chat:chat-substitute-direct': {
+          targetKey: 'chat:chat-substitute-direct',
+          chatId: 'chat-substitute-direct',
+          scope: 'chat',
+          anchor: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          dmRootMessageId: 'dm-root',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('topic');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person topic-mode message' }),
+      messageId: 'msg-substitute-direct-topic-mode',
+      rootId: 'topic-root',
+      threadId: 'topic-root',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockReplyMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'dm-root',
+      expect.stringContaining('topic-mode message'),
+      'text',
+      true,
+    );
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
   it('substituteMode direct: legacy binding without targetOpenId still matches by substituteOpenId', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],
