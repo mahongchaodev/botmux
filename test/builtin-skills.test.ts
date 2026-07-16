@@ -223,4 +223,9 @@ describe('botmux-ask skill 条件兜底（hook 优先 + 非 hook CLI 保留）',
     expect(ASK_SKILL).toContain('需要用户可见回复时');
     expect(ASK_SKILL).toContain('choice=$(...)');
   });
+
+  it('说明 mention-back @ 的是会话触发者，@ 点选者要用 --json by + 显式 --mention', () => {
+    expect(ASK_SKILL).toContain('不一定是点按钮的人');
+    expect(ASK_SKILL).toContain('botmux send --mention <open_id>');
+  });
 });

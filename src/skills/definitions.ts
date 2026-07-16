@@ -973,6 +973,8 @@ case "$choice" in
 esac
 \`\`\`
 
+示例里的 \`--mention-back\` @ 的是**本会话的触发者**（协作 bot 触发的会话会 @ 回那个 bot），不一定是点按钮的人。结论要发给实际点选的人时，用 \`--json\` 模式（见下文）从 \`by\` 字段拿点选者 open_id，再 \`botmux send --mention <open_id>\` 显式点名。
+
 \`key=label\` 里，**stdout 永远返回 key**，按钮上显示 label。只写 \`yes,no\` 时 key 和 label 相同。
 
 如果只运行下面这种裸命令：
