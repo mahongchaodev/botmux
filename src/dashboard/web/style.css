@@ -7007,6 +7007,74 @@ dialog.onboarding-dialog::backdrop {
   box-shadow: 0 22px 56px rgba(0, 0, 0, 0.28);
 }
 
+.sidebar-create-actions {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+button.sidebar-create-btn {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 36px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--border-soft));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  box-shadow: none;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease;
+}
+@media (min-width: 981px) {
+  button.sidebar-create-btn {
+    padding-right: 12px;
+    padding-left: 16px;
+  }
+}
+button.sidebar-create-btn svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+button.sidebar-create-btn:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+button.sidebar-create-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* 必须排在上方基础规则之后：≤980px 侧边栏折叠为顶部横向 rail 时创建入口改横排。
+   同 specificity 靠源顺序取胜，挪回文件靠前的 media 块会被基础规则反超（PR #491 review）。 */
+@media (max-width: 980px) {
+  .sidebar-create-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: 0;
+    overflow-x: auto;
+  }
+  button.sidebar-create-btn {
+    flex: 0 0 auto;
+  }
+}
+
 .sidebar-nav {
   gap: 2px;
   margin-top: 0;
@@ -21782,6 +21850,70 @@ dialog.create-session-modal .cs-advanced input.cs-pill-input[type="text"]:focus 
   color: var(--muted);
 }
 .create-session-modal .cs-warn { color: var(--warning); }
+dialog.create-session-modal input.cs-bot-search[type="search"] {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: var(--button-height) !important;
+  min-height: var(--button-height) !important;
+  max-height: var(--button-height) !important;
+  padding: 0 var(--button-padding-x) !important;
+  border: 1px solid var(--border-soft) !important;
+  /* Mirrors .cs-pill-input: the legacy global input reset uses high-specificity chained :not() selectors. */
+  border-radius: var(--radius-full) !important;
+  background: var(--surface) !important;
+  background-clip: padding-box;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: normal;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+dialog.create-session-modal input.cs-bot-search[type="search"]:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-soft)) !important;
+}
+dialog.create-session-modal input.cs-bot-search[type="search"]:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.create-session-modal .cs-keep-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 auto 0 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+.create-session-modal .cs-keep-open input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.create-session-modal .cs-keep-open:hover {
+  color: var(--fg);
+}
+.create-session-modal .cs-keep-success {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--border-soft));
+  border-radius: var(--radius-lg);
+  background: var(--success-soft);
+  color: var(--success);
+  font-size: 12px;
+}
+.create-session-modal .cs-keep-success a {
+  color: inherit;
+  font-weight: 700;
+}
 
 /* Feishu login QR code inline display */
 .st-feishu-qr {

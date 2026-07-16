@@ -22,7 +22,8 @@ import {
   loadAndRenderDashboardRoute,
 } from './route-lifecycle.js';
 import { buildBotCards, loadGroupsSnapshot } from './overview.js';
-import { BotOnboardingDialog, OPEN_BOT_ONBOARDING_EVENT } from './bot-onboarding.js';
+import { BotOnboardingDialog, OPEN_BOT_ONBOARDING_EVENT, openBotOnboarding } from './bot-onboarding.js';
+import { requestOpenCreateSession } from './create-session-entry.js';
 import { InfoTip } from './dashboard-components.js';
 import { initFloatingScrollbars } from './floating-scrollbars.js';
 import { PLUGIN_PINS_CHANGED_EVENT } from './plugin-events.js';
@@ -542,6 +543,18 @@ function DashboardShell(): JSX.Element {
         </header>
         <div className="chrome-body">
           <aside className="sidebar">
+            {isAuthed ? (
+              <div className="sidebar-create-actions">
+                <button type="button" className="sidebar-create-btn" onClick={() => requestOpenCreateSession()}>
+                  {icon(<><path d="M2 3.5h12v7H6l-3 3v-3H2z" /><path d="M8 4.9v4.2M5.9 7h4.2" /></>)}
+                  <span className="sidebar-nav-label">{t('nav.createSession')}</span>
+                </button>
+                <button type="button" className="sidebar-create-btn" onClick={() => void openBotOnboarding()}>
+                  {icon(<><rect x="2.5" y="6" width="11" height="7.5" rx="2" /><circle cx="5.8" cy="9.75" r="1" /><circle cx="10.2" cy="9.75" r="1" /><path d="M8 6V3.8M6.3 1.9h3.4" /></>)}
+                  <span className="sidebar-nav-label">{t('nav.createBot')}</span>
+                </button>
+              </div>
+            ) : null}
             <nav className="sidebar-nav" aria-label="Dashboard">
               {sidebarNavItems().filter(item => isAuthed || !item.manage).map(item => (
                 <a
