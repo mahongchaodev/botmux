@@ -320,7 +320,7 @@ function disableOtherDirectBotMentionReceivers(store: Store, input: {
   for (const binding of Object.values(store.bindings)) {
     if (binding.larkAppId !== input.larkAppId) continue;
     for (const [targetKey, chat] of Object.entries(binding.chats)) {
-      if (binding.substituteOpenId === input.substituteOpenId && targetKey === input.targetKey) continue;
+      if ((binding.substituteOpenId === input.substituteOpenId || binding.targetOpenId === input.substituteOpenId) && targetKey === input.targetKey) continue;
       if (targetKey !== input.targetKey && chat.chatId !== input.chat.chatId) continue;
       if (chat.scope !== input.chat.scope || chat.anchor !== input.chat.anchor) continue;
       if (chat.directBotMention !== true) continue;
