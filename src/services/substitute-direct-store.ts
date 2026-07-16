@@ -425,6 +425,29 @@ export function getSubstituteDirectChatByDmAnchor(
   return undefined;
 }
 
+export function migrateActiveSubstituteDirectChatToDmRoot(input: {
+  larkAppId: string;
+  substituteOpenId: string | undefined;
+  dmRootMessageId: string | undefined;
+}): SubstituteDirectChat | undefined {
+  if (!input.substituteOpenId || !input.dmRootMessageId) return undefined;
+  const store = readStore();
+  const binding = store.bindings[key(input.larkAppId, input.substituteOpenId)];
+  if (!binding) return undefined;
+  const exact = Object.values(binding.chats).find(chat =>
+    chat.enabled !== false && chat.dmRootMessageId === input.dmRootMessageId);
+  if (exact) return exact;
+  const active = getActiveSubstituteDirectChat(input.larkAppId, input.substituteOpenId);
+  if (!active || active.mode !== 'direct') return undefined;
+  active.dmRootMessageId = input.dmRootMessageId;
+  active.dmToGroupMessageIds = undefined;
+  active.updatedAt = Date.now();
+  binding.updatedAt = Date.now();
+  store.bindings[key(input.larkAppId, input.substituteOpenId)] = binding;
+  writeStore(store);
+  return active;
+}
+
 export function recordSubstituteDirectForwardedMessage(input: {
   larkAppId: string;
   substituteOpenId: string | undefined;

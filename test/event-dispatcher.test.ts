@@ -150,6 +150,20 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     }
     return undefined;
   },
+  migrateActiveSubstituteDirectChatToDmRoot: (input: any) => {
+    if (!input.substituteOpenId || !input.dmRootMessageId) return undefined;
+    const binding = mockDirectBindings.get(directKey(input.larkAppId, input.substituteOpenId));
+    if (!binding) return undefined;
+    const exact = Object.values<any>(binding.chats ?? {}).find(chat =>
+      chat.enabled !== false && chat.dmRootMessageId === input.dmRootMessageId);
+    if (exact) return exact;
+    const active = binding.activeChatId ? binding.chats?.[binding.activeChatId] : undefined;
+    if (!active || active.mode !== 'direct') return undefined;
+    active.dmRootMessageId = input.dmRootMessageId;
+    active.dmToGroupMessageIds = undefined;
+    mockDirectBindings.set(directKey(input.larkAppId, input.substituteOpenId), binding);
+    return active;
+  },
   getSubstituteDirectChatByTarget: (appId: string, target: any, chatId: string | undefined) => {
     if (!chatId) return undefined;
     if (target?.openId) {
@@ -3108,6 +3122,124 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       MY_APP_ID,
       'chat-substitute-direct-b',
       expect.stringContaining('话题内回复'),
+      'interactive',
+      undefined,
+      expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),
+    );
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: thread mode migrates an old chat binding on the first new DM topic message', async () => {
+    setupBotState({
+      allowedUsers: ['ou_owner_only'],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat:chat-substitute-direct',
+      chats: {
+        'chat:chat-substitute-direct': {
+          targetKey: 'chat:chat-substitute-direct',
+          chatId: 'chat-substitute-direct',
+          scope: 'chat',
+          anchor: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: 'ou_sub',
+      content: JSON.stringify({ text: '切换 thread 后的首条消息' }),
+      messageId: 'dm-new-topic-root',
+      rootId: 'dm-new-topic-root',
+      threadId: 'dm-new-topic-root',
+      chatId: 'dm-chat',
+      chatType: 'p2p',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat:chat-substitute-direct']?.dmRootMessageId)
+      .toBe('dm-new-topic-root');
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'chat-substitute-direct',
+      expect.stringContaining('切换 thread 后的首条消息'),
+      'interactive',
+      undefined,
+      expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),
+    );
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: chat mode keeps forwarding to the active group after thread mode state exists', async () => {
+    setupBotState({
+      p2pMode: 'chat',
+      allowedUsers: ['ou_owner_only'],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat:chat-substitute-direct',
+      chats: {
+        'thread:old-dm-root': {
+          targetKey: 'thread:old-dm-root',
+          chatId: 'old-group',
+          scope: 'thread',
+          anchor: 'old-dm-root',
+          mode: 'direct',
+          enabled: true,
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+        'chat:chat-substitute-direct': {
+          targetKey: 'chat:chat-substitute-direct',
+          chatId: 'chat-substitute-direct',
+          scope: 'chat',
+          anchor: 'chat-substitute-direct',
+          mode: 'direct',
+          enabled: true,
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: 'ou_sub',
+      content: JSON.stringify({ text: '切回 chat 后的消息' }),
+      messageId: 'dm-chat-mode-message',
+      rootId: 'old-dm-root',
+      threadId: 'old-dm-root',
+      chatId: 'dm-chat',
+      chatType: 'p2p',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'chat-substitute-direct',
+      expect.stringContaining('切回 chat 后的消息'),
       'interactive',
       undefined,
       expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),

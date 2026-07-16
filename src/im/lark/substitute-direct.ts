@@ -4,6 +4,7 @@ import {
   getSubstituteDirectChatByDmAnchor,
   getSubstituteDirectQuotedGroupMessageId,
   getSubstituteDirectChat,
+  migrateActiveSubstituteDirectChatToDmRoot,
   recordSubstituteDirectForwardedMessage,
   substituteDirectTargetKey,
   upsertSubstituteDirectChat,
@@ -153,12 +154,23 @@ export async function forwardSubstituteDmMessageToGroup(input: {
   const chat = p2pThreadMode
     ? getSubstituteDirectChatByDmAnchor(input.larkAppId, input.senderOpenId, dmAnchorFromMessage(input.message))
     : getActiveSubstituteDirectChat(input.larkAppId, input.senderOpenId);
-  if (!chat) return false;
   const loc = localeForBot(input.larkAppId);
   const rawBody = textFromMessage(input.message);
   const body = textFromMessage(input.message, { renderAt: true });
   const stripped = rawBody ? stripLeadingMentions(rawBody.trim(), input.message?.mentions ?? []).trim() : '';
   if (stripped.startsWith('/')) return false;
+  const dmRootMessageId = p2pThreadMode ? dmAnchorFromMessage(input.message) : undefined;
+  const canMigrateToNewTopic = p2pThreadMode
+    && dmRootMessageId === input.message?.message_id;
+  const migratedChat = !chat && canMigrateToNewTopic
+    ? migrateActiveSubstituteDirectChatToDmRoot({
+        larkAppId: input.larkAppId,
+        substituteOpenId: input.senderOpenId,
+        dmRootMessageId,
+      })
+    : undefined;
+  const routedChat = chat ?? migratedChat;
+  if (!routedChat) return false;
   if (!body) {
     await replyMessage(input.larkAppId, input.message.message_id, t('substitute.direct.unsupported_dm', undefined, loc), 'text', false)
       .catch(err => logger.warn(`[substitute-direct] unsupported DM notice failed: ${err?.message ?? err}`));
@@ -166,8 +178,8 @@ export async function forwardSubstituteDmMessageToGroup(input: {
   }
   const senderName = await resolveName(input.larkAppId, input.senderOpenId);
   const currentTarget = getBot(input.larkAppId).config.substituteMode?.targets?.find(t => t.openId === input.senderOpenId);
-  const name = senderName || currentTarget?.name || chat.targetName || t('substitute.direct.group_fallback_name', undefined, loc);
-  const content = chat.disclosure === 'none'
+  const name = senderName || currentTarget?.name || routedChat.targetName || t('substitute.direct.group_fallback_name', undefined, loc);
+  const content = routedChat.disclosure === 'none'
     ? t('substitute.direct.group', { name, content: body }, loc)
     : t('substitute.direct.group_prefix', { name, content: body }, loc);
   const card = buildMarkdownCard(content, undefined, resolveBrandLabel(input.larkAppId), loc);
@@ -182,22 +194,22 @@ export async function forwardSubstituteDmMessageToGroup(input: {
       await replyMessage(input.larkAppId, quotedGroupMessageId, card, 'interactive', false, undefined, hookContext);
     } catch (err) {
       if (err instanceof MessageWithdrawnError) {
-        if (chat.scope === 'thread' && chat.anchor) {
-          await replyMessage(input.larkAppId, chat.anchor, card, 'interactive', true, undefined, hookContext);
+        if (routedChat.scope === 'thread' && routedChat.anchor) {
+          await replyMessage(input.larkAppId, routedChat.anchor, card, 'interactive', true, undefined, hookContext);
         } else {
-          await sendMessage(input.larkAppId, chat.chatId, card, 'interactive', undefined, hookContext);
+          await sendMessage(input.larkAppId, routedChat.chatId, card, 'interactive', undefined, hookContext);
         }
       } else {
         throw err;
       }
     }
   } else {
-    if (chat.scope === 'thread' && chat.anchor) {
-      await replyMessage(input.larkAppId, chat.anchor, card, 'interactive', true, undefined, hookContext);
+    if (routedChat.scope === 'thread' && routedChat.anchor) {
+      await replyMessage(input.larkAppId, routedChat.anchor, card, 'interactive', true, undefined, hookContext);
     } else {
-      await sendMessage(input.larkAppId, chat.chatId, card, 'interactive', undefined, hookContext);
+      await sendMessage(input.larkAppId, routedChat.chatId, card, 'interactive', undefined, hookContext);
     }
   }
-  logger.info(`[substitute-direct:${input.larkAppId}] DM ${input.senderOpenId.substring(0, 12)} → group ${chat.chatId.substring(0, 12)}`);
+  logger.info(`[substitute-direct:${input.larkAppId}] DM ${input.senderOpenId.substring(0, 12)} → group ${routedChat.chatId.substring(0, 12)}`);
   return true;
 }
