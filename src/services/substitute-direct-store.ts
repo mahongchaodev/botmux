@@ -181,6 +181,27 @@ function getSubstituteDirectBindingsForSender(
     .map(([, binding]) => binding);
 }
 
+function bindingEntryForSender(
+  store: Store,
+  larkAppId: string,
+  senderOpenId: string | undefined,
+  targetKeyOrChatId?: string,
+): [string, SubstituteDirectBinding] | undefined {
+  if (!senderOpenId) return undefined;
+  const entries = findSubstituteDirectBindingEntriesForSender(larkAppId, senderOpenId, store);
+  if (targetKeyOrChatId) {
+    const targetKey = targetKeyOrChatId.startsWith('chat:') || targetKeyOrChatId.startsWith('thread:')
+      ? targetKeyOrChatId
+      : substituteDirectTargetKey('chat', targetKeyOrChatId, targetKeyOrChatId) ?? targetKeyOrChatId;
+    const matching = entries.find(([, binding]) =>
+      !!binding.chats[targetKey] || Object.values(binding.chats).some(chat => chat.chatId === targetKeyOrChatId));
+    if (matching) return matching;
+  }
+  const canonicalKey = key(larkAppId, senderOpenId);
+  const canonical = store.bindings[canonicalKey];
+  return canonical ? [canonicalKey, canonical] : entries[0];
+}
+
 export function getSubstituteDirectBindingForSender(
   larkAppId: string,
   senderOpenId: string | undefined,
@@ -325,8 +346,9 @@ export function upsertSubstituteDirectChat(input: {
   preserveExistingChats?: boolean;
 }): SubstituteDirectBinding {
   const store = readStore();
-  const k = key(input.larkAppId, input.substituteOpenId);
-  const current = store.bindings[k] ?? {
+  const existingEntry = bindingEntryForSender(store, input.larkAppId, input.substituteOpenId, input.targetKey ?? input.chatId);
+  const k = existingEntry?.[0] ?? key(input.larkAppId, input.substituteOpenId);
+  const current = existingEntry?.[1] ?? {
     larkAppId: input.larkAppId,
     substituteOpenId: input.substituteOpenId,
     chats: {},
@@ -386,8 +408,9 @@ export function setSubstituteDirectChatBotMention(input: {
 }): boolean {
   if (!input.substituteOpenId || !input.targetKeyOrChatId) return false;
   const store = readStore();
-  const k = key(input.larkAppId, input.substituteOpenId);
-  const binding = store.bindings[k] ?? {
+  const existingEntry = bindingEntryForSender(store, input.larkAppId, input.substituteOpenId, input.targetKeyOrChatId);
+  const k = existingEntry?.[0] ?? key(input.larkAppId, input.substituteOpenId);
+  const binding = existingEntry?.[1] ?? {
     larkAppId: input.larkAppId,
     substituteOpenId: input.substituteOpenId,
     chats: {},
@@ -536,9 +559,9 @@ export function getSubstituteDirectQuotedGroupMessageId(
 export function clearSubstituteDirectChat(larkAppId: string, substituteOpenId: string | undefined, chatId?: string): boolean {
   if (!substituteOpenId) return false;
   const store = readStore();
-  const k = key(larkAppId, substituteOpenId);
-  const binding = store.bindings[k];
-  if (!binding) return false;
+  const entry = bindingEntryForSender(store, larkAppId, substituteOpenId, chatId);
+  if (!entry) return false;
+  const [k, binding] = entry;
   if (!chatId) {
     const existed = Object.keys(binding.chats).length > 0;
     delete store.bindings[k];
@@ -561,9 +584,9 @@ export function clearSubstituteDirectChat(larkAppId: string, substituteOpenId: s
 export function clearSubstituteDirectChatsByGroup(larkAppId: string, substituteOpenId: string | undefined, chatId: string | undefined): boolean {
   if (!substituteOpenId || !chatId) return false;
   const store = readStore();
-  const k = key(larkAppId, substituteOpenId);
-  const binding = store.bindings[k];
-  if (!binding) return false;
+  const entry = bindingEntryForSender(store, larkAppId, substituteOpenId, chatId);
+  if (!entry) return false;
+  const [k, binding] = entry;
   let changed = false;
   for (const [targetKey, chat] of Object.entries(binding.chats)) {
     if (chat.chatId !== chatId) continue;
@@ -584,9 +607,9 @@ export function clearSubstituteDirectChatsByGroup(larkAppId: string, substituteO
 export function deactivateSubstituteDirectChat(larkAppId: string, substituteOpenId: string | undefined, targetKeyOrChatId?: string): boolean {
   if (!substituteOpenId || !targetKeyOrChatId) return false;
   const store = readStore();
-  const k = key(larkAppId, substituteOpenId);
-  const binding = store.bindings[k];
-  if (!binding) return false;
+  const entry = bindingEntryForSender(store, larkAppId, substituteOpenId, targetKeyOrChatId);
+  if (!entry) return false;
+  const [k, binding] = entry;
   const targetKey = binding.chats[targetKeyOrChatId] ? targetKeyOrChatId : substituteDirectTargetKey('chat', targetKeyOrChatId, targetKeyOrChatId) ?? targetKeyOrChatId;
   const chat = binding.chats[targetKey];
   if (!chat || chat.enabled === false) return false;
