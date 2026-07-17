@@ -124,6 +124,8 @@ describe('installHook — claude-settings', () => {
     const botmuxReady = ss.filter((g) => g.hooks?.some((e: any) => e.command.includes('cli.js') && e.command.trimEnd().endsWith('session-ready')));
     expect(botmuxReady.length).toBe(1);
     expect(botmuxReady[0].hooks[0].command).toBe(readyCmd2);
+    expect(hasInstalledSessionReadyHook(hookInstall)).toBe(false);
+    expect(hasInstalledSessionReadyHook({ ...hookInstall, sessionStartCommand: readyCmd2 })).toBe(true);
   });
 
   it('ready preflight fails closed for malformed or unrelated SessionStart config', () => {
@@ -205,6 +207,16 @@ describe('installHook — claude-settings', () => {
     expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBe('global-token-v2');
     expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://provider-2.example');
     expect(settings.env.BOT_LOCAL_ONLY).toBe('preserved');
+
+    // Shared deletions are authoritative on the next cold spawn, while keys
+    // that only ever existed in the per-bot file remain untouched.
+    writeFileSync(globalPath, JSON.stringify({ env: {} }));
+    installHook('claude-code', config, hookCommand);
+    settings = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(settings.env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(settings.env.BOT_LOCAL_ONLY).toBe('preserved');
+    expect(statSync(`${configPath}.botmux-inherited-env.json`).mode & 0o777).toBe(0o600);
   });
 
   it('(c2) 已有同 hookCommand 的 PreToolUse entry 不会重复追加', () => {

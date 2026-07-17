@@ -83,6 +83,11 @@ interface ClaudeSettings {
   [key: string]: unknown;
 }
 
+interface InheritedClaudeEnvState {
+  version: 1;
+  keys: string[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -165,7 +170,12 @@ export function hasInstalledSessionReadyHook(hookInstall: HookInstallConfig): bo
   }
   const settings = readJsonFile<ClaudeSettings>(expandHome(hookInstall.configPath));
   const groups = settings?.hooks?.SessionStart;
-  return Array.isArray(groups) && groups.some(isBotmuxReadyHookGroup);
+  return Array.isArray(groups) && groups.some(group =>
+    Array.isArray(group?.hooks) && group.hooks.some(entry =>
+      entry?.type === 'command'
+      && entry.command === hookInstall.sessionStartCommand,
+    ),
+  );
 }
 
 /**
@@ -185,13 +195,33 @@ function installClaudeSettings(
   inheritClaudeEnvFrom?: string,
 ): void {
   const settings: ClaudeSettings = readJsonFile<ClaudeSettings>(configPath) ?? {};
+  let inheritedEnvState: { path: string; content: string } | undefined;
   if (inheritClaudeEnvFrom) {
     const source = readJsonFile<ClaudeSettings>(expandHome(inheritClaudeEnvFrom));
-    if (isRecord(source?.env)) {
-      const localEnv = isRecord(settings.env) ? settings.env : {};
-      // Preserve per-bot-only env entries, but refresh overlapping shared
-      // provider auth/model/proxy keys from the authoritative global config.
-      settings.env = { ...localEnv, ...source.env };
+    // A malformed/unreadable shared file is treated as a transient failure: do
+    // not erase the last known-good inherited env. A valid file with no `env`,
+    // however, is an authoritative deletion and must remove previously copied
+    // keys from the per-bot settings.
+    if (source) {
+      const inheritedStatePath = `${configPath}.botmux-inherited-env.json`;
+      const previousState = readJsonFile<InheritedClaudeEnvState>(inheritedStatePath);
+      const previousInheritedKeys = previousState?.version === 1 && Array.isArray(previousState.keys)
+        ? previousState.keys.filter((key): key is string => typeof key === 'string')
+        : [];
+      const localEnv = isRecord(settings.env) ? { ...settings.env } : {};
+      for (const key of previousInheritedKeys) delete localEnv[key];
+
+      const sharedEnv = isRecord(source.env) ? source.env : {};
+      const mergedEnv = { ...localEnv, ...sharedEnv };
+      if (Object.keys(mergedEnv).length > 0) settings.env = mergedEnv;
+      else delete settings.env;
+
+      // Track exactly which keys came from the shared file so a later cold
+      // spawn can propagate deletions without discarding per-bot-only entries.
+      inheritedEnvState = {
+        path: inheritedStatePath,
+        content: `${JSON.stringify({ version: 1, keys: Object.keys(sharedEnv).sort() }, null, 2)}\n`,
+      };
     }
   }
   const existingHooks = settings.hooks ?? {};
@@ -219,6 +249,11 @@ function installClaudeSettings(
   // An inherited env can contain provider credentials. Keep the per-bot copy
   // owner-only even if the pre-existing hook-only file was created as 0644.
   const changed = writeIfChanged(configPath, content, inheritClaudeEnvFrom ? 0o600 : undefined);
+  if (inheritedEnvState) {
+    // Publish the ownership record only after the corresponding settings write
+    // succeeds, so a failed settings update cannot claim per-bot keys as shared.
+    writeIfChanged(inheritedEnvState.path, inheritedEnvState.content, 0o600);
+  }
   if (changed) {
     logger.info(`[hook] 已写入 Claude hook → ${configPath}`);
   } else {
