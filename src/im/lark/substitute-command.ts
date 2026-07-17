@@ -634,30 +634,6 @@ export async function handleSubstituteDirectCardAction(input: {
     };
   }
   const targetKey = input.detailTargetKey || (input.chatId ? substituteDirectTargetKey('chat', input.chatId, input.chatId) : undefined);
-  if (input.action === 'substitute_direct_bot_mention_enable' || input.action === 'substitute_direct_bot_mention_disable') {
-    if (!canManageDirectSession(input.larkAppId, input.operatorOpenId)) {
-      return { toast: { type: 'error', content: t('cmd.substitute.owner_only', undefined, loc) } };
-    }
-    if (!targetKey || !input.chatId) {
-      return { toast: { type: 'error', content: t('cmd.substitute.direct_bad_chat', undefined, loc) } };
-    }
-    const target = substituteTargetForDirectAction(input.larkAppId, input.operatorOpenId);
-    const enabled = input.action === 'substitute_direct_bot_mention_enable';
-    setSubstituteDirectChatBotMention({
-      larkAppId: input.larkAppId,
-      substituteOpenId: substituteBindingOpenIdForControls(input.larkAppId, input.operatorOpenId),
-      targetKeyOrChatId: targetKey,
-      enabled,
-      targetOpenId: target?.openId,
-      substituteUserId: target?.userId,
-      substituteUnionId: target?.unionId,
-      chatId: input.chatId,
-      scope: targetKey.startsWith('thread:') ? 'thread' : 'chat',
-      anchor: targetKey.replace(/^(chat|thread):/, ''),
-      targetName: target?.name,
-      disclosure: getBot(input.larkAppId).config.substituteMode?.disclosure,
-    });
-  }
   const result = await applyDirectAction(input.larkAppId, input.operatorOpenId, targetKey, input.action, loc, input.activeSessions, input.closeSession);
   const rows = await listSubstituteDirectChats(input.larkAppId, input.operatorOpenId, input.activeSessions);
   const detailTargetKey = result.ok && input.action === 'substitute_direct_leave_group'
