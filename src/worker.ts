@@ -185,6 +185,7 @@ import { withCodexAppContext } from './utils/codex-app-context.js';
 import { resolveCodexAppFinalTurnIdentity } from './adapters/cli/codex-app-turn.js';
 import { RunnerControlDecoder } from './adapters/cli/runner-control-channel.js';
 import {
+  hasMatchingManagedOriginCapability,
   managedOriginCapabilityPath,
   RELAY_ORIGIN_CAPABILITY_BASENAME,
   replaceManagedOriginCapabilityFile,
@@ -856,7 +857,7 @@ let currentBotmuxTurnId: string | undefined;
 let currentBotmuxDispatchAttempt: number | undefined;
 let currentVcMeetingImTurnOrigin: VcMeetingImTurnOrigin | undefined;
 let durableTurnInFlight = false;
-function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): void {
+function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boolean {
   const capability = {
     token: randomBytes(32).toString('hex'),
     ...(currentBotmuxTurnId ? { turnId: currentBotmuxTurnId } : {}),
@@ -885,17 +886,32 @@ function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): voi
         }]
       : []),
   ];
+  let publishError: unknown;
   for (const file of files) {
     try {
       replaceManagedOriginCapabilityFile(file.path, file.body);
     } catch (err: any) {
       log(`Failed to publish managed origin capability: ${err?.message ?? err}`);
-      if (opts.failClosed) {
-        unlinkManagedOriginCapabilityFiles();
-        throw err;
-      }
+      publishError = err;
+      break;
     }
   }
+
+  if (publishError) {
+    // The disk/daemon/worker views must rotate as one authority generation. If
+    // the child-visible transport cannot publish the new token, revoke the old
+    // generation and leave no in-memory authority for ready/send preflights to
+    // mistake as usable. Any files written before a later failure are removed
+    // by the revocation helper as well.
+    completeManagedTurnOriginRevocation(
+      sandboxRelayCapability,
+      currentBotmuxTurnId,
+      currentBotmuxDispatchAttempt,
+    );
+    if (opts.failClosed) throw publishError;
+    return false;
+  }
+
   sandboxRelayCapability = capability;
   if (sessionId) {
     send({
@@ -908,6 +924,7 @@ function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): voi
         : {}),
     });
   }
+  return true;
 }
 
 function unlinkManagedOriginCapabilityFiles(): void {
@@ -6478,14 +6495,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   const isolatedReadyTransportRequired = sandboxOn || willReadIsolate;
   const readyPortAvailable = !isolatedReadyTransportRequired
     || parseDaemonIpcPort(childEnv.BOTMUX_DAEMON_IPC_PORT) !== undefined;
-  const readyCapabilityPath = sandboxRelayOutbox
-    ? join(sandboxRelayOutbox, RELAY_ORIGIN_CAPABILITY_BASENAME)
-    : readIsolationOriginCapabilityFile;
   const readyCapabilityAvailable = !isolatedReadyTransportRequired
-    || (
-      sandboxRelayCapability !== null
-      && !!readyCapabilityPath
-      && existsSync(readyCapabilityPath)
+    || hasMatchingManagedOriginCapability(
+      process.env.SESSION_DATA_DIR ?? '',
+      cfg.sessionId,
+      sandboxRelayCapability?.token,
+      sandboxRelayOutbox ?? undefined,
     );
   const readySignalAvailable =
     readyHookAvailable && readyPortAvailable && readyCapabilityAvailable;
@@ -6497,7 +6512,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     const reasons = [
       ...(!readyHookAvailable ? ['SessionStart hook missing from effective config'] : []),
       ...(!readyPortAvailable ? ['BOTMUX_DAEMON_IPC_PORT missing/invalid'] : []),
-      ...(!readyCapabilityAvailable ? ['ready capability transport unavailable'] : []),
+      ...(!readyCapabilityAvailable ? ['ready capability transport missing, unreadable, or stale'] : []),
     ];
     log(`Ready gate skipped — preflight failed: ${reasons.join('; ')}`);
   }
