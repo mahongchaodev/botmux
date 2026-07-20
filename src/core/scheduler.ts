@@ -727,3 +727,67 @@ export function toggleDelivery(id: string): { ok: boolean; error?: string; deliv
   });
   return { ok: true, deliver: next };
 }
+
+/**
+ * Update editable fields of a scheduled task (name, prompt, schedule, deliver,
+ * silent). Re-parses the schedule expression and recomputes nextRunAt when the
+ * schedule string changes. Enforces the silent↔new-topic mutual exclusion.
+ * Emits a `schedule.updated` event so the dashboard reflects changes live.
+ */
+export function updateTask(
+  id: string,
+  updates: {
+    name?: string;
+    prompt?: string;
+    schedule?: string;
+    deliver?: 'origin' | 'local' | 'new-topic';
+    silent?: boolean;
+  },
+): { ok: boolean; error?: string } {
+  const task = scheduleStore.getTask(id);
+  if (!task) return { ok: false, error: 'not_found' };
+
+  // Enforce silent ↔ new-topic mutual exclusion (same rule as addTask).
+  const nextDeliver = updates.deliver ?? task.deliver ?? 'origin';
+  const nextSilent = updates.silent ?? task.silent === true;
+  if (nextSilent && nextDeliver === 'new-topic') {
+    return { ok: false, error: 'silent_new_topic_exclusive' };
+  }
+
+  const patch: Record<string, unknown> = {};
+  if (updates.name !== undefined) patch.name = updates.name;
+  if (updates.prompt !== undefined) patch.prompt = updates.prompt;
+  if (updates.deliver !== undefined) patch.deliver = updates.deliver;
+  if (updates.silent !== undefined) patch.silent = updates.silent === true ? true : undefined;
+
+  // Re-parse + recompute next run when the schedule expression changes.
+  if (updates.schedule !== undefined && updates.schedule !== task.schedule) {
+    const parsed = parseSchedule(updates.schedule);
+    patch.schedule = updates.schedule;
+    patch.parsed = parsed;
+    const next = computeNextRun(parsed);
+    patch.nextRunAt = next ?? undefined;
+  }
+
+  scheduleStore.updateTask(id, patch);
+  dashboardEventBus.publish({
+    type: 'schedule.updated',
+    body: { id, patch },
+  });
+  return { ok: true };
+}
+
+/**
+ * Delete a scheduled task. Emits a `schedule.removed` event so the dashboard
+ * drops the row immediately without waiting for the next poll.
+ */
+export function removeTaskForDashboard(id: string): { ok: boolean; error?: string } {
+  const task = scheduleStore.getTask(id);
+  if (!task) return { ok: false, error: 'not_found' };
+  scheduleStore.removeTask(id);
+  dashboardEventBus.publish({
+    type: 'schedule.deleted',
+    body: { id },
+  });
+  return { ok: true };
+}

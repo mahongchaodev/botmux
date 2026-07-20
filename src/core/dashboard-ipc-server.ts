@@ -1282,6 +1282,66 @@ ipcRoute('POST', '/api/schedules/:id/resume', (_req, res, p) => jsonRes(res, 200
 // 'new-topic' (open a brand-new topic + fresh session on every fire).
 ipcRoute('POST', '/api/schedules/:id/delivery', (_req, res, p) => jsonRes(res, 200, scheduler.toggleDelivery(p.id)));
 
+// Create a new scheduled task from the dashboard. chatId selects which chat
+// the task fires into; workingDir defaults to the daemon's cwd.
+ipcRoute('POST', '/api/schedules', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+  let body: unknown;
+  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_json' }); }
+  const b = body as {
+    name?: string; schedule?: string; prompt?: string;
+    deliver?: 'origin' | 'local' | 'new-topic'; silent?: boolean;
+    chatId?: string; workingDir?: string;
+  };
+  if (!b.name || !b.schedule || !b.prompt || !b.chatId) {
+    return jsonRes(res, 400, { ok: false, error: 'missing_fields', fields: ['name', 'schedule', 'prompt', 'chatId'] });
+  }
+  try {
+    const task = scheduler.addTask({
+      name: b.name,
+      schedule: b.schedule,
+      prompt: b.prompt,
+      workingDir: b.workingDir ?? process.cwd(),
+      chatId: b.chatId,
+      scope: 'chat',
+      chatType: 'group',
+      larkAppId: cachedLarkAppId,
+      deliver: b.deliver ?? 'origin',
+      silent: b.silent === true,
+    });
+    dashboardEventBus.publish({ type: 'schedule.created', body: { schedule: composeScheduleRow(task) } });
+    jsonRes(res, 200, { ok: true, task: composeScheduleRow(task) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    jsonRes(res, 400, { ok: false, error: msg });
+  }
+});
+
+// Update editable fields of an existing task (name, prompt, schedule, deliver, silent).
+ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
+  let body: unknown;
+  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_json' }); }
+  const b = body as {
+    name?: string; prompt?: string; schedule?: string;
+    deliver?: 'origin' | 'local' | 'new-topic'; silent?: boolean;
+  };
+  const result = scheduler.updateTask(p.id, {
+    name: b.name,
+    prompt: b.prompt,
+    schedule: b.schedule,
+    deliver: b.deliver,
+    silent: b.silent,
+  });
+  if (!result.ok) return jsonRes(res, 400, result);
+  const task = scheduleStore.getTask(p.id);
+  jsonRes(res, 200, { ok: true, task: task ? composeScheduleRow(task) : undefined });
+});
+
+// Delete a scheduled task.
+ipcRoute('DELETE', '/api/schedules/:id', (_req, res, p) => {
+  jsonRes(res, 200, scheduler.removeTaskForDashboard(p.id));
+});
+
 ipcRoute('POST', '/api/trigger', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, errorCode: 'bot_not_found', error: 'larkAppId_not_set' });
   const activeSessions = getActiveSessionsRegistry();
