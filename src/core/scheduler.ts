@@ -740,7 +740,7 @@ export function updateTask(
     name?: string;
     prompt?: string;
     schedule?: string;
-    deliver?: 'origin' | 'local' | 'new-topic';
+    deliver?: 'origin' | 'new-topic';
     silent?: boolean;
   },
 ): { ok: boolean; error?: string } {

@@ -1310,19 +1310,20 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   // Validate required fields are present AND non-empty after trim.
   if (!name) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'name' });
   if (!schedule) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'schedule' });
-  if (!prompt) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'prompt' });
+  if (!prompt.trim()) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'prompt' });
   if (!chatId) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'chatId' });
   // Verify this bot is a member of the target chat — otherwise the task will
-  // fire but fail to deliver every time.
+  // fire but fail to deliver every time. listChatBotMembers returns [] both
+  // when the bot is absent AND when the API is unavailable (it swallows
+  // is_in_chat errors), so we only block on a non-empty result that excludes
+  // us. An empty list is treated as "unknown" → fail-open, let the task fire.
   try {
     const members = await listChatBotMembers(cachedLarkAppId, chatId).catch(() => [] as ChatBotMember[]);
-    const isMember = members.some(m => m.larkAppId === cachedLarkAppId);
-    if (!isMember) {
+    if (members.length > 0 && !members.some(m => m.larkAppId === cachedLarkAppId)) {
       return jsonRes(res, 400, { ok: false, error: 'bot_not_in_chat', field: 'chatId' });
     }
   } catch {
-    // Membership check is best-effort; if the API is down during startup,
-    // fall through and let the task fail at fire time rather than blocking creation.
+    // Best-effort: never block creation on membership check failure.
   }
   try {
     const task = scheduler.addTask({
@@ -1366,7 +1367,7 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
     updates.name = b.name.trim();
   }
   if (b.prompt !== undefined) {
-    if (typeof b.prompt !== 'string' || !b.prompt) {
+    if (typeof b.prompt !== 'string' || !b.prompt.trim()) {
       return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'prompt' });
     }
     updates.prompt = b.prompt;
