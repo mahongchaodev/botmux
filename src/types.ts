@@ -112,9 +112,13 @@ export interface Session {
   rootMessageId: string;
   /** Conversation unit. 'thread' (default for legacy) routes by rootMessageId
    *  and replies via reply_in_thread=true. 'chat' routes by chatId and posts
-   *  replies as plain chat messages. Sessions in 话题群 are always 'thread'
-   *  because Lark forces every top-level message into a thread. */
+   *  replies as plain chat messages. Sessions in 话题群 are normally 'thread';
+   *  a webhook whose topic seed is explicitly disabled is the one topicless
+   *  exception and keeps its automation session chat-scoped. */
   scope?: 'thread' | 'chat';
+  /** This chat-scoped automation deliberately has no topic seed. Prevents the
+   *  chat-mode conversion guard from treating chatId as a replyable message id. */
+  externalTriggerTopicless?: boolean;
   /** Dedicated VC meeting consumer session identity. These sessions share the
    *  listener chat as their output route, but MUST NOT share the ordinary
    *  chat-scope routing slot (or another meeting/member's CLI context). */
