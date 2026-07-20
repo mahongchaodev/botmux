@@ -460,12 +460,15 @@ describe('repo select card — plain switch', () => {
     expect(ds.session.sessionId).toBe('uuid-old');
 
     const late = await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
-    expect(late?.toast?.content).toContain('已有一个 worktree 正在创建');
+    // After successful fork the card is marked consumed before confirm reply,
+    // so the second click is rejected even while claim is still held.
+    expect(late?.toast?.content).toMatch(/仓库已选定|worktree 正在创建|ignore the old card/i);
     expect(forkWorker).toHaveBeenCalledTimes(1);
     expect(killWorker).not.toHaveBeenCalled();
     expect(createSession).not.toHaveBeenCalled();
     expect(ds.session.sessionId).toBe('uuid-old');
     expect(ds.workingDir).toBe('/repos/alpha');
+    expect(ds.consumedRepoCardMessageIds).toContain('om_card');
 
     releaseReply!();
     await first;
@@ -503,6 +506,91 @@ describe('repo select card — plain switch', () => {
     expect(ds.session.workingDir).toBeUndefined();
     expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('已直接开启会话');
     expect(deleteMessage).toHaveBeenCalledWith(APP_ID, 'om_card');
+  });
+
+  it('rejects a stale card click while deleteMessage is still pending (local consume mark)', async () => {
+    // Regression: deleteMessage used to be fire-and-forget after claim release.
+    // We now mark the card consumed before network awaits and hold the claim
+    // through best-effort withdraw. A second click on the still-visible card
+    // must never mid-session-switch (killWorker), whether claim is still held
+    // or Feishu withdraw hangs / returns false.
+    const ds = makeDs({
+      pendingRepo: true,
+      pendingPrompt: 'hello world',
+      pendingTurnId: 'om_first_turn',
+      repoCardMessageId: 'om_card',
+      worker: null,
+    });
+    // Simulate a live worker after the first fork so a mid-session path would
+    // call killWorker if the stale click were allowed through.
+    vi.mocked(forkWorker).mockImplementationOnce((session) => {
+      (session as any).worker = { killed: false, send: vi.fn() };
+    });
+    const { deps } = makeDeps(ds);
+    let releaseDelete: (() => void) | undefined;
+    vi.mocked(deleteMessage).mockImplementationOnce(() => new Promise<boolean>(res => {
+      releaseDelete = () => res(false); // withdraw "failed" / no-op
+    }) as any);
+
+    const first = handleCardAction(makeSelectEvent('repo_switch', '/repos/alpha'), deps, APP_ID);
+    await vi.waitFor(() => expect(forkWorker).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(releaseDelete).toBeTruthy());
+    // Consume is local and synchronous before the hung delete.
+    expect(ds.consumedRepoCardMessageIds).toContain('om_card');
+    expect(ds.session.sessionId).toBe('uuid-old');
+
+    const lateWhileDeletePending = await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
+    expect(lateWhileDeletePending?.toast?.content).toMatch(/仓库已选定|worktree 正在创建|ignore the old card/i);
+    expect(killWorker).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+
+    releaseDelete!();
+    await first;
+    expect(ds.pendingRepoCommitInFlight).toBe(false);
+    expect(ds.session.sessionId).toBe('uuid-old');
+    expect(ds.workingDir).toBe('/repos/alpha');
+
+    // After claim release, Feishu may still show the card (delete returned false).
+    // Consume mark alone must keep rejecting.
+    const lateAfter = await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
+    expect(lateAfter?.toast?.content).toMatch(/仓库已选定|ignore the old card/i);
+    expect(killWorker).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+    expect(ds.session.sessionId).toBe('uuid-old');
+  });
+
+  it('keeps the first-spawn session when confirm sessionReply throws (card still marked consumed)', async () => {
+    // Sibling window: sessionReply throws → finally releases claim, card may
+    // still be visible. Consume mark must still reject the second click.
+    const ds = makeDs({
+      pendingRepo: true,
+      pendingPrompt: 'hello world',
+      pendingTurnId: 'om_first_turn',
+      repoCardMessageId: 'om_card',
+      worker: null,
+    });
+    vi.mocked(forkWorker).mockImplementationOnce((session) => {
+      (session as any).worker = { killed: false, send: vi.fn() };
+    });
+    const { deps, sessionReply } = makeDeps(ds);
+    sessionReply.mockRejectedValueOnce(new Error('reply boom'));
+
+    await handleCardAction(makeSelectEvent('repo_switch', '/repos/alpha'), deps, APP_ID);
+
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+    expect(ds.pendingRepo).toBe(false);
+    expect(ds.pendingRepoCommitInFlight).toBe(false);
+    expect(ds.consumedRepoCardMessageIds).toContain('om_card');
+    expect(ds.workingDir).toBe('/repos/alpha');
+
+    const late = await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
+    expect(late?.toast?.content).toMatch(/仓库已选定|ignore the old card/i);
+    expect(killWorker).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+    expect(ds.session.sessionId).toBe('uuid-old');
   });
 
   it('keeps pending buffers and releases the claim when forkWorker throws, then allows retry', async () => {

@@ -86,7 +86,7 @@ import {
   writeRoleProfileEntry,
 } from '../services/role-profile-store.js';
 import type { LarkMessage, DaemonToWorker } from '../types.js';
-import { sessionKey, sessionAnchorId } from './types.js';
+import { sessionKey, sessionAnchorId, markRepoCardConsumed } from './types.js';
 import type { DaemonSession } from './types.js';
 import { t, localeForBot, type Locale } from '../i18n/index.js';
 import { runSkillsImCommand } from './skills/im-command.js';
@@ -1539,14 +1539,21 @@ export async function handleCommand(
             ds!.pendingTurnId = undefined;
             committed = true;
 
-            // Hold the claim through confirmation + card consumption. Releasing
-            // right after forkWorker lets a concurrent card click / second /repo
-            // see pendingRepo=false and treat this as a mid-session switch that
-            // kills the just-started worker and drops the first-turn task.
-            await sessionReply(rootId, replyText);
-            if (ds!.repoCardMessageId) {
-              deleteMessage(ds!.larkAppId, ds!.repoCardMessageId);
-              ds!.repoCardMessageId = undefined;
+            // Local one-shot consume BEFORE network awaits. Feishu withdraw is
+            // best-effort; stale card clicks must be rejected via this mark even
+            // if sessionReply throws or deleteMessage lags/fails.
+            const cardToWithdraw = ds!.repoCardMessageId;
+            markRepoCardConsumed(ds!, cardToWithdraw);
+            ds!.repoCardMessageId = undefined;
+
+            // Hold the claim through confirmation + best-effort card withdraw.
+            try {
+              await sessionReply(rootId, replyText);
+            } catch (e) {
+              logger.warn(`[${logTag}] Confirm reply after pending repo commit failed: ${e instanceof Error ? e.message : e}`);
+            }
+            if (cardToWithdraw) {
+              try { await deleteMessage(ds!.larkAppId, cardToWithdraw); } catch { /* best-effort */ }
             }
           } finally {
             ds!.pendingRepoCommitInFlight = false;
@@ -1624,9 +1631,11 @@ export async function handleCommand(
             ds!.hasHistory = false;
             forkWorker(ds!, '', false);
             await sessionReply(rootId, t('cmd.repo.switched_to', { name: displayName }, loc));
-            if (ds!.repoCardMessageId) {
-              deleteMessage(ds!.larkAppId, ds!.repoCardMessageId);
-              ds!.repoCardMessageId = undefined;
+            const midCard = ds!.repoCardMessageId;
+            markRepoCardConsumed(ds!, midCard);
+            ds!.repoCardMessageId = undefined;
+            if (midCard) {
+              try { await deleteMessage(ds!.larkAppId, midCard); } catch { /* best-effort */ }
             }
           }
           logger.info(`[${logTag}] Repo selected via ${how}: ${selectedPath}`);

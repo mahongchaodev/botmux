@@ -69,6 +69,14 @@ export interface DaemonSession {
    *  also await prompt context before the fork. */
   pendingRepoCommitInFlight?: boolean;
   repoCardMessageId?: string;    // message_id of the repo selection card — for withdrawal
+  /**
+   * Repo-select card message ids already consumed by a successful pending→worker
+   * transition (or an explicit mid-session card switch). Stale clicks on these
+   * cards must not be treated as a new mid-session switch that kills the just-
+   * started worker — Feishu card withdraw is best-effort and may lag or fail.
+   * In-memory only; not persisted.
+   */
+  consumedRepoCardMessageIds?: string[];
   worktreeCreating?: boolean;    // a worktree-open is in flight — dedups repeated card clicks / `/repo wt`
   pendingPrompt?: string;        // original user message to send after repo is selected
   /** Exact Lark message id whose user input is waiting for the first worker
@@ -268,6 +276,21 @@ export interface DaemonSession {
  *  between the two address spaces are not possible. */
 export function sessionKey(anchorId: string, larkAppId: string): string {
   return `${anchorId}::${larkAppId}`;
+}
+
+const CONSUMED_REPO_CARD_CAP = 16;
+
+/** Record a repo-select card as already consumed. Correctness for stale clicks
+ *  depends on this local mark — not on Feishu deleteMessage succeeding. */
+export function markRepoCardConsumed(ds: DaemonSession, cardMessageId: string | undefined): void {
+  if (!cardMessageId) return;
+  const ids = ds.consumedRepoCardMessageIds ?? (ds.consumedRepoCardMessageIds = []);
+  if (!ids.includes(cardMessageId)) ids.push(cardMessageId);
+  if (ids.length > CONSUMED_REPO_CARD_CAP) ids.splice(0, ids.length - CONSUMED_REPO_CARD_CAP);
+}
+
+export function isRepoCardConsumed(ds: DaemonSession, cardMessageId: string | undefined): boolean {
+  return !!cardMessageId && !!ds.consumedRepoCardMessageIds?.includes(cardMessageId);
 }
 
 /** Resolve the routing anchor for an active session — chatId for chat-scope

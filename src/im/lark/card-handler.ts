@@ -65,7 +65,7 @@ import { publishAttentionPatch, announcePendingRepoSession } from '../../core/se
 import { fallbackTurnId } from '../../core/reply-target.js';
 import { validateWorkingDir } from '../../core/working-dir.js';
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
-import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
+import { sessionKey, sessionAnchorId, frozenDisplayMode, markRepoCardConsumed, isRepoCardConsumed } from '../../core/types.js';
 import type { DaemonSession } from '../../core/types.js';
 import { buildTerminalUrl } from '../../core/terminal-url.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
@@ -508,21 +508,32 @@ export async function commitRepoSelection(
       ds.pendingTurnId = undefined;
       committed = true;
 
-      // Hold the claim through confirmation + card consumption. Releasing right
-      // after forkWorker leaves a window where a second card click sees
-      // pendingRepo=false and pendingRepoCommitInFlight=false, and is treated as
-      // a mid-session switch that kills the just-started worker.
-      if (!opts?.suppressConfirmReply) {
-        // A card click has no turn of its own — anchor the confirmation to the
-        // session's current reply-target turn so a shared fold-back topic keeps
-        // it in-thread (same leak as the /repo command path).
-        await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget), undefined, fallbackTurnId(ds, undefined));
-      } else if (opts.confirmReplyText) {
-        await sessionReply(rootId, opts.confirmReplyText, undefined, fallbackTurnId(ds, undefined));
-      }
+      // Local one-shot consume BEFORE any network await. Feishu withdraw is
+      // best-effort and may lag/fail; correctness for stale card clicks depends
+      // on this mark so a second callback cannot mid-session-switch after claim
+      // release (and so a sessionReply throw that jumps to finally still leaves
+      // the card locally invalid).
       const cardToWithdraw = cardMessageId ?? ds.repoCardMessageId;
-      if (cardToWithdraw && larkAppId) deleteMessage(larkAppId, cardToWithdraw);
+      markRepoCardConsumed(ds, cardToWithdraw);
       ds.repoCardMessageId = undefined;
+
+      // Hold the claim through confirmation + best-effort card withdraw so a
+      // concurrent in-flight select still sees pendingRepoCommitInFlight.
+      try {
+        if (!opts?.suppressConfirmReply) {
+          // A card click has no turn of its own — anchor the confirmation to the
+          // session's current reply-target turn so a shared fold-back topic keeps
+          // it in-thread (same leak as the /repo command path).
+          await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget), undefined, fallbackTurnId(ds, undefined));
+        } else if (opts.confirmReplyText) {
+          await sessionReply(rootId, opts.confirmReplyText, undefined, fallbackTurnId(ds, undefined));
+        }
+      } catch (e) {
+        logger.warn(`[${tag(ds)}] Confirm reply after pending repo commit failed: ${e instanceof Error ? e.message : e}`);
+      }
+      if (cardToWithdraw && larkAppId) {
+        try { await deleteMessage(larkAppId, cardToWithdraw); } catch { /* card may already be gone */ }
+      }
     } finally {
       ds.pendingRepoCommitInFlight = false;
     }
@@ -605,9 +616,14 @@ export async function commitRepoSelection(
     logger.info(`[${tag(ds)}] Repo switched to ${dirPath}, new session created`);
   }
 
-  // Withdraw the repo selection card
-  if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+  // Withdraw the repo selection card (mid-session path). Mark consumed first so
+  // a second click on the same card cannot double-switch while delete lags.
+  const midCard = cardMessageId ?? ds.repoCardMessageId;
+  markRepoCardConsumed(ds, midCard);
   ds.repoCardMessageId = undefined;
+  if (midCard && larkAppId) {
+    try { await deleteMessage(larkAppId, midCard); } catch { /* best-effort */ }
+  }
 }
 
 /**
@@ -2123,6 +2139,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
 
     if (actionType === 'skip_repo' && ds) {
       const locDs = localeForBot(ds.larkAppId);
+      if (isRepoCardConsumed(ds, cardMessageId)) {
+        return { toast: { type: 'info', content: t('cmd.repo.card_already_consumed', undefined, locDs) } };
+      }
       if (ds.pendingRepo) {
         if (ds.worktreeCreating || ds.pendingRepoCommitInFlight) {
           return { toast: { type: 'info', content: t('cmd.repo.worktree_in_progress', undefined, locDs) } };
@@ -2161,6 +2180,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     // needs a scanned git repo root, not an arbitrary path.
     if (actionType === 'repo_manual_submit' && ds) {
       const locDs = localeForBot(ds.larkAppId);
+      if (isRepoCardConsumed(ds, cardMessageId)) {
+        return { toast: { type: 'info', content: t('cmd.repo.card_already_consumed', undefined, locDs) } };
+      }
       const rawPath = String(action?.form_value?.repo_manual_path ?? '').trim();
       if (!rawPath) {
         return { toast: { type: 'error', content: t('card.repo.manual_empty', undefined, locDs) } };
@@ -2204,6 +2226,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
 
     if (actionType === 'repo_worktree_submit' && ds) {
       const locDs = localeForBot(ds.larkAppId);
+      if (isRepoCardConsumed(ds, cardMessageId)) {
+        return { toast: { type: 'info', content: t('cmd.repo.card_already_consumed', undefined, locDs) } };
+      }
       const selectedPaths = stringListFromLarkMultiSelect(action?.form_value?.repo_worktree_paths);
       if (selectedPaths.length === 0) {
         return { toast: { type: 'error', content: t('card.repo.worktree_empty', undefined, locDs) } };
@@ -2416,6 +2441,13 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   if (!targetDs) {
     logger.warn(`Card action: no active session found for root ${rootId}`);
     return;
+  }
+
+  // Stale click on a card already used for a successful pending→worker (or
+  // mid-session) commit. Must reject before the mid-session switch path can
+  // killWorker — Feishu withdraw may still show the card.
+  if (isRepoCardConsumed(targetDs, cardMessageId)) {
+    return { toast: { type: 'info', content: t('cmd.repo.card_already_consumed', undefined, localeForBot(targetDs.larkAppId)) } };
   }
 
   // 权限边界：pendingRepo（首次选 repo 才能 spawn）放行「会话发起人 或 canOperate」，
