@@ -694,7 +694,7 @@ export function buildSeatbeltProfile(
   return lines.join('\n') + '\n';
 }
 
-export const ISOLATION_PANE_MARKER_VERSION = 4;
+export const ISOLATION_PANE_MARKER_VERSION = 5;
 
 /** Versioned marker written beside a freshly spawned persistent sandbox. */
 export function isolationPaneMarkerContent(bootId: string): string {

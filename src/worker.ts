@@ -15,8 +15,8 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, realpathSync, copyFileSync, watch as fsWatch, createWriteStream, openSync, closeSync, fstatSync, constants as fsConstants, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
-import { join, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { join, basename, dirname } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import {
   evaluateReadIsolationGate,
@@ -61,7 +61,11 @@ import {
 } from './services/vc-meeting-send-policy.js';
 import { TurnTerminalDeduper } from './services/turn-terminal-deduper.js';
 import { defaultGatewayEntry, ensureGatewayEntry } from './core/plugins/mcp/gateway-installer.js';
-import { startSessionMcpGatewayHost, type SessionMcpGatewayHost } from './core/plugins/mcp/host.js';
+import {
+  sessionMcpGatewayPathRegex,
+  startSessionMcpGatewayHost,
+  type SessionMcpGatewayHost,
+} from './core/plugins/mcp/host.js';
 import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
@@ -115,7 +119,6 @@ import { drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByCha
 import { shouldObserveCursorChatId, shouldPersistObservedCursorChatId } from './services/cursor-resume-policy.js';
 import { extractKiroSessionIdFromOutput } from './services/kiro-session.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
-import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
@@ -6094,6 +6097,22 @@ async function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise
         config.session.dataDir,
       ).map(canonical));
     }
+    // Every isolated macOS CLI is denied access to all same-UID Gateway socket
+    // directories. A session with its own Gateway gets one narrow, later READ
+    // carve-out for its token; writes stay denied so the CLI cannot unlink or
+    // replace even its own worker-managed socket. Sessions without plugin MCP
+    // state get no read carve-out at all.
+    const gatewaySocketRoot = canonical(
+      sessionMcpGatewayHost ? dirname(sessionMcpGatewayHost.socketDir) : tmpdir(),
+    );
+    const gatewaySocketRegex = sessionMcpGatewayPathRegex(gatewaySocketRoot);
+    denyRegexes.push(gatewaySocketRegex);
+    if (sessionMcpGatewayHost) allowPaths.push(canonical(sessionMcpGatewayHost.socketDir));
+    protectedWrites = {
+      denyWritePaths: protectedWrites?.denyWritePaths ?? [],
+      denyWriteRegexes: [...(protectedWrites?.denyWriteRegexes ?? []), gatewaySocketRegex],
+      denyWriteLiterals: protectedWrites?.denyWriteLiterals ?? [],
+    };
     // WRITE rules — the macOS file-sandbox (Linux-bwrap twin). Realpath the writable
     // zones + crown-jewel re-denies for the same symlink-safety reason as reads.
     const writeRules = writeSandboxRules

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { dirname, join, resolve } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -14,11 +14,16 @@ import {
   resolveGatewayEnvironment,
 } from '../src/core/plugins/mcp/gateway.js';
 import { refreshSessionMcpRuntimeManifest } from '../src/core/plugins/mcp/session-runtime.js';
-import { startSessionMcpGatewayHost } from '../src/core/plugins/mcp/host.js';
+import {
+  sessionMcpGatewayPathRegex,
+  startSessionMcpGatewayHost,
+} from '../src/core/plugins/mcp/host.js';
 import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from '../src/core/plugins/mcp/environment.js';
+import { mcpGatewayAuthTokenPath } from '../src/core/plugins/mcp/socket-auth.js';
+import { buildSeatbeltProfile } from '../src/adapters/cli/read-isolation.js';
 
 describe('plugin MCP Gateway', () => {
   let home: string;
@@ -331,6 +336,87 @@ describe('plugin MCP Gateway', () => {
     );
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain('Botmux MCP Gateway host socket is unavailable');
+  });
+
+  it('fails closed when a managed relay has a socket but no authentication token', () => {
+    const run = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', resolve('src/cli.ts'), 'mcp', 'serve'],
+      {
+        cwd: resolve('.'),
+        env: {
+          ...mcpServeEnvironment('missing-host-token'),
+          [MCP_GATEWAY_SOCKET_ENV]: join(home, 'missing.sock'),
+          [MCP_GATEWAY_REQUIRED_ENV]: '1',
+        },
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain('Botmux MCP Gateway authentication token is unavailable');
+  });
+
+  it('rejects a same-UID sibling process that scans the Gateway socket directory', async () => {
+    const socketRoot = join(home, 'socket-root');
+    mkdirSync(socketRoot, { recursive: true });
+    vi.stubEnv('TMPDIR', socketRoot);
+    const host = await startSessionMcpGatewayHost({
+      sessionId: 'same-uid-victim',
+      dataDir: join(home, 'custom-botmux', 'data'),
+    });
+    expect(dirname(host.socketDir)).toBe(socketRoot);
+    expect(statSync(mcpGatewayAuthTokenPath(host.socketPath)).mode & 0o777).toBe(0o600);
+
+    try {
+      const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveRun, rejectRun) => {
+        const child = spawn(
+          process.execPath,
+          [resolve('test/fixtures/mcp-socket-attacker.mjs'), socketRoot],
+          {
+            cwd: resolve('.'),
+            env: {
+              HOME: home,
+              PATH: process.env.PATH ?? '/usr/bin:/bin',
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); });
+        child.stderr.on('data', chunk => { stderr += chunk.toString('utf8'); });
+        child.once('error', rejectRun);
+        child.once('close', code => resolveRun({ code, stdout, stderr }));
+      });
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ scanned: 1, accepted: 0 });
+    } finally {
+      await host.close();
+    }
+  });
+
+  it('denies all same-UID Gateway sockets before carving out the current macOS session', () => {
+    const root = '/private/tmp';
+    const ownDir = `${root}/bmcp-501-own-random`;
+    const siblingDir = `${root}/bmcp-501-sibling-random`;
+    const denyRegex = sessionMcpGatewayPathRegex(root, 501);
+    expect(new RegExp(denyRegex).test(ownDir)).toBe(true);
+    expect(new RegExp(denyRegex).test(siblingDir)).toBe(true);
+
+    const profile = buildSeatbeltProfile([], [ownDir], [], [], [denyRegex], undefined, {
+      denyWritePaths: [],
+      denyWriteRegexes: [denyRegex],
+      denyWriteLiterals: [],
+    });
+    const deny = `(deny file-read* (regex #"${denyRegex}"))`;
+    const allow = `(allow file-read* (subpath "${ownDir}"))`;
+    const writeDeny = `(deny file-write* (regex #"${denyRegex}"))`;
+    expect(profile).toContain(deny);
+    expect(profile).toContain(allow);
+    expect(profile).toContain(writeDeny);
+    expect(profile.indexOf(allow)).toBeGreaterThan(profile.indexOf(deny));
+    expect(profile.indexOf(writeDeny)).toBeGreaterThan(profile.indexOf(allow));
   });
 
   it('revokes the worker-owned socket path synchronously during shutdown', async () => {

@@ -1,15 +1,29 @@
-import { createHash } from 'node:crypto';
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server as NetServer, type Socket } from 'node:net';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { PluginMcpGateway } from './gateway.js';
+import { acceptMcpGatewayHandshake, mcpGatewayAuthTokenPath } from './socket-auth.js';
 
 export interface SessionMcpGatewayHost {
   socketPath: string;
   socketDir: string;
   close(): Promise<void>;
+}
+
+function escapeForRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Seatbelt deny for every Gateway socket directory owned by this OS user. */
+export function sessionMcpGatewayPathRegex(
+  socketRoot: string,
+  uid: number = process.getuid?.() ?? 0,
+): string {
+  const root = socketRoot.replace(/\/+$/, '');
+  return `^${escapeForRegex(root)}/bmcp-${uid}-[^/]+(?:/|$)`;
 }
 
 function gatewaySocketDir(sessionId: string, dataDir: string): string {
@@ -37,7 +51,9 @@ export async function startSessionMcpGatewayHost(opts: {
 }): Promise<SessionMcpGatewayHost> {
   const socketDir = gatewaySocketDir(opts.sessionId, opts.dataDir);
   const socketPath = join(socketDir, 'g.sock');
+  const authToken = randomBytes(32).toString('base64url');
   chmodSync(socketDir, 0o700);
+  writeFileSync(mcpGatewayAuthTokenPath(socketPath), `${authToken}\n`, { mode: 0o600, flag: 'wx' });
 
   const sockets = new Set<Socket>();
   const connectionClosers = new Set<() => Promise<void>>();
@@ -49,24 +65,28 @@ export async function startSessionMcpGatewayHost(opts: {
   const server: NetServer = createServer((socket) => {
     sockets.add(socket);
     socket.setNoDelay(true);
-    const gateway = new PluginMcpGateway(undefined, {
-      ...process.env,
-      SESSION_DATA_DIR: opts.dataDir,
-      BOTMUX_SESSION_ID: opts.sessionId,
-    });
-    let gatewayClose: Promise<void> | undefined;
-    const closeGateway = (): Promise<void> => {
-      gatewayClose ??= gateway.close()
-        .catch(reportError)
-        .finally(() => connectionClosers.delete(closeGateway));
-      return gatewayClose;
-    };
-    connectionClosers.add(closeGateway);
     socket.once('close', () => {
       sockets.delete(socket);
-      void closeGateway();
     });
-    void gateway.connect(new StdioServerTransport(socket, socket)).catch((error) => {
+    void (async () => {
+      if (!await acceptMcpGatewayHandshake(socket, authToken)) return;
+      const gateway = new PluginMcpGateway(undefined, {
+        ...process.env,
+        SESSION_DATA_DIR: opts.dataDir,
+        BOTMUX_SESSION_ID: opts.sessionId,
+      });
+      let gatewayClose: Promise<void> | undefined;
+      const closeGateway = (): Promise<void> => {
+        gatewayClose ??= gateway.close()
+          .catch(reportError)
+          .finally(() => connectionClosers.delete(closeGateway));
+        return gatewayClose;
+      };
+      connectionClosers.add(closeGateway);
+      socket.once('close', () => { void closeGateway(); });
+      await gateway.connect(new StdioServerTransport(socket, socket));
+      socket.resume();
+    })().catch((error) => {
       reportError(error);
       socket.destroy();
     });

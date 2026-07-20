@@ -53,6 +53,7 @@ import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from './environment.js';
+import { readMcpGatewayAuthToken, sendMcpGatewayHandshake } from './socket-auth.js';
 
 const GATEWAY_VERSION = '1.0.0';
 const DOWNSTREAM_INITIALIZE_TIMEOUT_MS = 10_000;
@@ -697,7 +698,13 @@ export async function runMcpGateway(): Promise<void> {
   const env = resolveGatewayEnvironment();
   const socketPath = env[MCP_GATEWAY_SOCKET_ENV]?.trim();
   if (socketPath) {
-    await relayMcpGateway(socketPath);
+    let authToken: string;
+    try {
+      authToken = readMcpGatewayAuthToken(socketPath);
+    } catch {
+      throw new Error('Botmux MCP Gateway authentication token is unavailable; restart this Botmux session');
+    }
+    await relayMcpGateway(socketPath, authToken);
     return;
   }
   if (env[MCP_GATEWAY_REQUIRED_ENV] === '1') {
@@ -727,6 +734,7 @@ export async function runMcpGateway(): Promise<void> {
  * worker-side Gateway. No plugin metadata or credentials are loaded here. */
 export async function relayMcpGateway(
   socketPath: string,
+  authToken: string,
   input: NodeJS.ReadableStream = process.stdin,
   output: NodeJS.WritableStream = process.stdout,
 ): Promise<void> {
@@ -745,14 +753,17 @@ export async function relayMcpGateway(
     socket.once('error', onInitialError);
   });
 
-  input.pipe(socket);
-  socket.pipe(output, { end: false });
-  await new Promise<void>((resolve, reject) => {
-    socket.once('close', resolve);
-    socket.once('error', reject);
-  }).finally(() => {
+  try {
+    await sendMcpGatewayHandshake(socket, authToken);
+    input.pipe(socket);
+    socket.pipe(output, { end: false });
+    await new Promise<void>((resolve, reject) => {
+      socket.once('close', resolve);
+      socket.once('error', reject);
+    });
+  } finally {
     input.unpipe(socket);
     socket.unpipe(output);
     socket.destroy();
-  });
+  }
 }

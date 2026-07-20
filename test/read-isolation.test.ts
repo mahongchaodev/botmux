@@ -667,6 +667,23 @@ describe('worker capability carve-out ordering', () => {
     expect(source).toContain('replaceManagedOriginCapabilityFile(profilePath, buildSeatbeltProfile(');
     expect(source).toContain('marker = readRegularHostFileNoFollow(');
   });
+
+  it('denies every same-UID Gateway socket before allowing only the current session socket', () => {
+    const regexAt = source.indexOf('const gatewaySocketRegex = sessionMcpGatewayPathRegex(gatewaySocketRoot)');
+    const denyAt = source.indexOf('denyRegexes.push(gatewaySocketRegex)');
+    const allowAt = source.indexOf(
+      'if (sessionMcpGatewayHost) allowPaths.push(canonical(sessionMcpGatewayHost.socketDir))',
+    );
+    const writeDenyAt = source.indexOf(
+      'denyWriteRegexes: [...(protectedWrites?.denyWriteRegexes ?? []), gatewaySocketRegex]',
+    );
+    const profileAt = source.indexOf('replaceManagedOriginCapabilityFile(profilePath, buildSeatbeltProfile(');
+    expect(regexAt).toBeGreaterThanOrEqual(0);
+    expect(denyAt).toBeGreaterThan(regexAt);
+    expect(allowAt).toBeGreaterThan(denyAt);
+    expect(writeDenyAt).toBeGreaterThan(allowAt);
+    expect(profileAt).toBeGreaterThan(writeDenyAt);
+  });
 });
 
 describe('CLI protected capability wiring', () => {
