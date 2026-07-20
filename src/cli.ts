@@ -8559,6 +8559,31 @@ function printPluginUsage(): void {
 `);
 }
 
+function printPluginServiceRunningError(err: unknown): boolean {
+  if (!err || typeof err !== 'object' || (err as any).code !== 'plugin_service_running') return false;
+  const pluginId = String((err as any).pluginId ?? 'unknown');
+  const operation = String((err as any).operation ?? 'update');
+  const status = String((err as any).serviceStatus ?? 'unknown');
+  const pid = typeof (err as any).pid === 'number' ? `, PID ${(err as any).pid}` : '';
+  const operationLabel = operation === 'uninstall' ? '卸载' : operation === 'install' ? '安装' : '更新';
+  console.error(`❌ 无法${operationLabel}插件 ${pluginId}：插件服务仍在运行（${status}${pid}）。`);
+  console.error(`   请先运行: botmux plugin service stop ${pluginId}`);
+  console.error('   Botmux 不会在安装、更新或卸载时隐式停止插件服务。');
+  return true;
+}
+
+function printPluginServiceDeleteError(err: unknown): boolean {
+  if (!err || typeof err !== 'object' || (err as any).code !== 'plugin_service_delete_failed') return false;
+  const failures = Array.isArray((err as any).failures) ? (err as any).failures : [];
+  const details = failures
+    .map((failure: any) => `${String(failure.pluginId ?? 'unknown')}: ${String(failure.warning ?? 'PM2 删除失败')}`)
+    .join('; ');
+  console.error('❌ 插件服务的 PM2 记录删除失败，插件未卸载。');
+  if (details) console.error(`   ${details}`);
+  console.error('   请确认 PM2 可用后重新执行卸载；Botmux 未清理插件文件、配置或绑定。');
+  return true;
+}
+
 async function cmdPlugin(args: string[]): Promise<void> {
   const sub = (args[0] ?? 'list').toLowerCase();
   if (sub === 'help' || sub === '--help' || sub === '-h') {
@@ -8572,7 +8597,16 @@ async function cmdPlugin(args: string[]): Promise<void> {
     const { installPlugin } = await import('./core/plugins/install.js');
     const { resolveOfficialPluginPackageSpec } = await import('./core/plugins/init.js');
     const resolvedSpec = resolveOfficialPluginPackageSpec(spec);
-    const result = installPlugin(resolvedSpec, { link: args.includes('--link') });
+    let result;
+    try {
+      result = installPlugin(resolvedSpec, { link: args.includes('--link') });
+    } catch (err) {
+      if (printPluginServiceRunningError(err)) {
+        process.exitCode = 1;
+        return;
+      }
+      throw err;
+    }
     const enabledPlugins = normalizePluginIdList(readGlobalConfig().plugins) ?? [];
     if (enabledPlugins.includes(result.record.id)) {
       const { materializePlugin } = await import('./core/plugins/materializer.js');
@@ -8667,26 +8701,57 @@ async function cmdPlugin(args: string[]): Promise<void> {
   if (sub === 'uninstall' || sub === 'remove' || sub === 'rm') {
     const pluginId = requirePluginId(args[1]);
     assertPluginInstalled(pluginId);
-    const enabledEverywhere = new Set(normalizePluginIdList(readGlobalConfig().plugins) ?? []);
-    for (const bot of loadBotsJson()) {
-      for (const id of normalizePluginIdList(bot.plugins) ?? []) enabledEverywhere.add(id);
-    }
-    const dependents = enabledPluginDependents(pluginId, [...enabledEverywhere], registry);
-    if (dependents.length > 0) {
-      console.error(`❌ 不能卸载 ${pluginId}，以下已启用插件依赖它: ${dependents.join(', ')}`);
-      console.error('   请先在对应作用域显式禁用这些插件。');
-      process.exit(1);
-    }
+    const {
+      assertPluginServiceStopped,
+      deletePluginServicesOrThrowUnlocked,
+      withPluginServiceLock,
+    } = await import('./core/plugins/service-manager.js');
     const { dematerializePlugin } = await import('./core/plugins/materializer.js');
-    const { deletePluginServices } = await import('./core/plugins/service-manager.js');
-    dematerializePlugin(pluginId);
-    await deletePluginServices([pluginId]);
-    await removePluginSkillRegistryEntries(pluginId);
-    const { removeInstalledPlugin } = await import('./services/plugin-registry-store.js');
+    const { readPluginRegistry, removeInstalledPlugin } = await import('./services/plugin-registry-store.js');
     const { pluginHome } = await import('./core/plugins/paths.js');
-    removeInstalledPlugin(pluginId);
-    removePluginBindingsEverywhere(pluginId);
-    rmSync(pluginHome(pluginId), { recursive: true, force: true });
+    try {
+      await withPluginServiceLock(async () => {
+        const lockedRegistry = readPluginRegistry();
+        const installed = lockedRegistry.plugins[pluginId];
+        if (!installed) throw new Error(`plugin_not_installed:${pluginId}`);
+
+        const enabledEverywhere = new Set(normalizePluginIdList(readGlobalConfig().plugins) ?? []);
+        for (const bot of loadBotsJson()) {
+          for (const id of normalizePluginIdList(bot.plugins) ?? []) enabledEverywhere.add(id);
+        }
+        const dependents = enabledPluginDependents(pluginId, [...enabledEverywhere], lockedRegistry);
+        if (dependents.length > 0) {
+          throw new Error(`plugin_has_enabled_dependents:${pluginId}:${dependents.join(',')}`);
+        }
+        if (installed.manifest.service) {
+          assertPluginServiceStopped(pluginId, 'uninstall');
+        }
+
+        await deletePluginServicesOrThrowUnlocked([pluginId]);
+        dematerializePlugin(pluginId);
+        await removePluginSkillRegistryEntries(pluginId);
+        removeInstalledPlugin(pluginId);
+        removePluginBindingsEverywhere(pluginId);
+        rmSync(pluginHome(pluginId), { recursive: true, force: true });
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith(`plugin_has_enabled_dependents:${pluginId}:`)) {
+        const dependents = err.message.slice(`plugin_has_enabled_dependents:${pluginId}:`.length).split(',').filter(Boolean);
+        console.error(`❌ 不能卸载 ${pluginId}，以下已启用插件依赖它: ${dependents.join(', ')}`);
+        console.error('   请先在对应作用域显式禁用这些插件。');
+        process.exitCode = 1;
+        return;
+      }
+      if (printPluginServiceRunningError(err)) {
+        process.exitCode = 1;
+        return;
+      }
+      if (printPluginServiceDeleteError(err)) {
+        process.exitCode = 1;
+        return;
+      }
+      throw err;
+    }
     console.log(`✅ 已卸载插件: ${pluginId}`);
     return;
   }
@@ -8824,6 +8889,7 @@ switch (command) {
       process.exitCode = 2;
       break;
     }
+    process.env.SESSION_DATA_DIR ??= resolveDataDir();
     const { runMcpGateway } = await import('./core/plugins/mcp/gateway.js');
     await runMcpGateway();
     break;
