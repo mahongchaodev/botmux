@@ -131,7 +131,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 // ─── Imports (must be after mocks) ──────────────────────────────────────────
 
 import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
-import { __resetEventClaimsForTest, canOperate, canTalk, decideRouting, ensureBotOpenId, isBotMentioned, mentionsAnotherMember, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+import { __resetEventClaimsForTest, canOperate, canTalk, decideRouting, ensureBotOpenId, isBotMentioned, mentionsAnotherMember, restorePendingForwardFollowups, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
 import {
   VC_BOT_MEETING_ACTIVITY_EVENT,
   VC_BOT_MEETING_ENDED_EVENT,
@@ -664,6 +664,7 @@ describe('im.message.receive_v1 — forwarded topic clarification coalescing', (
     capturedHandlers = {};
 
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+    restorePendingForwardFollowups(MY_APP_ID);
     await new Promise(resolve => setTimeout(resolve, 30));
 
     expect(handlers.handleNewTopic).toHaveBeenCalledOnce();
@@ -707,6 +708,7 @@ describe('im.message.receive_v1 — forwarded topic clarification coalescing', (
     capturedHandlers = {};
 
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+    restorePendingForwardFollowups(MY_APP_ID);
     await flushEventWork();
 
     expect(handlers.handleNewTopic).toHaveBeenCalledOnce();

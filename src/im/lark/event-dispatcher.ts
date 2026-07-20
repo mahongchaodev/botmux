@@ -1454,6 +1454,25 @@ function usesForwardFollowupDelay(mentionMode: GroupMentionMode): boolean {
   return mentionMode === 'never' || mentionMode === 'ambient';
 }
 
+/**
+ * Registry of forward-followup restore functions, keyed by larkAppId.
+ *
+ * Restoration is deferred until after `restoreActiveSessions()` completes:
+ * `isSessionOwner` reads the in-memory `activeSessions` map, which is only
+ * populated once sessions are rehydrated. Flushing a persisted seed before
+ * that point would always see `ownsSession=false` and route a thread reply
+ * through `handleNewTopic`, potentially duplicating sessions.
+ */
+const forwardFollowupRestorers = new Map<string, () => void>();
+
+/** Restore persisted forward-followup seeds for a bot. Call after active sessions are restored. */
+export function restorePendingForwardFollowups(larkAppId: string): void {
+  const restore = forwardFollowupRestorers.get(larkAppId);
+  if (!restore) return;
+  forwardFollowupRestorers.delete(larkAppId);
+  restore();
+}
+
 export interface EventHandlers {
   handleCardAction: (data: any, larkAppId: string) => Promise<any>;
   handleNewTopic: (data: any, ctx: RoutingContext) => Promise<void>;
@@ -2038,31 +2057,38 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
     await dispatchHumanMessage(payload);
     removeForwardFollowup(larkAppId, seedMessageId);
   };
-  for (const record of listForwardFollowups<PendingForwardTopicPayload>(larkAppId)) {
-    const senderOpenId = record.payload?.data?.sender?.sender_id?.open_id as string | undefined;
-    const chatId = record.payload?.ctx?.chatId;
-    if (!senderOpenId || !chatId || !record.payload?.ctx?.anchor) {
-      removeForwardFollowup(larkAppId, record.messageId);
-      continue;
+  // Defer restoration until after restoreActiveSessions() — isSessionOwner
+  // reads the in-memory activeSessions map, which is empty at dispatcher
+  // startup. Flushing now would always route thread replies through
+  // handleNewTopic. The daemon calls restorePendingForwardFollowups() once
+  // sessions are rehydrated.
+  forwardFollowupRestorers.set(larkAppId, () => {
+    for (const record of listForwardFollowups<PendingForwardTopicPayload>(larkAppId)) {
+      const senderOpenId = record.payload?.data?.sender?.sender_id?.open_id as string | undefined;
+      const chatId = record.payload?.ctx?.chatId;
+      if (!senderOpenId || !chatId || !record.payload?.ctx?.anchor) {
+        removeForwardFollowup(larkAppId, record.messageId);
+        continue;
+      }
+      const flush = (payload: PendingForwardTopicPayload) =>
+        dispatchPersistedForwardFollowup(record.messageId, payload);
+      const remainingMs = record.dueAt - Date.now();
+      const isUnpairedSeed = !record.payload.ctx.forwardSeedData;
+      const delayStillEnabled = usesForwardFollowupDelay(resolveGroupMentionMode(larkAppId));
+      if (isUnpairedSeed && delayStillEnabled && remainingMs > 0 && forwardFollowups.hold({
+        larkAppId,
+        chatId,
+        senderOpenId,
+        messageId: record.messageId,
+        payload: record.payload,
+        flush,
+      }, remainingMs)) {
+        logger.info(`[forward-followup] restored pending seed=${record.messageId.substring(0, 12)} remaining=${remainingMs}ms`);
+      } else {
+        void flush(record.payload).catch(err => logger.error(`Error restoring delayed topic seed: ${err}`));
+      }
     }
-    const flush = (payload: PendingForwardTopicPayload) =>
-      dispatchPersistedForwardFollowup(record.messageId, payload);
-    const remainingMs = record.dueAt - Date.now();
-    const isUnpairedSeed = !record.payload.ctx.forwardSeedData;
-    const delayStillEnabled = usesForwardFollowupDelay(resolveGroupMentionMode(larkAppId));
-    if (isUnpairedSeed && delayStillEnabled && remainingMs > 0 && forwardFollowups.hold({
-      larkAppId,
-      chatId,
-      senderOpenId,
-      messageId: record.messageId,
-      payload: record.payload,
-      flush,
-    }, remainingMs)) {
-      logger.info(`[forward-followup] restored pending seed=${record.messageId.substring(0, 12)} remaining=${remainingMs}ms`);
-    } else {
-      void flush(record.payload).catch(err => logger.error(`Error restoring delayed topic seed: ${err}`));
-    }
-  }
+  });
   const seedRoutingGates = new Map<string, { ready: Promise<void>; complete: () => void }>();
   const registerSeedRoutingGate = (messageId: string) => {
     let resolveReady!: () => void;
@@ -2708,9 +2734,10 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // 默认 'always' 在多人群里必须 @，想要话题内免@续话就把 mentionMode 配成
           // 'topic'（下方条款已同时覆盖话题群 thread 与普通群 shared topic），
           // 'never'/'ambient' 亦按各自语义生效。1人1bot 的 solo 群仍走末条放行。
-          // `pairedForwardSeed`：转发合并场景下，补充说明成为新话题锚点，需放行。
-          const relax = !!pairedForwardSeed
-            || (!!replyRootId && isAllowed)
+          // 注：pairedForwardSeed 仅在 never/ambient 模式下产生，且 ambient redirect
+          // 已在配对前排除，故 isAllowed=true 时下方 never/ambient 条款必然放行；
+          // 不在此单独加 clause，以免 isAllowed=false 时绕过权限检查。
+          const relax = (!!replyRootId && isAllowed)
             || (!!substituteTrigger && isAllowed)
             || (isAllowed && mentionMode === 'never')
             || (isAllowed && mentionMode === 'ambient' && !mentionsAnotherMember(larkAppId, message))
