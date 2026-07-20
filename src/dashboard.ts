@@ -3049,6 +3049,9 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/schedules') {
       let body: unknown;
       try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+      if (body === null || typeof body !== 'object') {
+        return jsonRes(res, 400, { ok: false, error: 'body_must_be_object' });
+      }
       const b = body as Record<string, unknown>;
       const larkAppId = typeof b.larkAppId === 'string' ? b.larkAppId : '';
       if (!larkAppId) return jsonRes(res, 400, { ok: false, error: 'larkAppId_required' });
@@ -3063,13 +3066,18 @@ const server = createServer(async (req, res) => {
     }
 
     // Update an existing task (PATCH) or delete it (DELETE). Both route to
-    // the daemon that owns the task via scheduleOwnerOf.
+    // the daemon that owns the task via scheduleOwnerOf. Legacy rows (no
+    // larkAppId) fall back to the first online daemon so they remain editable.
     if (req.method === 'PATCH' && (m = url.pathname.match(/^\/api\/schedules\/([^/]+)$/))) {
       const id = decodeURIComponent(m[1]);
-      const owner = aggregator.scheduleOwnerOf(id);
+      const owner = aggregator.scheduleOwnerOf(id)
+        ?? (aggregator.scheduleExists(id) ? registry.list()[0]?.larkAppId : undefined);
       if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_schedule' });
       let body: unknown;
       try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+      if (body === null || typeof body !== 'object') {
+        return jsonRes(res, 400, { ok: false, error: 'body_must_be_object' });
+      }
       const upstream = await proxyToDaemon(owner, `/api/schedules/${id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
@@ -3082,7 +3090,8 @@ const server = createServer(async (req, res) => {
 
     if (req.method === 'DELETE' && (m = url.pathname.match(/^\/api\/schedules\/([^/]+)$/))) {
       const id = decodeURIComponent(m[1]);
-      const owner = aggregator.scheduleOwnerOf(id);
+      const owner = aggregator.scheduleOwnerOf(id)
+        ?? (aggregator.scheduleExists(id) ? registry.list()[0]?.larkAppId : undefined);
       if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_schedule' });
       const upstream = await proxyToDaemon(owner, `/api/schedules/${id}`, { method: 'DELETE' });
       res.writeHead(upstream.status, { 'content-type': 'application/json' });

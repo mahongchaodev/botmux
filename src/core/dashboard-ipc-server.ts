@@ -1288,6 +1288,9 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_json' }); }
+  if (body === null || typeof body !== 'object') {
+    return jsonRes(res, 400, { ok: false, error: 'body_must_be_object' });
+  }
   const b = body as Record<string, unknown>;
   // Runtime validation — never trust the TS cast alone.
   const name = typeof b.name === 'string' ? b.name.trim() : '';
@@ -1295,16 +1298,31 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   const prompt = typeof b.prompt === 'string' ? b.prompt : '';
   const chatId = typeof b.chatId === 'string' ? b.chatId.trim() : '';
   const silent = b.silent === true;
-  // Reject invalid deliver rather than silently degrading to 'origin'.
-  let deliver: 'origin' | 'local' | 'new-topic' = 'origin';
+  // `local` (log-only, no delivery) is not implemented in the executor —
+  // reject it from the dashboard API rather than silently degrading to origin.
+  let deliver: 'origin' | 'new-topic' = 'origin';
   if (b.deliver !== undefined) {
-    if (b.deliver !== 'origin' && b.deliver !== 'local' && b.deliver !== 'new-topic') {
+    if (b.deliver !== 'origin' && b.deliver !== 'new-topic') {
       return jsonRes(res, 400, { ok: false, error: 'invalid_deliver', field: 'deliver' });
     }
     deliver = b.deliver;
   }
-  if (!name || !schedule || !prompt || !chatId) {
-    return jsonRes(res, 400, { ok: false, error: 'missing_fields', fields: ['name', 'schedule', 'prompt', 'chatId'] });
+  // Validate required fields are present AND non-empty after trim.
+  if (!name) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'name' });
+  if (!schedule) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'schedule' });
+  if (!prompt) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'prompt' });
+  if (!chatId) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'chatId' });
+  // Verify this bot is a member of the target chat — otherwise the task will
+  // fire but fail to deliver every time.
+  try {
+    const members = await listChatBotMembers(cachedLarkAppId, chatId).catch(() => [] as ChatBotMember[]);
+    const isMember = members.some(m => m.larkAppId === cachedLarkAppId);
+    if (!isMember) {
+      return jsonRes(res, 400, { ok: false, error: 'bot_not_in_chat', field: 'chatId' });
+    }
+  } catch {
+    // Membership check is best-effort; if the API is down during startup,
+    // fall through and let the task fail at fire time rather than blocking creation.
   }
   try {
     const task = scheduler.addTask({
@@ -1331,21 +1349,46 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
 ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_json' }); }
+  if (body === null || typeof body !== 'object') {
+    return jsonRes(res, 400, { ok: false, error: 'body_must_be_object' });
+  }
   const b = body as Record<string, unknown>;
   const updates: {
     name?: string; prompt?: string; schedule?: string;
-    deliver?: 'origin' | 'local' | 'new-topic'; silent?: boolean;
+    deliver?: 'origin' | 'new-topic'; silent?: boolean;
   } = {};
-  if (typeof b.name === 'string') updates.name = b.name.trim();
-  if (typeof b.prompt === 'string') updates.prompt = b.prompt;
-  if (typeof b.schedule === 'string') updates.schedule = b.schedule.trim();
+  // If a field is present, it must be the correct type and (for strings)
+  // non-empty after trim — otherwise 400, never silently ignore.
+  if (b.name !== undefined) {
+    if (typeof b.name !== 'string' || !b.name.trim()) {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'name' });
+    }
+    updates.name = b.name.trim();
+  }
+  if (b.prompt !== undefined) {
+    if (typeof b.prompt !== 'string' || !b.prompt) {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'prompt' });
+    }
+    updates.prompt = b.prompt;
+  }
+  if (b.schedule !== undefined) {
+    if (typeof b.schedule !== 'string' || !b.schedule.trim()) {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'schedule' });
+    }
+    updates.schedule = b.schedule.trim();
+  }
   if (b.deliver !== undefined) {
-    if (b.deliver !== 'origin' && b.deliver !== 'local' && b.deliver !== 'new-topic') {
+    if (b.deliver !== 'origin' && b.deliver !== 'new-topic') {
       return jsonRes(res, 400, { ok: false, error: 'invalid_deliver', field: 'deliver' });
     }
     updates.deliver = b.deliver;
   }
-  if (typeof b.silent === 'boolean') updates.silent = b.silent;
+  if (b.silent !== undefined) {
+    if (typeof b.silent !== 'boolean') {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'silent' });
+    }
+    updates.silent = b.silent;
+  }
   const result = scheduler.updateTask(p.id, updates);
   if (!result.ok) return jsonRes(res, 400, result);
   const task = scheduleStore.getTask(p.id);
