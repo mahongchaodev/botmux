@@ -44,5 +44,6 @@ export function normalizeSubstituteMode(raw: unknown): SubstituteModeConfig | un
     enabled,
     targets,
     disclosure: rec.disclosure === 'none' ? 'none' : 'prefix',
+    directBotMention: rec.directBotMention === true,
   };
 }

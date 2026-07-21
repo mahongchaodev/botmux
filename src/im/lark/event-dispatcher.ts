@@ -36,7 +36,9 @@ import {
 import { type Brand, larkHosts, normalizeBrand, sdkDomain } from './lark-hosts.js';
 import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
-import { tryHandleSubstituteCommand } from './substitute-command.js';
+import { tryHandleEchoCommand } from './substitute-command.js';
+import { forwardSubstituteDmMessageToGroup, forwardSubstituteGroupMessageToDm } from './substitute-direct.js';
+import { getSubstituteDirectBotMentionChat, getSubstituteDirectChat, getSubstituteDirectChatByTarget, substituteDirectTargetKey } from '../../services/substitute-direct-store.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled, clearPending } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
@@ -990,6 +992,53 @@ export function resolveSubstituteTrigger(
   return undefined;
 }
 
+function canUseSubstituteDirectBinding(larkAppId: string, senderOpenId: string | undefined): boolean {
+  if (!senderOpenId) return false;
+  const cfg = getBot(larkAppId).config.substituteMode;
+  if (cfg?.enabled !== true) return false;
+  return canOperate(larkAppId, undefined, senderOpenId)
+    || !!cfg.targets?.some(t => t.openId === senderOpenId);
+}
+
+function resolveSubstituteDirectMatch(
+  larkAppId: string,
+  message: any,
+  chatId: string,
+  targetKey: string | undefined,
+): {
+  trigger: import('../../types.js').SubstituteTrigger;
+  direct: ReturnType<typeof getSubstituteDirectChatByTarget>;
+} | undefined {
+  const cfg = getBot(larkAppId).config.substituteMode;
+  if (!cfg?.enabled || !cfg.targets?.length) return undefined;
+  const mentions = extractMentionIdentities(message);
+  const identityMatches = cfg.targets.filter(target =>
+    mentions.some(mention => substituteTargetMatchesMention(target, mention)));
+  const nameMatches = cfg.targets.filter(target =>
+    !identityMatches.includes(target)
+    && !!target.name
+    && mentions.some(mention => mention.name === target.name));
+  for (const target of [...identityMatches, ...nameMatches]) {
+    const direct = getSubstituteDirectChatByTarget(larkAppId, target, chatId, targetKey);
+    if (!direct?.chat || direct.chat.mode !== 'direct') continue;
+    if (!identityMatches.includes(target)
+        && (!target.openId || direct.targetOpenId !== target.openId)) continue;
+    return {
+      trigger: {
+        target: {
+          name: target.name,
+          openId: target.openId,
+          userId: target.userId,
+          unionId: target.unionId,
+        },
+        disclosure: cfg.disclosure ?? 'prefix',
+      },
+      direct,
+    };
+  }
+  return undefined;
+}
+
 function mentionMatchesBot(m: any, larkAppId: string, botOpenId?: string): boolean {
   const openId = mentionOpenId(m);
   if (botOpenId && openId === botOpenId) return true;
@@ -1286,6 +1335,7 @@ export interface EventHandlers {
   handleCardAction: (data: any, larkAppId: string) => Promise<any>;
   handleNewTopic: (data: any, ctx: RoutingContext) => Promise<void>;
   handleThreadReply: (data: any, ctx: RoutingContext) => Promise<void>;
+  activeSessions?: () => Iterable<import('../../core/types.js').DaemonSession>;
   /** 主动开工 — 场景①: fired when this bot is added to a chat
    *  (`im.chat.member.bot.added_v1`). The daemon decides whether to auto-start
    *  based on the bot's `autoStartOnGroupJoin` toggle + allowedUser membership.
@@ -2028,7 +2078,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           return;
         }
 
-        if (await tryHandleSubstituteCommand(larkAppId, message, senderOpenId)) {
+        if (await tryHandleEchoCommand(larkAppId, message, senderOpenId, handlers.activeSessions?.())) {
+          return;
+        }
+
+        if (
+          canUseSubstituteDirectBinding(larkAppId, senderOpenId)
+          && await forwardSubstituteDmMessageToGroup({ larkAppId, message, senderOpenId })
+        ) {
           return;
         }
 
@@ -2065,18 +2122,80 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // Cheap in-memory gate FIRST: skip the getChatMode roundtrip and the
         // per-chat toggle disk read entirely for bots that never configured a
         // substitute target (the overwhelming majority on the hot path).
-        let substituteTrigger = getBot(larkAppId).config.substituteMode?.enabled === true
+        const substituteModeConfig = getBot(larkAppId).config.substituteMode;
+        const substituteDirectEligible = substituteModeConfig?.enabled === true
           && chatType === 'group'
-          && await getChatMode(larkAppId, chatId) === 'group'
-          && isSubstituteEnabledForChat(larkAppId, chatId)
-          ? resolveSubstituteTrigger(larkAppId, message)
-          : undefined;
+          && isSubstituteEnabledForChat(larkAppId, chatId);
+        let substituteTrigger = substituteDirectEligible ? resolveSubstituteTrigger(larkAppId, message) : undefined;
+        let substituteDirectMatch: ReturnType<typeof resolveSubstituteDirectMatch>;
         if (substituteTrigger && !explicitlyMentionedThisBot) {
           const rawText = extractMessageTextForRouting(message);
           const stripped = rawText ? stripLeadingMentions(rawText.trim(), message?.mentions ?? []).trim() : '';
           if (stripped.startsWith('/')) substituteTrigger = undefined;
         }
+        const directTargetKey = substituteDirectTargetKey(routing.scope, routing.anchor, chatId);
+        if (substituteDirectEligible && !substituteTrigger) {
+          substituteDirectMatch = resolveSubstituteDirectMatch(larkAppId, message, chatId, directTargetKey);
+          substituteTrigger = substituteDirectMatch?.trigger;
+        }
+        if (substituteDirectEligible && !substituteTrigger && explicitlyMentionedThisBot) {
+          const direct = getSubstituteDirectBotMentionChat(larkAppId, chatId, directTargetKey, substituteModeConfig?.directBotMention === true);
+          if (direct?.chat.mode === 'direct') {
+            const directTrigger: import('../../types.js').SubstituteTrigger = {
+              target: {
+                name: direct.targetName ?? direct.chat.targetName,
+                openId: direct.targetOpenId ?? direct.substituteOpenId,
+                userId: direct.substituteUserId,
+                unionId: direct.substituteUnionId,
+              },
+              disclosure: direct.chat.disclosure ?? substituteModeConfig.disclosure ?? 'prefix',
+            };
+            if (isAllowed) {
+              const forwarded = await forwardSubstituteGroupMessageToDm({
+                larkAppId,
+                chatId,
+                targetKey: directTargetKey,
+                scope: routing.scope,
+                anchor: routing.anchor,
+                message,
+                trigger: directTrigger,
+                direct,
+              });
+              if (!forwarded) {
+                await replyMessage(larkAppId, messageId, t('substitute.direct.no_open_id', undefined, localeForBot(larkAppId)), 'text', false)
+                  .catch(err => logger.warn(`[substitute-direct] no-open-id notice failed: ${err?.message ?? err}`));
+              }
+            }
+            return;
+          }
+        }
         if (substituteTrigger) {
+          const direct = substituteDirectMatch?.direct
+            ?? getSubstituteDirectChatByTarget(larkAppId, substituteTrigger.target, chatId, directTargetKey);
+          logger.info(
+            `[substitute-direct:${larkAppId}] lookup chat=${chatId.substring(0, 12)} ` +
+            `target=${substituteTrigger.target.openId ?? substituteTrigger.target.userId ?? substituteTrigger.target.unionId ?? substituteTrigger.target.name ?? 'unknown'} ` +
+            `direct=${direct ? `${direct.substituteOpenId.substring(0, 12)}:${direct.chat.mode ?? 'direct'}` : 'none'}`,
+          );
+          if (direct?.chat.mode === 'direct') {
+            if (isAllowed) {
+              const forwarded = await forwardSubstituteGroupMessageToDm({
+                larkAppId,
+                chatId,
+                targetKey: directTargetKey,
+                scope: routing.scope,
+                anchor: routing.anchor,
+                message,
+                trigger: substituteTrigger,
+                direct,
+              });
+              if (!forwarded) {
+                await replyMessage(larkAppId, messageId, t('substitute.direct.no_open_id', undefined, localeForBot(larkAppId)), 'text', false)
+                  .catch(err => logger.warn(`[substitute-direct] no-open-id notice failed: ${err?.message ?? err}`));
+              }
+            }
+            return;
+          }
           routing.scope = 'chat';
           routing.anchor = chatId;
           routingSource = 'regular-group-chat';

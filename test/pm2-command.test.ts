@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPm2SpawnCommand } from '../src/cli/pm2-command.js';
+import { buildPm2SpawnCommand, parsePm2JlistOutput } from '../src/cli/pm2-command.js';
 
 describe('buildPm2SpawnCommand', () => {
   it('runs bundled pm2 script through node.exe on Windows', () => {
@@ -56,5 +56,28 @@ describe('buildPm2SpawnCommand', () => {
       command: '/app/node_modules/pm2/bin/pm2',
       args: ['status'],
     });
+  });
+});
+
+describe('parsePm2JlistOutput', () => {
+  it('parses plain pm2 jlist JSON', () => {
+    expect(parsePm2JlistOutput('[{"name":"botmux-0"}]')).toEqual([{ name: 'botmux-0' }]);
+  });
+
+  it('skips PM2 out-of-date banner before the JSON array', () => {
+    const raw = [
+      '\x1b[31m\x1b[1m>>>> In-memory PM2 is out-of-date, do:\x1b[22m\x1b[39m',
+      '\x1b[31m\x1b[1m>>>> $ pm2 update\x1b[22m\x1b[39m',
+      'In memory PM2 version: \x1b[34m\x1b[1m6.0.14\x1b[22m\x1b[39m',
+      'Local PM2 version: \x1b[34m\x1b[1m7.0.3\x1b[22m\x1b[39m',
+      '',
+      '[{"name":"botmux-0","pid":123}]',
+    ].join('\n');
+
+    expect(parsePm2JlistOutput(raw)).toEqual([{ name: 'botmux-0', pid: 123 }]);
+  });
+
+  it('returns an empty list for empty output', () => {
+    expect(parsePm2JlistOutput(' \n ')).toEqual([]);
   });
 });

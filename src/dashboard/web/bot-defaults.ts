@@ -765,6 +765,7 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
     const mode = b.substituteMode && typeof b.substituteMode === 'object' ? b.substituteMode : null;
     const enabled = mode?.enabled === true;
     const disclosure = mode?.disclosure === 'none' ? 'none' : 'prefix';
+    const directBotMention = mode?.directBotMention === true;
     return `<section class="bd-section">
       <h3 class="bd-section-title">${t('botDefaults.sectionSubstitute')}</h3>
       <label class="toggle-row">
@@ -782,6 +783,12 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
           </select>
         </label>
       </div>
+      <label class="toggle-row">
+        <input type="checkbox" data-input="substituteDirectBotMention" ${directBotMention ? 'checked' : ''}>
+        <span class="switch" aria-hidden="true"></span>
+        <span class="toggle-tx"><strong>${t('botDefaults.substituteDirectBotMention')}</strong>
+        <small>${t('botDefaults.substituteDirectBotMentionHelp')}</small></span>
+      </label>
       <textarea data-input="substituteTargets" rows="5"
         placeholder="${escapeHtml(t('botDefaults.substituteTargetsPlaceholder'))}"
         style="width:100%;box-sizing:border-box;font:13px/1.5 ui-monospace,Menlo,monospace;padding:10px">${escapeHtml(formatSubstituteTargets(mode))}</textarea>
@@ -1697,6 +1704,7 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
       // ── 替身模式 substituteMode ─────────────────────────────────────────
       const substituteEnabledCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-substitute-mode]');
       const substituteDisclosureSel = card.querySelector<HTMLSelectElement>('select[data-input=substituteDisclosure]');
+      const substituteDirectBotMentionCb = card.querySelector<HTMLInputElement>('input[data-input=substituteDirectBotMention]');
       const substituteTargetsTa = card.querySelector<HTMLTextAreaElement>('textarea[data-input=substituteTargets]');
       const substituteSaveBtn = card.querySelector<HTMLButtonElement>('button[data-action=save-substitute-mode]');
       const substituteOffBtn = card.querySelector<HTMLButtonElement>('button[data-action=off-substitute-mode]');
@@ -1725,6 +1733,7 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
             if (cached) cached.substituteMode = resp.substituteMode ?? null;
             if (substituteEnabledCb) substituteEnabledCb.checked = !!resp.substituteMode?.enabled;
             if (substituteDisclosureSel) substituteDisclosureSel.value = resp.substituteMode?.disclosure === 'none' ? 'none' : 'prefix';
+            if (substituteDirectBotMentionCb) substituteDirectBotMentionCb.checked = resp.substituteMode?.directBotMention === true;
             // Re-render the editor from the resolution report (not the stored
             // config): a disabled save keeps the list, and failed entries stay
             // visible so they can be corrected instead of silently vanishing.
@@ -1757,6 +1766,7 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
             enabled: substituteEnabledCb.checked,
             targets,
             disclosure: substituteDisclosureSel.value === 'none' ? 'none' : 'prefix',
+            directBotMention: substituteDirectBotMentionCb?.checked === true,
           }, substituteSaveBtn);
         });
       }

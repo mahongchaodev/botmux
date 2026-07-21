@@ -47,6 +47,7 @@ import {
 } from './v3-revisit-grant-card-handler.js';
 import type { V3RevisitGrantActionValue } from './v3-revisit-grant-card.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
+import { handleSubstituteDirectCardAction, isSubstituteDirectAction } from './substitute-command.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { buildClosedSessionCard } from '../../core/closed-session-card.js';
 import { ttadkConfigModelChoices } from '../../setup/cli-selection.js';
@@ -74,6 +75,7 @@ export interface CardHandlerDeps {
   activeSessions: Map<string, DaemonSession>;
   sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string) => Promise<string>;
   lastRepoScan: Map<string, ProjectInfo[]>;
+  closeSession?: (sessionId: string) => Promise<unknown>;
   workflowApprovalDeps?: WorkflowApprovalHandlerDeps;
   workflowApprovalResolved?: (runId: string) => void | Promise<void>;
   /** v3 humanGate 审批卡点击处理（driveRun 由 daemon 接的 v3 gate runner 提供）. */
@@ -717,6 +719,30 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
 
   if (isAskCardAction(value?.action)) {
     return handleAskCardAction(data);
+  }
+
+  if (isSubstituteDirectAction(value?.action) && larkAppId) {
+    const option = (data.action as { option?: unknown } | undefined)?.option;
+    const optionPage = typeof option === 'string'
+      ? option
+      : option && typeof option === 'object' && 'value' in option && typeof (option as { value?: unknown }).value === 'string'
+        ? (option as { value: string }).value
+        : undefined;
+    const rawPage = value!.action === 'substitute_direct_page'
+      ? (optionPage ?? value!.page)
+      : (value!.page ?? optionPage);
+    const page = Number.parseInt(String(rawPage ?? '1'), 10);
+    return handleSubstituteDirectCardAction({
+      larkAppId,
+      operatorOpenId,
+      action: value!.action as string,
+      chatId: value!.chat_id,
+      invokerOpenId: value!.invoker_open_id,
+      page: Number.isFinite(page) ? page : 1,
+      detailTargetKey: value!.detail_target_key ?? value!.target_key ?? value!.detail_chat_id,
+      activeSessions,
+      closeSession: deps.closeSession,
+    });
   }
 
   if (
