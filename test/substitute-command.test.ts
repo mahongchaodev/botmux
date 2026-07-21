@@ -649,7 +649,7 @@ describe('tryHandleEchoCommand', () => {
     expect(mockSendUserMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('operator entering direct mode stores state under the configured substitute target', async () => {
+  it('operator entering direct mode stores state under the DM sender and targets the configured substitute', async () => {
     mockGetBot.mockReturnValue({
       config: {
         substituteMode: {
@@ -668,8 +668,8 @@ describe('tryHandleEchoCommand', () => {
       chatId: 'oc_group',
     });
 
-    expect(mockDirect.get(USER)).toBeUndefined();
-    expect(mockDirect.get('ou_sub')).toMatchObject({
+    expect(mockDirect.get('ou_sub')).toBeUndefined();
+    expect(mockDirect.get(USER)).toMatchObject({
       targetOpenId: 'ou_sub',
       substituteUserId: 'u_sub',
       substituteUnionId: 'on_sub',
@@ -679,6 +679,50 @@ describe('tryHandleEchoCommand', () => {
         'chat:oc_group': expect.objectContaining({ mode: 'direct', targetName: 'Sub' }),
       },
     });
+  });
+
+  it('operator switching direct targets updates the DM sender active chat', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        substituteMode: {
+          enabled: true,
+          targets: [{ openId: 'ou_sub', userId: 'u_sub', unionId: 'on_sub', name: 'Sub' }],
+          disclosure: 'prefix',
+        },
+      },
+    });
+    mockListChats.mockResolvedValue([
+      { chatId: 'oc_group', name: 'Group', chatMode: 'group' },
+      { chatId: 'oc_group_2', name: 'Group 2', chatMode: 'group' },
+    ]);
+
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group_2',
+    });
+
+    expect(mockDirect.get(USER)).toMatchObject({
+      targetOpenId: 'ou_sub',
+      activeChatId: 'chat:oc_group_2',
+      chats: {
+        'chat:oc_group_2': expect.objectContaining({
+          chatId: 'oc_group_2',
+          mode: 'direct',
+          targetOpenId: 'ou_sub',
+        }),
+      },
+    });
+    expect(mockDirect.get('ou_sub')).toBeUndefined();
   });
 
   it('operator card action enter refreshes the card as direct mode on', async () => {

@@ -52,7 +52,7 @@ function substituteTargetForDirectAction(larkAppId: string, openId: string | und
 }
 
 function substituteBindingOpenIdForControls(larkAppId: string, openId: string | undefined): string | undefined {
-  return substituteTargetForDirectAction(larkAppId, openId)?.openId ?? openId;
+  return openId;
 }
 
 function canUseDirectControls(larkAppId: string, openId: string | undefined): boolean {
@@ -517,9 +517,11 @@ async function applyDirectAction(
     const dmRootMessageId = threadMode
       ? await sendUserMessage(larkAppId, openId, t('cmd.substitute.direct_thread_started', { chat: row.name || row.chatId }, loc), 'text')
       : undefined;
+    const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
+    if (!bindingOpenId) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
     upsertSubstituteDirectChat({
       larkAppId,
-      substituteOpenId: target.openId,
+      substituteOpenId: bindingOpenId,
       targetOpenId: target.openId,
       substituteUserId: target.userId,
       substituteUnionId: target.unionId,
@@ -578,7 +580,8 @@ async function applyDirectAction(
   }
   if (action === 'substitute_direct_exit') {
     const { deactivateSubstituteDirectChat } = await import('../../services/substitute-direct-store.js');
-    const existed = deactivateSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
+    const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
+    const existed = deactivateSubstituteDirectChat(larkAppId, bindingOpenId, row.targetKey);
     return { ok: existed, message: existed ? t('cmd.substitute.direct_exit_ok', { chat: row.name || row.chatId }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc) };
   }
   if (action === 'substitute_direct_leave_group') {
