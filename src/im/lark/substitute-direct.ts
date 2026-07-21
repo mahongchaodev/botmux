@@ -59,8 +59,10 @@ function isP2pThreadMode(larkAppId: string): boolean {
   try { return getBot(larkAppId).config.p2pMode !== 'chat'; } catch { return true; }
 }
 
-function dmAnchorFromMessage(message: any): string | undefined {
-  return message?.thread_id ?? message?.root_id ?? message?.parent_id;
+function dmAnchorsFromMessage(message: any): string[] {
+  return [message?.thread_id, message?.root_id, message?.parent_id]
+    .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    .filter((id, idx, arr) => arr.indexOf(id) === idx);
 }
 
 function isDmRootUnavailableError(err: unknown): boolean {
@@ -104,7 +106,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   if (p2pThreadMode && dmRootMessageId && !dmRootMessageId.startsWith('omt_')) {
     try {
       dmMessageId = await replyMessage(input.larkAppId, dmRootMessageId, content, 'text', true);
-      dmThreadId = dmThreadId ?? await getMessageThreadId(input.larkAppId, dmRootMessageId).catch(() => undefined);
+      dmThreadId = await getMessageThreadId(input.larkAppId, dmRootMessageId).catch(() => undefined) ?? dmThreadId;
     } catch (err) {
       if (!isDmRootUnavailableError(err)) throw err;
       logger.warn(`[substitute-direct:${input.larkAppId}] DM root ${dmRootMessageId.substring(0, 12)} unavailable, creating a new direct thread: ${err instanceof Error ? err.message : err}`);
@@ -160,8 +162,9 @@ export async function forwardSubstituteDmMessageToGroup(input: {
 }): Promise<boolean> {
   if (input.message?.chat_type !== 'p2p' || !input.senderOpenId) return false;
   const p2pThreadMode = isP2pThreadMode(input.larkAppId);
+  const dmAnchors = dmAnchorsFromMessage(input.message);
   const chat = p2pThreadMode
-    ? getSubstituteDirectChatByDmAnchor(input.larkAppId, input.senderOpenId, dmAnchorFromMessage(input.message))
+    ? dmAnchors.map(anchor => getSubstituteDirectChatByDmAnchor(input.larkAppId, input.senderOpenId, anchor)).find(Boolean)
     : getActiveSubstituteDirectChat(input.larkAppId, input.senderOpenId);
   const loc = localeForBot(input.larkAppId);
   const rawBody = textFromMessage(input.message);

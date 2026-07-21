@@ -2535,6 +2535,56 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(chat?.dmToGroupMessageIds).toEqual({ 'new-dm-root': 'msg-substitute-direct-recreate-dm-root' });
   });
 
+  it('substituteMode direct: refreshes stale DM thread id after replying to an existing DM root', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat:chat-substitute-direct',
+      chats: {
+        'chat:chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          dmRootMessageId: 'dm-root-existing',
+          dmThreadId: 'omt_stale_thread',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatName.mockResolvedValue('Ops Group');
+    mockGetMessageThreadId.mockResolvedValueOnce('omt_actual_thread');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-direct-refresh-dm-thread',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockReplyMessage).toHaveBeenCalledWith(MY_APP_ID, 'dm-root-existing', expect.any(String), 'text', true);
+    expect(mockGetMessageThreadId).toHaveBeenCalledWith(MY_APP_ID, 'dm-root-existing');
+    const chat = directChatForKey(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats, 'chat:chat-substitute-direct');
+    expect(chat?.dmRootMessageId).toBe('dm-root-existing');
+    expect(chat?.dmThreadId).toBe('omt_actual_thread');
+    expect(chat?.dmToGroupMessageIds).toEqual({ 'msg-id': 'msg-substitute-direct-refresh-dm-thread' });
+  });
+
   it('substituteMode direct: legacy DM thread id creates a new replyable DM root', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],
@@ -3414,6 +3464,58 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       MY_APP_ID,
       'chat-substitute-direct-b',
       expect.stringContaining('话题内回复'),
+      'interactive',
+      undefined,
+      expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),
+    );
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode direct: thread-mode DM reply falls back to root_id when saved thread id is stale', async () => {
+    setupBotState({
+      allowedUsers: ['ou_owner_only'],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_sub',
+      activeChatId: 'chat:chat-substitute-direct-b',
+      chats: {
+        'chat:chat-substitute-direct-b': {
+          chatId: 'chat-substitute-direct-b',
+          chatName: 'Ops B',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          dmRootMessageId: 'dm-root-b',
+          dmThreadId: 'omt_stale_thread',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    const event = makeUserMessageEvent({
+      senderOpenId: 'ou_sub',
+      content: JSON.stringify({ text: '旧 thread id 但 root 正确' }),
+      messageId: 'msg-substitute-dm-thread-stale-id',
+      rootId: 'dm-root-b',
+      threadId: 'omt_actual_thread',
+      chatId: 'dm-chat',
+      chatType: 'p2p',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'chat-substitute-direct-b',
+      expect.stringContaining('旧 thread id 但 root 正确'),
       'interactive',
       undefined,
       expect.objectContaining({ source: 'substitute_direct', substituteOpenId: 'ou_sub' }),
