@@ -4,6 +4,25 @@ export interface SpawnCommand {
   shell?: boolean;
 }
 
+const ANSI_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+export function parsePm2JlistOutput(raw: string): any[] {
+  const text = raw.replace(ANSI_RE, '').trim();
+  if (!text) return [];
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] !== '[') continue;
+    const end = text.lastIndexOf(']');
+    if (end < start) break;
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      // Keep scanning in case a banner contained a stray '[' before the JSON.
+    }
+  }
+  throw new Error(`pm2 jlist did not contain a JSON array: ${text.slice(0, 120)}`);
+}
+
 export function buildPm2SpawnCommand(
   pm2Script: string,
   args: string[],

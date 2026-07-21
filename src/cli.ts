@@ -66,7 +66,7 @@ import { scheduleTimeZone } from './utils/timezone.js';
 import { expandHomePath, invalidWorkingDirs } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
 import { dispatchPrimaryMessage, findStdinAliasAttachment, sendFileAttachments, sendVideoAttachments, shouldSendAsPureVideo, validateVideoAttachments } from './cli/send-dispatch.js';
-import { buildPm2SpawnCommand } from './cli/pm2-command.js';
+import { buildPm2SpawnCommand, parsePm2JlistOutput } from './cli/pm2-command.js';
 import { callDashboard, type DashboardEndpoint, type DashboardResult } from './cli/dashboard-endpoint.js';
 import { npmGlobalUpdateCwd } from './core/maintenance.js';
 import { loadDashboardSecret } from './dashboard/auth.js';
@@ -256,6 +256,10 @@ function pm2Capture(args: string[], home: string = PM2_HOME, timeoutMs = 10_000)
     throw new Error(`pm2 ${args.join(' ')} failed: ${detail}`);
   }
   return typeof r.stdout === 'string' ? r.stdout : '';
+}
+
+function pm2Jlist(home: string = PM2_HOME): any[] {
+  return parsePm2JlistOutput(pm2Capture(['jlist'], home));
 }
 
 function loadBotsJson(): any[] {
@@ -1801,7 +1805,7 @@ function sleepSyncMs(ms: number): void {
 function deleteAllBotmuxProcesses(home: string = PM2_HOME): void {
   let entries: Array<{ name: string; pid: number; online: boolean }>;
   try {
-    const apps = JSON.parse(pm2Capture(['jlist'], home)) as any[];
+    const apps = pm2Jlist(home);
     entries = (Array.isArray(apps) ? apps : [])
       .filter(a => a && (a.name === PM2_NAME || String(a.name).startsWith(`${PM2_NAME}-`)))
       .map(a => ({ name: String(a.name), pid: Number(a.pid) || 0, online: a?.pm2_env?.status === 'online' }));
@@ -1904,8 +1908,7 @@ function cmdStop(): void {
   cleanupLegacyPm2();
   let stopped = false;
   try {
-    const output = pm2Capture(['jlist']);
-    const apps = JSON.parse(output) as any[];
+    const apps = pm2Jlist();
     for (const app of apps) {
       if (app.name === PM2_NAME || app.name.startsWith(`${PM2_NAME}-`)) {
         try { runPm2(['stop', app.name]); stopped = true; } catch { /* */ }
@@ -1959,7 +1962,7 @@ async function cmdRestart(): Promise<void> {
  */
 function listBotmuxPm2Apps(): Array<{ name: string; online: boolean }> {
   try {
-    const apps = JSON.parse(pm2Capture(['jlist'])) as any[];
+    const apps = pm2Jlist();
     return (Array.isArray(apps) ? apps : [])
       .filter(a => a && (a.name === PM2_NAME || String(a.name).startsWith(`${PM2_NAME}-`)))
       .map(a => ({ name: String(a.name), online: a?.pm2_env?.status === 'online' }));
@@ -2124,8 +2127,7 @@ function warnIfLegacyBotmuxAlive(): void {
   if (!legacyPid) return;
   try { process.kill(legacyPid, 0); } catch { return; }
   try {
-    const output = pm2Capture(['jlist'], legacyHome);
-    const apps = JSON.parse(output) as any[];
+    const apps = pm2Jlist(legacyHome);
     const hasBotmux = apps.some(a => a.name === PM2_NAME || a.name.startsWith(`${PM2_NAME}-`));
     if (hasBotmux) {
       console.warn('⚠️  检测到旧版 PM2_HOME (~/.pm2) 下仍有 botmux 进程,运行 `botmux restart` 完成迁移。\n');
