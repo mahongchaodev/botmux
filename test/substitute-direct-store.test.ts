@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -76,5 +76,65 @@ describe('substitute-direct-store', () => {
     const raw = JSON.parse(readFileSync(join(process.env.SESSION_DATA_DIR!, 'substitute-direct-bindings.json'), 'utf-8'));
     expect(raw.bindings['app-x::ou_a'].chats['chat:oc_group'].directBotMention).toBe(false);
     expect(raw.bindings['app-x::ou_b'].chats['chat:oc_group'].directBotMention).toBe(true);
+  });
+
+  it('uses the latest matching binding when target and operator bindings coexist', async () => {
+    const store = await freshStore();
+    const path = join(process.env.SESSION_DATA_DIR!, 'substitute-direct-bindings.json');
+    writeFileSync(path, JSON.stringify({
+      bindings: {
+        'app-x::ou_target': {
+          larkAppId: 'app-x',
+          substituteOpenId: 'ou_target',
+          targetOpenId: 'ou_target',
+          targetName: 'Target',
+          activeChatId: 'chat:oc_group',
+          updatedAt: 100,
+          chats: {
+            'chat:oc_group': {
+              targetKey: 'chat:oc_group',
+              chatId: 'oc_group',
+              scope: 'chat',
+              anchor: 'oc_group',
+              targetName: 'Target',
+              mode: 'direct',
+              enabled: true,
+              updatedAt: 100,
+            },
+          },
+        },
+        'app-x::ou_operator': {
+          larkAppId: 'app-x',
+          substituteOpenId: 'ou_operator',
+          targetOpenId: 'ou_target',
+          targetName: 'Target',
+          activeChatId: 'chat:oc_group',
+          updatedAt: 200,
+          chats: {
+            'chat:oc_group': {
+              targetKey: 'chat:oc_group',
+              chatId: 'oc_group',
+              scope: 'chat',
+              anchor: 'oc_group',
+              targetName: 'Target',
+              mode: 'direct',
+              enabled: true,
+              updatedAt: 200,
+            },
+          },
+        },
+      },
+    }, null, 2) + '\n');
+
+    expect(store.getSubstituteDirectChatByTarget(
+      'app-x',
+      { openId: 'ou_target', name: 'Target' },
+      'oc_group',
+      'chat:oc_group',
+    )).toMatchObject({
+      substituteOpenId: 'ou_operator',
+      targetOpenId: 'ou_target',
+      chat: { targetKey: 'chat:oc_group' },
+    });
   });
 });

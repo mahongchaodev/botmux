@@ -244,23 +244,20 @@ export function getSubstituteDirectChatByTarget(
 ): { chat: SubstituteDirectChat; substituteOpenId: string; targetOpenId?: string } | undefined {
   if (!target || !chatId) return undefined;
   const strictTarget = !!targetKey && targetKey.startsWith('thread:');
-  if (target.openId) {
-    const chat = getSubstituteDirectChat(larkAppId, target.openId, targetKey)
-      ?? getSubstituteDirectChat(larkAppId, target.openId, chatId);
-    if (chat) return { chat, substituteOpenId: target.openId, targetOpenId: target.openId };
-  }
   const store = readStore();
-  for (const binding of Object.values(store.bindings)) {
-    if (binding.larkAppId !== larkAppId) continue;
+  const chatKey = substituteDirectTargetKey('chat', chatId, chatId) ?? chatId;
+  const candidates = Object.values(store.bindings)
+    .filter(binding => binding.larkAppId === larkAppId)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const binding of candidates) {
     const bindingTargetOpenId = binding.targetOpenId ?? binding.substituteOpenId;
     const matched = (target.openId && binding.substituteOpenId === target.openId)
       || (target.openId && bindingTargetOpenId === target.openId)
       || (target.userId && binding.substituteUserId === target.userId)
       || (target.unionId && binding.substituteUnionId === target.unionId)
-      || (!!target.name && (binding.targetName === target.name || (targetKey && binding.chats[targetKey]?.targetName === target.name) || (!strictTarget && binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId]?.targetName === target.name)));
+      || (!!target.name && (binding.targetName === target.name || (targetKey && binding.chats[targetKey]?.targetName === target.name) || (!strictTarget && binding.chats[chatKey]?.targetName === target.name)));
     if (!matched) continue;
-    const chat = (targetKey ? binding.chats[targetKey] : undefined)
-      ?? binding.chats[substituteDirectTargetKey('chat', chatId, chatId) ?? chatId];
+    const chat = (targetKey ? binding.chats[targetKey] : undefined) ?? binding.chats[chatKey];
     if (chat && chat.enabled !== false) {
       return {
         chat,

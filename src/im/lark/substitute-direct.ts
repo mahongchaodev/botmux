@@ -77,11 +77,12 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   anchor?: string;
   message: any;
   trigger: SubstituteTrigger;
-  direct?: { substituteOpenId: string; chat: SubstituteDirectChat };
+  direct: { substituteOpenId: string; chat: SubstituteDirectChat };
 }): Promise<boolean> {
-  const targetOpenId = input.trigger.target.openId ?? input.direct?.substituteOpenId;
+  const targetOpenId = input.trigger.target.openId ?? input.direct.substituteOpenId;
   if (!targetOpenId) return false;
-  const existing = input.direct?.chat ?? getSubstituteDirectChat(input.larkAppId, targetOpenId, input.chatId);
+  const bindingOpenId = input.direct.substituteOpenId;
+  const existing = input.direct.chat;
   if (!existing || existing.mode !== 'direct') return false;
   const p2pThreadMode = isP2pThreadMode(input.larkAppId);
   const loc = localeForBot(input.larkAppId);
@@ -103,6 +104,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   if (p2pThreadMode && dmRootMessageId && !dmRootMessageId.startsWith('omt_')) {
     try {
       dmMessageId = await replyMessage(input.larkAppId, dmRootMessageId, content, 'text', true);
+      dmThreadId = dmThreadId ?? await getMessageThreadId(input.larkAppId, dmRootMessageId).catch(() => undefined);
     } catch (err) {
       if (!isDmRootUnavailableError(err)) throw err;
       logger.warn(`[substitute-direct:${input.larkAppId}] DM root ${dmRootMessageId.substring(0, 12)} unavailable, creating a new direct thread: ${err instanceof Error ? err.message : err}`);
@@ -120,7 +122,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   }
   upsertSubstituteDirectChat({
     larkAppId: input.larkAppId,
-    substituteOpenId: targetOpenId,
+    substituteOpenId: bindingOpenId,
     targetOpenId: input.trigger.target.openId,
     substituteUserId: input.trigger.target.userId,
     substituteUnionId: input.trigger.target.unionId,
@@ -142,7 +144,7 @@ export async function forwardSubstituteGroupMessageToDm(input: {
   });
   recordSubstituteDirectForwardedMessage({
     larkAppId: input.larkAppId,
-    substituteOpenId: targetOpenId,
+    substituteOpenId: bindingOpenId,
     chatId: input.targetKey ?? existing.targetKey ?? substituteDirectTargetKey(input.scope ?? existing.scope, input.anchor ?? existing.anchor, input.chatId) ?? input.chatId,
     dmMessageId,
     groupMessageId: input.message?.message_id,

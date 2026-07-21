@@ -20,9 +20,11 @@ const mockGetChatMode = vi.fn(async () => 'group' as 'group' | 'topic' | 'p2p');
 const mockGetChatNameAndMode = vi.fn(async (_app: string, chatId: string) => ({ name: chatId === 'oc_group' ? 'Group' : chatId, mode: 'group' as const }));
 const mockReplyMessage = vi.fn(async () => 'msg-id');
 const mockSendUserMessage = vi.fn(async () => 'dm-root-msg');
+const mockGetMessageThreadId = vi.fn(async () => undefined as string | undefined);
 vi.mock('../src/im/lark/client.js', () => ({
   getChatMode: (...a: any[]) => mockGetChatMode(...a),
   getChatNameAndMode: (...a: any[]) => mockGetChatNameAndMode(...a),
+  getMessageThreadId: (...a: any[]) => mockGetMessageThreadId(...a),
   replyMessage: (...a: any[]) => mockReplyMessage(...a),
   sendUserMessage: (...a: any[]) => mockSendUserMessage(...a),
 }));
@@ -647,6 +649,35 @@ describe('tryHandleEchoCommand', () => {
     expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.dmRootMessageId).toBe('dm-root-new');
     expect(mockDirect.get(USER)?.chats?.['chat:oc_group']?.dmToGroupMessageIds).toBeUndefined();
     expect(mockSendUserMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('entering direct mode in DM thread mode stores the created thread id', async () => {
+    mockGetBot.mockReturnValue({
+      config: {
+        p2pMode: 'thread',
+        substituteMode: {
+          enabled: true,
+          targets: [{ openId: USER, name: 'User' }],
+          disclosure: 'prefix',
+        },
+      },
+    });
+    mockSendUserMessage.mockResolvedValueOnce('dm-root-msg');
+    mockGetMessageThreadId.mockResolvedValueOnce('omt_direct_thread');
+
+    await handleSubstituteDirectCardAction({
+      larkAppId: APP,
+      operatorOpenId: USER,
+      invokerOpenId: USER,
+      action: 'substitute_direct_enter',
+      chatId: 'oc_group',
+    });
+
+    expect(mockGetMessageThreadId).toHaveBeenCalledWith(APP, 'dm-root-msg');
+    expect(mockDirect.get(USER)?.chats?.['chat:oc_group']).toMatchObject({
+      dmRootMessageId: 'dm-root-msg',
+      dmThreadId: 'omt_direct_thread',
+    });
   });
 
   it('operator entering direct mode stores state under the DM sender and targets the configured substitute', async () => {

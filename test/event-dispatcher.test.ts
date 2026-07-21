@@ -133,6 +133,10 @@ vi.mock('../src/services/substitute-chat-toggle-store.js', () => ({
 
 const mockDirectBindings = new Map<string, any>();
 const directKey = (appId: string, openId: string | undefined) => `${appId}::${openId ?? ''}`;
+const directChatForKey = (chats: Record<string, any> | undefined, key: string | undefined): any => {
+  if (!chats || !key) return undefined;
+  return chats[key];
+};
 vi.mock('../src/services/substitute-direct-store.js', () => ({
   substituteDirectTargetKey: (scope: string | undefined, anchor: string | undefined, chatId?: string) => scope === 'thread' && anchor ? `thread:${anchor}` : `chat:${anchor || chatId}`,
   getSubstituteDirectBinding: (appId: string, openId: string | undefined) => mockDirectBindings.get(directKey(appId, openId)),
@@ -181,25 +185,18 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     mockDirectBindings.set(directKey(input.larkAppId, binding.substituteOpenId), binding);
     return active;
   },
-  getSubstituteDirectChatByTarget: (appId: string, target: any, chatId: string | undefined) => {
+  getSubstituteDirectChatByTarget: (appId: string, target: any, chatId: string | undefined, targetKey?: string) => {
     if (!chatId) return undefined;
-    if (target?.openId) {
-      const binding = mockDirectBindings.get(directKey(appId, target.openId))
-        ?? [...mockDirectBindings.values()].find((candidate: any) =>
-          candidate.larkAppId === appId && candidate.targetOpenId === target.openId);
-      const chats = binding?.chats;
-      const direct = chats?.[chatId] ?? chats?.[`chat:${chatId}`];
-      if (direct) return { chat: direct, substituteOpenId: binding?.substituteOpenId ?? target.openId, targetOpenId: binding?.targetOpenId ?? target.openId };
-    }
+    const chatKey = `chat:${chatId}`;
     for (const binding of mockDirectBindings.values()) {
       if (binding.larkAppId !== appId) continue;
       const matched = (target?.openId && binding.substituteOpenId === target.openId)
         || (target?.openId && binding.targetOpenId === target.openId)
         || (target?.userId && binding.substituteUserId === target.userId)
         || (target?.unionId && binding.substituteUnionId === target.unionId)
-        || (!!target?.name && (binding.targetName === target.name || binding.chats?.[chatId]?.targetName === target.name));
+        || (!!target?.name && (binding.targetName === target.name || (targetKey && binding.chats?.[targetKey]?.targetName === target.name) || binding.chats?.[chatKey]?.targetName === target.name));
       if (!matched) continue;
-      const chat = binding.chats?.[chatId] ?? binding.chats?.[`chat:${chatId}`];
+      const chat = (targetKey ? directChatForKey(binding.chats, targetKey) : undefined) ?? directChatForKey(binding.chats, chatKey);
       if (chat) return { chat, substituteOpenId: binding.substituteOpenId, targetOpenId: binding.targetOpenId };
     }
     return undefined;
@@ -208,7 +205,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     if (!chatId) return undefined;
     for (const binding of mockDirectBindings.values()) {
       if (binding.larkAppId !== appId) continue;
-      const chat = (targetKey ? binding.chats?.[targetKey] : undefined) ?? binding.chats?.[chatId];
+      const chat = (targetKey ? directChatForKey(binding.chats, targetKey) : undefined) ?? directChatForKey(binding.chats, `chat:${chatId}`);
       if (chat?.enabled !== false && chat?.mode === 'direct') {
         if (opts?.requireDirectBotMention === true && chat.directBotMention !== true) continue;
         if (opts?.requireUnconfiguredBotMention === true && chat.directBotMention !== undefined) continue;
@@ -229,7 +226,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
       if (!chatId) return undefined;
       for (const binding of mockDirectBindings.values()) {
         if (binding.larkAppId !== appId) continue;
-        const chat = (targetKey ? binding.chats?.[targetKey] : undefined) ?? binding.chats?.[chatId];
+        const chat = (targetKey ? directChatForKey(binding.chats, targetKey) : undefined) ?? directChatForKey(binding.chats, `chat:${chatId}`);
         if (chat?.enabled !== false && chat?.mode === 'direct') {
           if (mode === 'enabled' && chat.directBotMention !== true) continue;
           if (mode === 'unconfigured' && chat.directBotMention !== undefined) continue;
@@ -254,11 +251,11 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
     binding.substituteUserId = input.substituteUserId;
     binding.substituteUnionId = input.substituteUnionId;
     binding.targetName = input.targetName;
-    const prior = binding.chats?.[input.chatId];
+    const targetKey = input.targetKey ?? input.chatId;
+    const prior = binding.chats?.[targetKey];
     if (!input.preserveExistingChats) binding.chats = {};
-    binding.chats[input.targetKey ?? input.chatId] = { ...input, dmToGroupMessageIds: prior?.dmToGroupMessageIds, updatedAt: Date.now() };
-    if (input.targetKey) binding.chats[input.chatId] = binding.chats[input.targetKey];
-    binding.activeChatId = input.chatId;
+    binding.chats[targetKey] = { ...input, dmToGroupMessageIds: prior?.dmToGroupMessageIds, updatedAt: Date.now() };
+    binding.activeChatId = targetKey;
     binding.updatedAt = Date.now();
     mockDirectBindings.set(k, binding);
     return binding;
@@ -274,7 +271,7 @@ vi.mock('../src/services/substitute-direct-store.js', () => ({
   },
   recordSubstituteDirectForwardedMessage: (input: any) => {
     const binding = mockDirectBindings.get(directKey(input.larkAppId, input.substituteOpenId));
-    const chat = input.chatId ? (binding?.chats?.[input.chatId] ?? binding?.chats?.[`chat:${input.chatId}`] ?? binding?.chats?.[`thread:${input.chatId}`]) : undefined;
+    const chat = input.chatId ? directChatForKey(binding?.chats, input.chatId) : undefined;
     if (!chat || !input.dmMessageId || !input.groupMessageId) return;
     chat.dmToGroupMessageIds = { ...(chat.dmToGroupMessageIds ?? {}), [input.dmMessageId]: input.groupMessageId };
   },
@@ -2151,9 +2148,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2186,19 +2183,76 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     );
     expect(mockSendUserMessage.mock.calls[0][2]).toContain('@Sub Person help with this');
     expect(mockSendUserMessage.mock.calls[0][2]).not.toContain('[原群消息:');
-    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct']?.dmToGroupMessageIds)
+    expect(directChatForKey(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats, 'chat:chat-substitute-direct')?.dmToGroupMessageIds)
       .toEqual({ 'sent-dm-msg': 'msg-substitute-direct' });
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))).toMatchObject({
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': expect.objectContaining({
+        'chat:chat-substitute-direct': expect.objectContaining({
           chatName: 'Ops Group',
           targetName: 'Sub Person',
         }),
       },
     });
+  });
+
+  it('substituteMode direct: group forwarding records history under the binding owner', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        disclosure: 'prefix',
+      },
+    });
+    mockDirectBindings.set(directKey(MY_APP_ID, 'ou_operator'), {
+      larkAppId: MY_APP_ID,
+      substituteOpenId: 'ou_operator',
+      targetOpenId: 'ou_sub',
+      activeChatId: 'chat:chat-substitute-direct',
+      chats: {
+        'chat:chat-substitute-direct': {
+          chatId: 'chat-substitute-direct',
+          chatName: 'Ops Group',
+          targetName: 'Sub Person',
+          mode: 'direct',
+          disclosure: 'prefix',
+          updatedAt: Date.now(),
+        },
+      },
+      updatedAt: Date.now(),
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatName.mockResolvedValue('Ops Group');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-direct-owner-history',
+      chatId: 'chat-substitute-direct',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockSendUserMessage).toHaveBeenCalledWith(
+      MY_APP_ID,
+      'ou_sub',
+      expect.stringContaining('Ops Group'),
+      'text',
+    );
+    expect(directChatForKey(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_operator'))?.chats, 'chat:chat-substitute-direct')?.dmToGroupMessageIds)
+      .toEqual({ 'sent-dm-msg': 'msg-substitute-direct-owner-history' });
+    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_operator'))).toMatchObject({
+      targetOpenId: 'ou_sub',
+      activeChatId: 'chat:chat-substitute-direct',
+    });
+    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))).toBeUndefined();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
   it('substituteMode direct: @bot forwards group text when the direct session enables bot mentions', async () => {
@@ -2215,9 +2269,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       substituteOpenId: 'ou_sub',
       targetOpenId: 'ou_sub',
       targetName: 'Sub Person',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2250,7 +2304,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       'text',
     );
     expect(mockSendUserMessage.mock.calls[0][2]).toContain('@Bot help with this');
-    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct']?.dmToGroupMessageIds)
+    expect(directChatForKey(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats, 'chat:chat-substitute-direct')?.dmToGroupMessageIds)
       .toEqual({ 'sent-dm-msg': 'msg-substitute-direct-bot-mention' });
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -2271,9 +2325,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       substituteOpenId: 'ou_sub',
       targetOpenId: 'ou_sub',
       targetName: 'Sub Person',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2319,9 +2373,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       substituteOpenId: 'ou_sub_disabled',
       targetOpenId: 'ou_sub_disabled',
       targetName: 'Disabled Sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Disabled Sub',
@@ -2338,9 +2392,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       substituteOpenId: 'ou_sub_enabled',
       targetOpenId: 'ou_sub_enabled',
       targetName: 'Enabled Sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Enabled Sub',
@@ -2396,9 +2450,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       substituteOpenId: 'ou_sub',
       targetOpenId: 'ou_sub',
       targetName: 'Sub Person',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2444,9 +2498,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2476,7 +2530,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
 
     expect(mockReplyMessage).toHaveBeenCalledWith(MY_APP_ID, 'stale-dm-root', expect.any(String), 'text', true);
     expect(mockSendUserMessage).toHaveBeenCalledWith(MY_APP_ID, 'ou_sub', expect.stringContaining('Ops Group'), 'text');
-    const chat = mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct'];
+    const chat = directChatForKey(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats, 'chat:chat-substitute-direct');
     expect(chat?.dmRootMessageId).toBe('new-dm-root');
     expect(chat?.dmToGroupMessageIds).toEqual({ 'new-dm-root': 'msg-substitute-direct-recreate-dm-root' });
   });
@@ -2493,9 +2547,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2526,7 +2580,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(mockReplyMessage).not.toHaveBeenCalledWith(MY_APP_ID, 'omt_legacy_thread', expect.anything(), 'text', true);
     expect(mockSendUserMessage).toHaveBeenCalledWith(MY_APP_ID, 'ou_sub', expect.stringContaining('Ops Group'), 'text');
     expect(mockGetMessageThreadId).toHaveBeenCalledWith(MY_APP_ID, 'new-dm-root');
-    const chat = mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct'];
+    const chat = directChatForKey(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats, 'chat:chat-substitute-direct');
     expect(chat?.dmRootMessageId).toBe('new-dm-root');
     expect(chat?.dmThreadId).toBe('omt_new_thread');
     expect(chat?.dmToGroupMessageIds).toEqual({ 'new-dm-root': 'msg-substitute-direct-legacy-dm-thread' });
@@ -2544,9 +2598,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2580,7 +2634,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     );
     expect(mockSendUserMessage.mock.calls[0][2]).toContain('image');
     expect(mockSendUserMessage.mock.calls[0][2]).not.toContain('[原群消息:');
-    expect(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats?.['chat-substitute-direct']?.dmToGroupMessageIds)
+    expect(directChatForKey(mockDirectBindings.get(directKey(MY_APP_ID, 'ou_sub'))?.chats, 'chat:chat-substitute-direct')?.dmToGroupMessageIds)
       .toEqual({ 'sent-dm-msg': 'msg-substitute-direct-image' });
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
@@ -2601,9 +2655,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       targetOpenId: 'ou_sub',
       substituteUserId: 'u_sub',
       targetName: 'Sub Person',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2637,7 +2691,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       targetOpenId: 'ou_sub',
       substituteUserId: 'u_sub',
       chats: {
-        'chat-substitute-direct': expect.objectContaining({
+        'chat:chat-substitute-direct': expect.objectContaining({
           mode: 'direct',
           targetName: 'Sub Person',
         }),
@@ -2773,9 +2827,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2822,9 +2876,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_owner',
       targetName: 'Sub Person',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2868,9 +2922,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       substituteOpenId: 'ou_owner',
       targetOpenId: 'ou_sub',
       targetName: 'Sub Person',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -2916,9 +2970,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: undefined,
@@ -2960,9 +3014,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -3011,9 +3065,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -3061,9 +3115,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -3103,9 +3157,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -3158,9 +3212,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -3219,9 +3273,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: undefined,
@@ -3261,9 +3315,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct-a',
+      activeChatId: 'chat:chat-substitute-direct-a',
       chats: {
-        'chat-substitute-direct-a': {
+        'chat:chat-substitute-direct-a': {
           chatId: 'chat-substitute-direct-a',
           chatName: 'Ops A',
           targetName: 'Sub Person',
@@ -3272,7 +3326,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
           dmRootMessageId: 'dm-root-a',
           updatedAt: Date.now(),
         },
-        'chat-substitute-direct-b': {
+        'chat:chat-substitute-direct-b': {
           chatId: 'chat-substitute-direct-b',
           chatName: 'Ops B',
           targetName: 'Sub Person',
@@ -3329,9 +3383,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct-b',
+      activeChatId: 'chat:chat-substitute-direct-b',
       chats: {
-        'chat-substitute-direct-b': {
+        'chat:chat-substitute-direct-b': {
           chatId: 'chat-substitute-direct-b',
           chatName: 'Ops B',
           targetName: 'Sub Person',
@@ -3500,9 +3554,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -3540,9 +3594,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',
@@ -3574,9 +3628,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     mockDirectBindings.set(directKey(MY_APP_ID, 'ou_sub'), {
       larkAppId: MY_APP_ID,
       substituteOpenId: 'ou_sub',
-      activeChatId: 'chat-substitute-direct',
+      activeChatId: 'chat:chat-substitute-direct',
       chats: {
-        'chat-substitute-direct': {
+        'chat:chat-substitute-direct': {
           chatId: 'chat-substitute-direct',
           chatName: 'Ops Group',
           targetName: 'Sub Person',

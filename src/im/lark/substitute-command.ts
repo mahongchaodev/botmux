@@ -1,6 +1,6 @@
 import { canOperate, extractMessageTextForRouting } from './event-dispatcher.js';
 import { stripLeadingMentions } from './message-parser.js';
-import { getChatMode, getChatNameAndMode, replyMessage, sendUserMessage } from './client.js';
+import { getChatMode, getChatNameAndMode, getMessageThreadId, replyMessage, sendUserMessage } from './client.js';
 import { isSubstituteEnabledForChat, setSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
 import {
   clearSubstituteDirectChat,
@@ -49,10 +49,6 @@ function substituteTargetForDirectAction(larkAppId: string, openId: string | und
   const cfg = getBot(larkAppId).config.substituteMode;
   const targetsWithOpenId = cfg?.targets?.filter(t => t.openId) ?? [];
   return targetsWithOpenId.length === 1 ? targetsWithOpenId[0] : undefined;
-}
-
-function substituteBindingOpenIdForControls(larkAppId: string, openId: string | undefined): string | undefined {
-  return openId;
 }
 
 function canUseDirectControls(larkAppId: string, openId: string | undefined): boolean {
@@ -117,8 +113,7 @@ async function listSubstituteDirectChats(
   activeSessions?: Iterable<DaemonSession> | Map<string, DaemonSession>,
 ): Promise<DirectChatRow[]> {
   if (!canUseDirectControls(larkAppId, openId)) return [];
-  const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
-  const binding = getSubstituteDirectBindingForSender(larkAppId, bindingOpenId);
+  const binding = getSubstituteDirectBindingForSender(larkAppId, openId);
   const defaultDirectBotMention = getBot(larkAppId).config.substituteMode?.directBotMention === true;
   if (activeSessions) {
     const iterable = activeSessions instanceof Map ? activeSessions.values() : activeSessions;
@@ -517,11 +512,12 @@ async function applyDirectAction(
     const dmRootMessageId = threadMode
       ? await sendUserMessage(larkAppId, openId, t('cmd.substitute.direct_thread_started', { chat: row.name || row.chatId }, loc), 'text')
       : undefined;
-    const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
-    if (!bindingOpenId) return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
+    const dmThreadId = dmRootMessageId
+      ? await getMessageThreadId(larkAppId, dmRootMessageId).catch(() => undefined)
+      : undefined;
     upsertSubstituteDirectChat({
       larkAppId,
-      substituteOpenId: bindingOpenId,
+      substituteOpenId: openId,
       targetOpenId: target.openId,
       substituteUserId: target.userId,
       substituteUnionId: target.unionId,
@@ -537,7 +533,7 @@ async function applyDirectAction(
       mode: 'direct',
       disclosure: getBot(larkAppId).config.substituteMode?.disclosure,
       dmRootMessageId,
-      dmThreadId: dmRootMessageId?.startsWith('omt_') ? dmRootMessageId : undefined,
+      dmThreadId,
       resetDmHistory: threadMode,
       directBotMention: row.directBotMentionConfigured ? undefined : getBot(larkAppId).config.substituteMode?.directBotMention === true,
       preserveExistingChats: threadMode,
@@ -556,7 +552,7 @@ async function applyDirectAction(
     const target = substituteTargetForDirectAction(larkAppId, openId);
     const ok = setSubstituteDirectChatBotMention({
       larkAppId,
-      substituteOpenId: substituteBindingOpenIdForControls(larkAppId, openId),
+      substituteOpenId: openId,
       targetKeyOrChatId: row.targetKey,
       enabled,
       targetOpenId: target?.openId,
@@ -580,8 +576,7 @@ async function applyDirectAction(
   }
   if (action === 'substitute_direct_exit') {
     const { deactivateSubstituteDirectChat } = await import('../../services/substitute-direct-store.js');
-    const bindingOpenId = substituteBindingOpenIdForControls(larkAppId, openId);
-    const existed = deactivateSubstituteDirectChat(larkAppId, bindingOpenId, row.targetKey);
+    const existed = deactivateSubstituteDirectChat(larkAppId, openId, row.targetKey);
     return { ok: existed, message: existed ? t('cmd.substitute.direct_exit_ok', { chat: row.name || row.chatId }, loc) : t('cmd.substitute.direct_exit_none', undefined, loc) };
   }
   if (action === 'substitute_direct_leave_group') {
@@ -596,8 +591,8 @@ async function applyDirectAction(
         if (closeSession) await closeSession(sessionId);
       }
     }
-    clearSubstituteDirectChatsByGroup(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.chatId)
-      || clearSubstituteDirectChat(larkAppId, substituteBindingOpenIdForControls(larkAppId, openId), row.targetKey);
+    clearSubstituteDirectChatsByGroup(larkAppId, openId, row.chatId)
+      || clearSubstituteDirectChat(larkAppId, openId, row.targetKey);
     return { ok: true, message: t('cmd.substitute.direct_leave_group_ok', { chat: row.name || row.chatId }, loc) };
   }
   return { ok: false, message: t('cmd.substitute.direct_bad_chat', undefined, loc) };
