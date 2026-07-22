@@ -13,7 +13,9 @@ on:
 
 jobs:
   desktop:
+    if: github.actor == 'deepcoldy' && github.triggering_actor == 'deepcoldy'
     runs-on: macos-14
+    environment: macos-signing
     permissions:
       contents: read
     env:

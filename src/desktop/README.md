@@ -4,7 +4,7 @@
 
 ## 正式发布
 
-`.github/workflows/release.yml` 在 macOS runner 上完成 Universal 构建、Developer ID 签名、Apple 公证和 stapling，再把 DMG/ZIP 作为附件加入同一个 GitHub Release。仓库需要配置以下 Actions Secrets：
+`.github/workflows/release.yml` 在 macOS runner 上完成 Universal 构建、Developer ID 签名、Apple 公证和 stapling，再把 DMG/ZIP 作为附件加入同一个 GitHub Release。签名 job 只接受 `deepcoldy` 发起或重新运行，并且必须通过受保护的 `macos-signing` Environment 审批。以下凭据配置为该 Environment 的 Secrets，不应配置成仓库级 Secrets：
 
 需要为已有版本重新生成桌面附件时，可以手动运行 `Release` workflow 并填写 `release_tag`。该模式只覆盖对应 Release 的 macOS 附件并校验上传内容，不会再次发布 npm、修改 tag 或改写 Release 正文。
 
