@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { resolveBundledRuntimeCandidate } from '../../src/desktop/main/bundled-runtime.js';
 
@@ -35,5 +37,11 @@ describe('bundled desktop runtime', () => {
 
     expect(candidate.nodePath).toBe(process.execPath);
     expect(candidate.root).toBe('/repo');
+  });
+
+  it('keeps the architecture-qualified bundled binaries when merging a Universal app', () => {
+    const config = readFileSync(resolve(import.meta.dirname, '../../electron-builder.yml'), 'utf8');
+
+    expect(config).toContain("x64ArchFiles: 'Contents/Resources/{node/**,runtime/node_modules/.pnpm/**}'");
   });
 });
