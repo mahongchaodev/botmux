@@ -6326,6 +6326,13 @@ async function spawnCli(
   else delete childEnv.BOTMUX_CHAT_TYPE;
   childEnv.BOTMUX_LARK_APP_ID = cfg.larkAppId;
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
+  // Session owner under the standard BOTMUX_* name (the riff backend already
+  // exposes it; `__OWNER_OPEN_ID` stays for back-compat). Custom CLI wrappers
+  // use it for per-user permission isolation. Advisory identity only — botmux's
+  // own authz paths (v3 command authority, host.ts) ignore env owner values and
+  // resolve the current-turn caller from turn provenance instead.
+  if (cfg.ownerOpenId) childEnv.BOTMUX_OWNER_OPEN_ID = cfg.ownerOpenId;
+  else delete childEnv.BOTMUX_OWNER_OPEN_ID;
   // NOTE: under read isolation `botmux send` gets this bot's secret from the worker-
   // written cred FILE in its BOT_HOME (send-cred.json, see sendCredFilePath) located
   // via the BOTMUX_LARK_APP_ID above — NOT from the env. The secret is deliberately kept OUT
